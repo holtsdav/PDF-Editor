@@ -9,14 +9,16 @@ import type { TextSession } from '../pdf/text-session';
 import type { VaultSessions } from '../pdf/vault-sessions';
 import { growBox, rotatedHandle, transformBox } from '../pdf/box-geometry';
 import type { ResizeHandle } from '../pdf/box-geometry';
+import { InkLayer } from './ink-layer';
+import type { EditorTool } from './ink-layer';
 
 interface FieldControl {
   frame: HTMLElement; input: HTMLInputElement | HTMLTextAreaElement;
-  preview?: Rect; dispose?: () => void;
+  preview?: Rect; dispose?: () => void; cancel?: () => void;
 }
-interface PageLayer { page: NativePage; layer: HTMLElement; controls: Map<string, FieldControl>; cancelPlacement?: () => void }
+interface PageLayer { page: NativePage; layer: HTMLElement; controls: Map<string, FieldControl>; ink: InkLayer; cancelPlacement?: () => void }
 interface EditorState {
-  editing: boolean; fontSize: number; selected?: string;
+  tool: EditorTool; fontSize: number; markerWidth: number; penWidth: number; selected?: string; selectedStroke?: string;
   focused?: { input: HTMLInputElement | HTMLTextAreaElement; page: number; name: string };
 }
 
@@ -26,20 +28,25 @@ export class TextEditor extends Component {
   private sessions: VaultSessions;
   private session?: TextSession;
   private toolbar: HTMLElement;
-  private toggle: HTMLButtonElement;
+  private tools = new Map<EditorTool, HTMLButtonElement>();
   private status: HTMLElement;
   private message: HTMLElement;
   private saveButton: HTMLButtonElement;
   private removeButton: HTMLButtonElement;
+  private undoButton: HTMLButtonElement;
   private editControls: HTMLElement;
   private size: HTMLSelectElement;
   private menu?: Menu;
   private layers = new Map<HTMLElement, PageLayer>();
-  private nativeInputs = new Map<HTMLInputElement | HTMLTextAreaElement, boolean>();
-  private editing = false;
+  private nativeInputs = new Map<HTMLInputElement | HTMLTextAreaElement, { readOnly: boolean; tabIndex: number; ariaHidden: string | null }>();
+  private tool: EditorTool = 'select';
+  private markerWidth = 14;
+  private penWidth = 2;
+  private loadError = '';
   private loaded = true;
   private fontSize = 14;
   private selected?: string;
+  private selectedStroke?: string;
   private focused?: { input: HTMLInputElement | HTMLTextAreaElement; page: number; name: string };
   private timer?: number;
   private unsubscribe?: () => void;
@@ -48,25 +55,30 @@ export class TextEditor extends Component {
 
   constructor(app: App, native: NativePdf, sessions: VaultSessions, state?: EditorState) {
     super(); this.app = app; this.native = native; this.sessions = sessions;
-    if (state) { this.editing = state.editing; this.fontSize = state.fontSize; this.selected = state.selected; this.focused = state.focused; }
+    if (state) { this.tool = state.tool; this.fontSize = state.fontSize; this.markerWidth = state.markerWidth; this.penWidth = state.penWidth;
+      this.selected = state.selected; this.selectedStroke = state.selectedStroke; this.focused = state.focused; }
     const doc = native.element.ownerDocument;
     this.register(usePdfFont(doc));
     native.element.classList.add('pdf-form-studio-view');
     this.toolbar = doc.createElement('div'); this.toolbar.className = 'pdf-form-studio-toolbar';
-    this.toolbar.setAttribute('role', 'toolbar'); this.toolbar.setAttribute('aria-label', 'PDF text editor');
+    this.toolbar.setAttribute('role', 'toolbar'); this.toolbar.setAttribute('aria-label', 'PDF editor');
     const button = (parent: HTMLElement, label: string, icon: string, callback: () => void): HTMLButtonElement => {
       const element = doc.createElement('button'); element.type = 'button'; element.className = 'clickable-icon pdf-form-studio-icon';
       setIcon(element, icon); setTooltip(element, label);
       this.registerDomEvent(element, 'click', callback); parent.append(element); return element;
     };
-    this.toggle = button(this.toolbar, 'Edit text', 'type', () => { void this.toggleEditing(); });
+    for (const [tool, label, icon] of [
+      ['select', 'Select and type — click existing text to edit', 'mouse-pointer-2'], ['text', 'Add text box — click or drag on the PDF', 'type'],
+      ['marker', 'Marker — drag to highlight; Shift makes a straight line', 'highlighter'], ['scribble', 'Scribble — draw on the PDF', 'pencil']
+    ] as const) this.tools.set(tool, button(this.toolbar, label, icon, () => this.setTool(this.tool === tool ? 'select' : tool)));
     this.editControls = doc.createElement('div'); this.editControls.className = 'pdf-form-studio-edit-controls'; this.toolbar.append(this.editControls);
     const size = this.size = doc.createElement('select'); size.setAttribute('aria-label', 'Text size');
     size.className = 'pdf-form-studio-size'; setTooltip(size, 'Text size');
-    for (const number of [8, 10, 12, 14, 16, 18, 24, 32, 48]) {
-      const option = doc.createElement('option'); option.value = String(number); option.textContent = `${number} pt`; size.append(option);
-    }
-    size.value = String(this.fontSize); this.registerDomEvent(size, 'change', () => {
+    this.registerDomEvent(size, 'change', () => {
+      if (this.tool === 'marker' || this.tool === 'scribble') {
+        if (this.tool === 'marker') this.markerWidth = Number(size.value); else this.penWidth = Number(size.value);
+        return;
+      }
       this.fontSize = Number(size.value);
       const field = this.session?.snapshot.fields.find(field => field.name === this.selected && field.owned);
       if (field) {
@@ -81,12 +93,14 @@ export class TextEditor extends Component {
     });
     this.editControls.append(size);
     this.saveButton = button(this.editControls, 'Save PDF', 'save', () => { void this.save(); });
-    this.removeButton = button(this.editControls, 'Remove text box', 'trash-2', () => {
-      if (this.selected) { this.focused = undefined; this.session?.delete(this.selected); this.selected = undefined; this.updateStatus(); this.refresh(); this.scheduleSave(); }
+    this.removeButton = button(this.editControls, 'Remove selection', 'trash-2', () => this.removeSelection());
+    this.undoButton = button(this.editControls, 'Undo last new mark', 'undo-2', () => {
+      try { this.session?.undoStroke(); this.selectedStroke = undefined; this.updateStatus(); this.refresh(); void this.save(); }
+      catch (error) { this.showError(error); }
     });
     this.status = doc.createElement('span'); this.status.className = 'pdf-form-studio-status'; this.status.setAttribute('role', 'status');
     this.editControls.append(this.status);
-    const more = button(this.toolbar, 'PDF text options', 'ellipsis', () => this.openMenu(more));
+    const more = button(this.toolbar, 'PDF options', 'ellipsis', () => this.openMenu(more));
     this.message = doc.createElement('div'); this.message.className = 'pdf-form-studio-message';
     this.message.setAttribute('role', 'status');
     this.mountToolbar();
@@ -102,8 +116,11 @@ export class TextEditor extends Component {
     this.register(() => observer.disconnect());
     this.registerDomEvent(doc, 'pointerdown', event => {
       if (this.focused && event.target !== this.focused.input) this.focused = undefined;
-      if (event.target instanceof doc.defaultView!.Node && !native.element.contains(event.target)) {
-        this.selected = undefined; this.updateStatus(); this.refresh();
+      const target = event.target;
+      if (target instanceof doc.defaultView!.Element && !target.closest('.pdf-form-studio-box, .pdf-form-studio-ink-control, .pdf-form-studio-toolbar')) {
+        this.selected = undefined; this.selectedStroke = undefined; this.updateStatus(); this.refresh();
+        const active = doc.activeElement;
+        if (active instanceof doc.defaultView!.HTMLElement && [...this.layers.values()].some(entry => entry.layer.contains(active))) active.blur();
       }
     }, true);
     this.registerDomEvent(doc, 'focusin', event => {
@@ -121,19 +138,34 @@ export class TextEditor extends Component {
     // Live Preview handles shortcuts before an embedded input's bubble phase.
     // Claim Save at the window capture phase, scoped to this editor's controls.
     this.registerDomEvent(doc.defaultView!, 'keydown', event => {
-      if (!this.editing || !(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 's') return;
       const target = event.target;
-      if (!(target instanceof doc.defaultView!.Node) || ![...this.layers.values()].some(entry => entry.layer.contains(target))) return;
-      event.preventDefault(); event.stopImmediatePropagation(); void this.save();
+      if (!(target instanceof doc.defaultView!.Node) || (!native.element.contains(target) && !(event.key === 'Escape' && this.tool !== 'select' && target === doc.body))) return;
+      if (event.key === 'Escape') {
+        this.setTool('select'); this.selected = undefined; this.selectedStroke = undefined;
+        if (target instanceof doc.defaultView!.HTMLElement) target.blur();
+        this.updateStatus(); this.refresh(); return;
+      }
+      if (!(event.metaKey || event.ctrlKey)) return;
+      if (event.key.toLowerCase() === 's' && [...this.layers.values()].some(entry => entry.layer.contains(target))) {
+        event.preventDefault(); event.stopImmediatePropagation(); void this.save();
+      }
+      if (event.key.toLowerCase() === 'z' && !event.shiftKey && this.session?.canUndoStroke
+        && !(target instanceof doc.defaultView!.HTMLInputElement || target instanceof doc.defaultView!.HTMLTextAreaElement)) {
+        event.preventDefault(); event.stopImmediatePropagation(); this.session.undoStroke(); this.selectedStroke = undefined; void this.save();
+      }
     }, true);
     this.updateStatus();
-    if (this.editing) void this.openSession().then(() => { this.updateStatus(); this.refresh(); }).catch(error => this.showError(error));
+    void this.openSession().then(() => { this.updateStatus(); this.refresh(); }).catch(error => {
+      if (!this.loaded) return;
+      this.loadError = error instanceof Error ? error.message : String(error); this.updateStatus();
+    });
   }
 
   matches(native: NativePdf): boolean { return this.native.file === native.file && this.native.source === native.source && this.native.element === native.element; }
   get file() { return this.native.file; }
   captureState(native?: NativePdf): EditorState | undefined {
-    return !native || this.native.file === native.file ? { editing: this.editing, fontSize: this.fontSize, selected: this.selected, focused: this.focused } : undefined;
+    return !native || this.native.file === native.file ? { tool: this.tool, fontSize: this.fontSize, markerWidth: this.markerWidth, penWidth: this.penWidth,
+      selected: this.selected, selectedStroke: this.selectedStroke, focused: this.focused } : undefined;
   }
   private async openSession(): Promise<void> {
     if (this.session) return;
@@ -144,18 +176,19 @@ export class TextEditor extends Component {
     this.unsubscribe = session.subscribe(() => { this.updateStatus(); this.refresh(); });
   }
 
-  private async toggleEditing(): Promise<void> {
-    const wasEditing = this.editing;
+  private setTool(tool: EditorTool): void {
+    if (!this.session || this.session.status === 'conflict') return;
+    for (const entry of this.layers.values()) { entry.cancelPlacement?.(); entry.ink.cancel(); for (const control of entry.controls.values()) control.cancel?.(); }
+    this.tool = tool; this.selected = undefined; this.selectedStroke = undefined;
+    this.updateStatus(); this.refresh();
+  }
+
+  private removeSelection(): void {
     try {
-      await this.openSession();
-      if (!this.loaded || !this.session) return;
-      if (this.editing) { this.editing = false; this.focused = undefined; this.releaseFocus(); await this.session.save(); }
-      else this.editing = true;
+      if (this.selectedStroke) { this.session?.deleteStroke(this.selectedStroke); this.selectedStroke = undefined; void this.save(); }
+      else if (this.selected) { this.focused = undefined; this.session?.delete(this.selected); this.selected = undefined; this.scheduleSave(); }
       this.updateStatus(); this.refresh();
-    } catch (error) {
-      if (wasEditing) { this.editing = true; this.refresh(); }
-      this.showError(error);
-    }
+    } catch (error) { this.showError(error); }
   }
 
   private showError(error: unknown): void {
@@ -169,24 +202,39 @@ export class TextEditor extends Component {
   private updateStatus(): void {
     const session = this.session;
     const selected = session?.snapshot.fields.find(field => field.name === this.selected && field.owned);
-    this.size.value = String(selected?.fontSize ?? this.fontSize);
-    this.toggle.replaceChildren();
-    setIcon(this.toggle, this.editing ? 'check' : 'type');
-    setTooltip(this.toggle, this.editing ? 'Done editing' : 'Edit text — click or drag on the PDF to add text');
-    this.toggle.setAttribute('aria-pressed', String(this.editing));
-    this.editControls.hidden = !this.editing;
-    this.native.element.classList.toggle('pdf-form-studio-editing', this.editing);
+    const drawing = this.tool === 'marker' || this.tool === 'scribble';
+    const sizeMode = drawing ? this.tool : 'text';
+    if (this.size.dataset.mode !== sizeMode) {
+      this.size.dataset.mode = sizeMode; this.size.replaceChildren();
+      for (const number of sizeMode === 'marker' ? [8, 14, 22] : sizeMode === 'scribble' ? [1, 2, 4] : [8, 10, 12, 14, 16, 18, 24, 32, 48]) {
+        const option = this.size.ownerDocument.createElement('option'); option.value = String(number); option.textContent = `${number} pt`; this.size.append(option);
+      }
+      const label = drawing ? (this.tool === 'marker' ? 'Marker width' : 'Pen width') : 'Text size';
+      this.size.setAttribute('aria-label', label); setTooltip(this.size, label);
+    }
+    this.size.value = String(drawing ? (this.tool === 'marker' ? this.markerWidth : this.penWidth) : selected?.fontSize ?? this.fontSize);
+    this.size.hidden = !drawing && this.tool !== 'text' && !selected;
+    this.size.disabled = !session || session.status === 'conflict' || !!selected?.readOnly;
+    for (const [tool, button] of this.tools) {
+      button.setAttribute('aria-pressed', String(this.tool === tool)); button.disabled = !session || session.status === 'conflict';
+    }
+    this.editControls.hidden = !session?.dirty && !this.selected && !this.selectedStroke && this.tool === 'select';
+    this.native.element.classList.toggle('pdf-form-studio-editing', !!session);
+    this.native.element.dataset.pdfTool = this.tool;
     this.saveButton.disabled = !session?.dirty || session.status === 'conflict';
-    this.removeButton.disabled = !this.editing || !selected || selected.readOnly || session?.status === 'conflict';
-    this.removeButton.hidden = !this.selected;
+    const stroke = session?.snapshot.strokes.find(stroke => stroke.id === this.selectedStroke);
+    this.removeButton.disabled = (!selected && !stroke) || !!selected?.readOnly || !!stroke?.readOnly || session?.status === 'conflict';
+    this.removeButton.hidden = !selected && !stroke;
+    setTooltip(this.removeButton, stroke ? 'Remove mark' : 'Remove text box');
+    this.undoButton.hidden = !session?.canUndoStroke; this.undoButton.disabled = session?.status === 'conflict';
     const status = session ? ({ saved: 'Saved to PDF', saving: 'Saving…', unsaved: 'Waiting to save', error: 'Save failed', conflict: 'File changed' }[session.status]) : 'Loading…';
     this.status.replaceChildren();
     setIcon(this.status, session?.status === 'saved' ? 'check' : session?.status === 'error' || session?.status === 'conflict' ? 'triangle-alert' : 'loader-circle');
     setTooltip(this.status, status); this.status.dataset.state = session?.status;
     const accessible = this.status.ownerDocument.createElement('span'); accessible.className = 'pdf-form-studio-sr-only'; accessible.textContent = status;
     this.status.append(accessible);
-    this.message.textContent = session?.error || '';
-    this.message.classList.toggle('is-error', session?.status === 'error' || session?.status === 'conflict');
+    this.message.textContent = session?.error || this.loadError;
+    this.message.classList.toggle('is-error', !!this.loadError || session?.status === 'error' || session?.status === 'conflict');
   }
 
   private mountToolbar(): void {
@@ -219,7 +267,7 @@ export class TextEditor extends Component {
     const modal = new Modal(this.app); this.register(() => modal.close());
     const action = kind === 'original' ? 'Restore original backup' : 'Undo last restore';
     modal.setTitle(action + '?');
-    modal.contentEl.createEl('p', { text: 'This replaces the PDF and discards pending text. The current saved PDF is kept in the restore recovery slot first, so this action can be reversed.' });
+    modal.contentEl.createEl('p', { text: 'This replaces the PDF and discards pending edits. The current saved PDF is kept in the restore recovery slot first, so this action can be reversed.' });
     const confirm = modal.contentEl.createEl('button', { text: action, cls: 'mod-warning' });
     confirm.addEventListener('click', () => { modal.close(); this.focused = undefined; void this.sessions.restore(this.native.file, kind).catch(error => this.showError(error)); });
     modal.open();
@@ -247,8 +295,8 @@ export class TextEditor extends Component {
     const modal = new Modal(this.app);
     this.register(() => modal.close());
     modal.setTitle('Reload this PDF?');
-    modal.contentEl.createEl('p', { text: 'Reloading discards the pending text shown here and reads the current PDF from disk.' });
-    const button = modal.contentEl.createEl('button', { text: 'Reload and discard pending text', cls: 'mod-warning' });
+    modal.contentEl.createEl('p', { text: 'Reloading discards the pending text and marks shown here and reads the current PDF from disk.' });
+    const button = modal.contentEl.createEl('button', { text: 'Reload and discard pending edits', cls: 'mod-warning' });
     button.addEventListener('click', () => { modal.close(); reload(); });
     modal.open();
   }
@@ -256,9 +304,10 @@ export class TextEditor extends Component {
   refresh(): void {
     if (!this.loaded) return;
     for (const input of this.native.textInputs()) {
-      if (!this.nativeInputs.has(input)) this.nativeInputs.set(input, input.readOnly);
+      if (!this.nativeInputs.has(input)) this.nativeInputs.set(input, { readOnly: input.readOnly, tabIndex: input.tabIndex, ariaHidden: input.getAttribute('aria-hidden') });
       // Native form input changes do not participate in the verified vault writer.
       input.readOnly = true;
+      if (this.session) { input.tabIndex = -1; input.setAttribute('aria-hidden', 'true'); }
     }
     for (const input of this.nativeInputs.keys()) if (!input.isConnected) this.nativeInputs.delete(input);
     // Obsidian may replace toolbar content while refreshing a file.
@@ -269,6 +318,7 @@ export class TextEditor extends Component {
     for (const [div, entry] of this.layers) if (!alive.has(div) || !entry.layer.isConnected) {
       if (this.focusInteraction && entry.layer.contains(this.focusInteraction.input)) this.releaseFocus();
       entry.cancelPlacement?.();
+      this.removeChild(entry.ink);
       for (const control of entry.controls.values()) control.dispose?.();
       entry.layer.remove(); this.layers.delete(div);
     }
@@ -277,12 +327,25 @@ export class TextEditor extends Component {
       let entry = this.layers.get(page.div);
       if (!entry) {
         const layer = page.div.ownerDocument.createElement('div'); layer.className = 'pdf-form-studio-layer';
+        layer.tabIndex = -1;
         page.div.append(layer);
-        entry = { page, layer, controls: new Map() }; this.layers.set(page.div, entry); this.bindPlacement(entry);
+        const ink = this.addChild(new InkLayer(page, layer, this.session, {
+          tool: () => this.tool, width: kind => kind === 'marker' ? this.markerWidth : this.penWidth, selected: () => this.selectedStroke,
+          select: id => { this.selectedStroke = id; this.selected = undefined; this.focused = undefined; this.updateStatus(); this.refresh(); },
+          start: () => {
+            this.focused = undefined; this.selected = undefined; this.selectedStroke = undefined;
+            const active = layer.ownerDocument.activeElement;
+            if (active instanceof layer.ownerDocument.defaultView!.HTMLElement && this.native.element.contains(active)) active.blur();
+            this.updateStatus();
+          },
+          changed: () => { if (this.session?.dirty) this.scheduleSave(); },
+          remove: id => { this.selectedStroke = id; this.removeSelection(); }, error: error => this.showError(error)
+        }));
+        entry = { page, layer, controls: new Map(), ink }; this.layers.set(page.div, entry); this.bindPlacement(entry);
       }
       entry.page = page;
-      entry.layer.hidden = !this.editing;
-      if (!this.editing) continue;
+      entry.layer.dataset.tool = this.tool;
+      entry.ink.update(page);
       const fieldWidgets = this.session.snapshot.fields.flatMap(field => field.widgets.flatMap((widget, index) =>
         widget.page === page.number ? [{ field, widget, key: `${field.name}:${index}` }] : []));
       const keys = new Set(fieldWidgets.map(({ key }) => key));
@@ -299,14 +362,16 @@ export class TextEditor extends Component {
         if (!control.preview) this.positionField(entry, control, field, widget.rect, widget.rotation);
         if (!this.composing.has(control.input) && control.input.value !== field.value) control.input.value = field.value;
         control.input.disabled = field.readOnly;
-        control.input.readOnly = this.session.status === 'conflict' || (field.owned && page.div.ownerDocument.activeElement !== control.input);
+        control.input.readOnly = this.session.status === 'conflict';
+        control.input.tabIndex = this.tool === 'marker' || this.tool === 'scribble' ? -1 : 0;
+        if (field.owned) control.frame.tabIndex = control.input.tabIndex;
         control.frame.classList.toggle('is-selected', field.name === this.selected && field.owned);
         control.frame.classList.toggle('is-locked', this.session.status === 'conflict' || field.readOnly || (field.owned && field.widgets.length !== 1));
       }
       // A vault write makes the native viewer recreate pages. Keep typing in the
       // replacement control instead of sending subsequent keys to the note.
       const active = page.div.ownerDocument.activeElement;
-      if (resume?.page === page.number && this.editing && (!active || active === page.div.ownerDocument.body || active === resume.input)) {
+      if (resume?.page === page.number && this.tool !== 'marker' && this.tool !== 'scribble' && (!active || active === page.div.ownerDocument.body || active === resume.input)) {
         const input = [...entry.controls.values()].find(control => control.input.dataset.pdfField === resume.name)?.input;
         if (input && !input.disabled) {
           const start = resume.input.selectionStart; const end = resume.input.selectionEnd;
@@ -348,7 +413,7 @@ export class TextEditor extends Component {
       this.focusInteraction = { input, release: this.session!.beginInteraction() };
       this.focused = { input, page: entry.page.number, name: field.name };
       input.readOnly = this.session?.status === 'conflict';
-      this.selected = field.name; this.updateStatus(); this.refresh();
+      this.selected = field.name; this.selectedStroke = undefined; this.updateStatus(); this.refresh();
     });
     input.addEventListener('input', event => {
       if ((event as InputEvent).isComposing) return;
@@ -393,6 +458,7 @@ export class TextEditor extends Component {
       position: 'fixed', left: '-10000px', top: '0', visibility: 'hidden', pointerEvents: 'none',
       width: style.width, height: '0', minHeight: '0', maxHeight: 'none', minWidth: '0',
       fontFamily: style.fontFamily, fontSize: style.fontSize, fontWeight: style.fontWeight,
+      fontKerning: style.fontKerning, fontVariantLigatures: style.fontVariantLigatures,
       lineHeight: style.lineHeight, padding: style.padding, border: '0', boxSizing: 'border-box',
       whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', overflow: 'hidden', margin: '0'
     });
@@ -412,7 +478,7 @@ export class TextEditor extends Component {
     const { frame, input } = control;
     const doc = frame.ownerDocument;
     frame.tabIndex = 0; frame.setAttribute('role', 'group');
-    frame.setAttribute('aria-label', 'Text box. Drag to move; double-click or press Enter to edit.');
+    frame.setAttribute('aria-label', 'Text box. Click text to type; drag the border to move.');
     const labels: Record<ResizeHandle, string> = {
       n: 'top', ne: 'top right', e: 'right', se: 'bottom right', s: 'bottom', sw: 'bottom left', w: 'left', nw: 'top left'
     };
@@ -426,7 +492,7 @@ export class TextEditor extends Component {
       border.setAttribute('aria-hidden', 'true'); frame.append(border);
     }
     const select = () => {
-      this.selected = name; this.updateStatus(); this.refresh();
+      this.selected = name; this.selectedStroke = undefined; this.updateStatus(); this.refresh();
     };
     frame.addEventListener('focus', () => {
       this.releaseFocus(); this.focusInteraction = { input: frame, release: this.session!.beginInteraction() }; select();
@@ -453,8 +519,8 @@ export class TextEditor extends Component {
       if (previous && this.loaded && repaint) this.refresh();
     };
     frame.addEventListener('pointerdown', event => {
-      if (event.button !== 0 || !this.editing || this.session?.status === 'conflict') return;
-      if (event.target === input && doc.activeElement === input) return;
+      if (event.button !== 0 || this.tool === 'marker' || this.tool === 'scribble' || this.session?.status === 'conflict') return;
+      if (event.target === input) return;
       const field = this.session?.snapshot.fields.find(field => field.name === name);
       if (!field || field.readOnly || field.widgets.length !== 1) return;
       const viewport = entry.page.viewport; const widget = field.widgets[0]!;
@@ -488,7 +554,8 @@ export class TextEditor extends Component {
       } catch (error) { this.showError(error); }
       finally { cancel(); }
     });
-    frame.addEventListener('pointercancel', () => cancel()); frame.addEventListener('lostpointercapture', () => cancel());
+    frame.addEventListener('pointercancel', () => cancel());
+    frame.addEventListener('lostpointercapture', () => { if (gesture && !frame.hasPointerCapture(gesture.pointer)) cancel(); });
     frame.addEventListener('keydown', event => {
       if (event.target !== frame) return;
       event.stopPropagation();
@@ -513,7 +580,7 @@ export class TextEditor extends Component {
       if (handle) this.growField(entry, control);
       this.scheduleSave();
     });
-    return () => cancel(false);
+    control.cancel = () => cancel(); return () => cancel(false);
   }
 
   private bindPlacement(entry: PageLayer): void {
@@ -527,7 +594,7 @@ export class TextEditor extends Component {
         Math.max(0, Math.min(entry.page.viewport.height, (event.clientY - box.top) * entry.page.viewport.height / box.height))];
     };
     entry.layer.addEventListener('pointerdown', event => {
-      if (event.target !== entry.layer || event.button !== 0 || !this.editing || !this.session || this.session.status === 'conflict') return;
+      if (event.target !== entry.layer || event.button !== 0 || this.tool !== 'text' || !this.session || this.session.status === 'conflict') return;
       event.preventDefault(); event.stopPropagation(); start = point(event); pointer = event.pointerId;
       release?.(); release = this.session?.beginInteraction();
       entry.layer.setPointerCapture(event.pointerId);
@@ -558,7 +625,8 @@ export class TextEditor extends Component {
       try {
         if (rect[2] - rect[0] < 8 || rect[3] - rect[1] < 8) return;
         const field = this.session.add(entry.page.number, rect, this.fontSize, true, entry.page.viewport.rotation);
-        this.selected = field.name; this.refresh(); entry.controls.get(`${field.name}:0`)?.input.focus({ preventScroll: true });
+        this.tool = 'select'; this.selected = field.name; this.selectedStroke = undefined; this.updateStatus(); this.refresh();
+        entry.controls.get(`${field.name}:0`)?.input.focus({ preventScroll: true });
         // A blank box stays in the shared model while focused. Its eventual
         // blur, typing, explicit save or closing the editor commits it.
       } catch (error) { this.showError(error); }
@@ -580,12 +648,16 @@ export class TextEditor extends Component {
     // Commit edits when a note/embed closes; errors remain in the shared session.
     if (this.session?.dirty) void this.session.saveWhenIdle().catch(() => {});
     for (const entry of this.layers.values()) {
-      entry.cancelPlacement?.(); for (const control of entry.controls.values()) control.dispose?.(); entry.layer.remove();
+      entry.cancelPlacement?.(); this.removeChild(entry.ink); for (const control of entry.controls.values()) control.dispose?.(); entry.layer.remove();
     }
     this.layers.clear(); this.toolbar.remove(); this.message.remove();
     this.composing.clear();
     this.native.element.classList.remove('pdf-form-studio-view', 'pdf-form-studio-editing');
-    for (const [input, readOnly] of this.nativeInputs) input.readOnly = readOnly;
+    delete this.native.element.dataset.pdfTool;
+    for (const [input, original] of this.nativeInputs) {
+      input.readOnly = original.readOnly; input.tabIndex = original.tabIndex;
+      if (original.ariaHidden === null) input.removeAttribute('aria-hidden'); else input.setAttribute('aria-hidden', original.ariaHidden);
+    }
     this.nativeInputs.clear();
   }
 }

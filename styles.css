@@ -51,12 +51,19 @@
   position: absolute;
   inset: 0;
   z-index: 20;
-  cursor: text;
-  touch-action: none;
+  pointer-events: none;
+  cursor: default;
 }
+.pdf-form-studio-layer[data-tool="text"] { pointer-events: auto; cursor: text; touch-action: none; }
+.pdf-form-studio-layer[data-tool="marker"],
+.pdf-form-studio-layer[data-tool="scribble"] { pointer-events: auto; cursor: crosshair; touch-action: none; }
+.pdf-form-studio-layer[data-tool="marker"] .pdf-form-studio-box,
+.pdf-form-studio-layer[data-tool="scribble"] .pdf-form-studio-box { pointer-events: none; }
 .pdf-form-studio-layer[hidden] { display: none; }
 .pdf-form-studio-box {
   position: absolute;
+  pointer-events: auto;
+  z-index: 2;
   outline: 1px solid transparent;
   outline-offset: 0;
 }
@@ -82,6 +89,9 @@
   font-family: 'PDF Form Studio Text', sans-serif;
   line-height: 1.2;
   font-weight: 400;
+  /* PDF appearance advances do not include the browser's kerning adjustments. */
+  font-kerning: none;
+  font-variant-ligatures: none;
   caret-color: #161616;
   appearance: none;
   resize: none;
@@ -92,7 +102,7 @@
 .pdf-form-studio-view .pdf-form-studio-box > .pdf-form-studio-field:focus { outline: none; box-shadow: none; }
 .pdf-form-studio-view .pdf-form-studio-box > .pdf-form-studio-field:disabled { opacity: 0.65; }
 .pdf-form-studio-view .pdf-form-studio-box > .pdf-form-studio-field::selection { background: #cbd9f5; color: #161616; }
-.pdf-form-studio-box.is-added > .pdf-form-studio-field[readonly] { cursor: move; }
+.pdf-form-studio-box > .pdf-form-studio-field { cursor: text; }
 .pdf-form-studio-view .pdf-form-studio-box > button.pdf-form-studio-handle {
   display: none;
   position: absolute;
@@ -126,7 +136,14 @@
 .pdf-form-studio-move-edge[data-edge="e"] { top: 0; bottom: 0; right: -3px; width: 6px; }
 .pdf-form-studio-placement { position: absolute; pointer-events: none; outline: 1px solid var(--interactive-accent); background: rgb(110 130 180 / 6%); }
 
-/* PDF.js widgets remain available for normal viewing; the editing overlay owns input. */
+.pdf-form-studio-ink { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.pdf-form-studio-stroke, .pdf-form-studio-stroke-preview, .pdf-form-studio-stroke-hit { pointer-events: none; }
+.pdf-form-studio-ink-control.is-interactive .pdf-form-studio-stroke-hit { pointer-events: stroke; cursor: pointer; }
+.pdf-form-studio-stroke-outline { display: none; pointer-events: none; fill: none; stroke: #1476e5; stroke-width: 1; stroke-dasharray: 3 3; }
+.pdf-form-studio-stroke-outline.is-selected,
+.pdf-form-studio-ink-control:focus-visible .pdf-form-studio-stroke-outline { display: block; }
+
+/* The always-available overlay owns verified text input; native widgets stay read only. */
 .pdf-form-studio-view .annotationLayer input[type="text"],
 .pdf-form-studio-view .annotationLayer textarea { background: transparent !important; border-radius: 0 !important; box-shadow: none !important; }
 .pdf-form-studio-editing .annotationLayer input[type="text"],

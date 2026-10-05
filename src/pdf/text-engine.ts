@@ -1,6 +1,8 @@
 import { PDFDocument, PDFDict, PDFName, PDFStream, PDFTextField, rgb } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import { multilineAppearance } from './text-appearance.ts';
+import { readInk, verifyInk, writeInk } from './ink-engine.ts';
+import type { InkStroke } from './ink-engine.ts';
 
 export const FIELD_PREFIX = 'pdf-form-studio-';
 export type Rect = [number, number, number, number];
@@ -15,10 +17,13 @@ export interface TextField {
   maxLength?: number;
   widgets: TextWidget[];
 }
-export interface TextSnapshot { pages: Rect[]; fields: TextField[] }
+export interface TextSnapshot { pages: Rect[]; fields: TextField[]; strokes: InkStroke[] }
 export interface AddedField { name: string; page: number; rect: Rect; fontSize: number; multiline: boolean; rotation: number }
 export interface BoxUpdate { rect: Rect; fontSize: number; multiline: boolean }
-export interface TextChanges { values: Map<string, string>; added: Map<string, AddedField>; boxes: Map<string, BoxUpdate>; deleted: Set<string> }
+export interface TextChanges {
+  values: Map<string, string>; added: Map<string, AddedField>; boxes: Map<string, BoxUpdate>; deleted: Set<string>;
+  strokes: Map<string, InkStroke>; deletedStrokes: Set<string>;
+}
 
 async function loadWritable(bytes: Uint8Array): Promise<PDFDocument> {
   const pdf = await PDFDocument.load(bytes, { updateMetadata: false });
@@ -61,7 +66,7 @@ export async function readTextPdf(bytes: Uint8Array): Promise<TextSnapshot> {
     pages: pages.map(page => {
       const box = page.getCropBox();
       return [box.x, box.y, box.x + box.width, box.y + box.height];
-    }), fields
+    }), fields, strokes: readInk(pdf)
   };
 }
 
@@ -119,10 +124,12 @@ export async function writeTextPdf(seed: Uint8Array, changes: TextChanges, fontB
     field.setText(value);
     field.updateAppearances(font, field.getName().startsWith(FIELD_PREFIX) && field.isMultiline() ? multilineAppearance : undefined);
   }
+  writeInk(pdf, changes.strokes, changes.deletedStrokes);
   const bytes = await pdf.save({ updateFieldAppearances: false });
   // Reopen and verify logical values, widget appearances, and page count before any vault write.
   const verified = await PDFDocument.load(bytes, { updateMetadata: false });
   if (verified.getPageCount() !== pdf.getPageCount()) throw new Error('PDF page verification failed.');
+  verifyInk(verified, changes.strokes, changes.deletedStrokes);
   for (const [name, value] of changes.values) {
     if (changes.deleted.has(name)) continue;
     const field = verified.getForm().getTextField(name);

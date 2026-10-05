@@ -2,6 +2,8 @@ import { FIELD_PREFIX, readTextPdf, writeTextPdf } from './text-engine.ts';
 import type { AddedField, BoxUpdate, Rect, TextChanges, TextField, TextSnapshot } from './text-engine.ts';
 import type { BackupPurpose } from './recovery.ts';
 import { InteractionGate } from './interaction-gate.ts';
+import { INK_PREFIX, strokeBounds, validateStroke } from './ink-engine.ts';
+import type { InkKind, InkStroke, Point } from './ink-engine.ts';
 
 export interface PdfStore {
   read(): Promise<Uint8Array>;
@@ -12,6 +14,7 @@ export type SaveStatus = 'saved' | 'unsaved' | 'saving' | 'error' | 'conflict';
 export function equalBytes(a: Uint8Array, b: Uint8Array): boolean {
   return a.length === b.length && a.every((value, index) => value === b[index]);
 }
+const emptyChanges = (): TextChanges => ({ values: new Map(), added: new Map(), boxes: new Map(), deleted: new Set(), strokes: new Map(), deletedStrokes: new Set() });
 
 /** One session per vault PDF; every view shares its model and serialized writer. */
 export class TextSession {
@@ -23,7 +26,8 @@ export class TextSession {
   private baseline: Uint8Array;
   private store: PdfStore;
   private font: Uint8Array;
-  private changes: TextChanges = { values: new Map(), added: new Map(), boxes: new Map(), deleted: new Set() };
+  private changes: TextChanges = emptyChanges();
+  private strokeHistory: string[] = [];
   private revision = 0;
   private savedRevision = 0;
   private queue: Promise<void> = Promise.resolve();
@@ -94,6 +98,36 @@ export class TextSession {
     this.changes.values.set(name, field.value); this.changed();
   }
 
+  addStroke(page: number, kind: InkKind, points: Point[], width = kind === 'marker' ? 14 : 2): InkStroke {
+    if (this.conflicted) throw new Error('Reload the PDF before drawing after an external change.');
+    const bounds = this.snapshot.pages[page - 1];
+    if (!bounds || !Number.isInteger(page)) throw new Error('The drawing page does not exist.');
+    const stroke: InkStroke = { id: INK_PREFIX + globalThis.crypto.randomUUID(), page, kind,
+      points: points.map(point => [...point]), width, color: kind === 'marker' ? [1, 0.84, 0] : [0.085, 0.085, 0.085],
+      opacity: kind === 'marker' ? 0.4 : 1, rect: strokeBounds(points, width, bounds), readOnly: false };
+    validateStroke(stroke, bounds);
+    this.changes.strokes.set(stroke.id, stroke); this.snapshot.strokes.push(stroke);
+    this.strokeHistory.push(stroke.id); this.changed(); return stroke;
+  }
+
+  deleteStroke(id: string): void {
+    if (this.conflicted) throw new Error('Reload the PDF before removing a drawing.');
+    const stroke = this.snapshot.strokes.find(stroke => stroke.id === id);
+    if (!stroke || stroke.readOnly) throw new Error('This drawing cannot be removed.');
+    if (this.changes.strokes.has(id)) this.changes.strokes.delete(id);
+    else this.changes.deletedStrokes.add(id);
+    this.snapshot.strokes = this.snapshot.strokes.filter(stroke => stroke.id !== id); this.changed();
+  }
+
+  get canUndoStroke(): boolean { return this.strokeHistory.some(id => this.snapshot.strokes.some(stroke => stroke.id === id)); }
+  undoStroke(): void {
+    if (this.conflicted) throw new Error('Reload the PDF before undoing a drawing.');
+    let id: string | undefined;
+    while ((id = this.strokeHistory.pop())) {
+      if (this.snapshot.strokes.some(stroke => stroke.id === id)) { this.deleteStroke(id); return; }
+    }
+  }
+
   save(): Promise<void> {
     // Explicit Save/Done/close must also release an automatic save already
     // waiting in the queue, otherwise the explicit request would deadlock.
@@ -134,7 +168,7 @@ export class TextSession {
         await this.store.write(bytes);
         if (!equalBytes(await this.store.read(), bytes)) return this.conflict();
         this.seed = bytes.slice(); this.baseline = bytes.slice(); this.snapshot = snapshot;
-        this.changes = { values: new Map(), added: new Map(), boxes: new Map(), deleted: new Set() };
+        this.changes = emptyChanges(); this.strokeHistory = [];
         this.revision = 0; this.savedRevision = 0; this.backupPath = recovery;
         this.status = 'saved'; this.error = ''; this.notify();
       } catch (error) {
@@ -165,7 +199,8 @@ export class TextSession {
         if (epoch !== undefined && epoch !== this.editEpoch) return;
         revision = this.revision;
         const changes: TextChanges = {
-          values: new Map(this.changes.values), added: new Map(this.changes.added), boxes: new Map(this.changes.boxes), deleted: new Set(this.changes.deleted)
+          values: new Map(this.changes.values), added: new Map(this.changes.added), boxes: new Map(this.changes.boxes), deleted: new Set(this.changes.deleted),
+          strokes: new Map(this.changes.strokes), deletedStrokes: new Set(this.changes.deletedStrokes)
         };
         if (!equalBytes(await this.store.read(), this.baseline)) return this.conflict();
         output = await writeTextPdf(this.seed, changes, this.font);
@@ -182,6 +217,10 @@ export class TextSession {
       await this.store.write(output);
       if (!equalBytes(await this.store.read(), output)) return this.conflict();
       this.baseline = output;
+      if (this.snapshot.strokes.length) {
+        const saved = new Map((await readTextPdf(output)).strokes.map(stroke => [stroke.id, stroke.annotationId]));
+        for (const stroke of this.snapshot.strokes) stroke.annotationId = saved.get(stroke.id);
+      }
       this.savedRevision = revision;
       this.status = this.dirty ? 'unsaved' : 'saved'; this.notify();
     } catch (error) {
@@ -193,7 +232,7 @@ export class TextSession {
   }
 
   private conflict(): never {
-    this.status = 'conflict'; this.error = 'The PDF changed outside this session. Your pending text is kept here. Reload to use the newer PDF.';
+    this.status = 'conflict'; this.error = 'The PDF changed outside this session. Your pending text and marks are kept here. Reload to use the newer PDF.';
     this.notify(); throw new Error(this.error);
   }
 
@@ -212,7 +251,7 @@ export class TextSession {
     const bytes = await this.store.read();
     const snapshot = await readTextPdf(bytes);
     this.seed = bytes.slice(); this.baseline = bytes; this.snapshot = snapshot;
-    this.changes = { values: new Map(), added: new Map(), boxes: new Map(), deleted: new Set() };
+    this.changes = emptyChanges(); this.strokeHistory = [];
     this.revision = 0; this.savedRevision = 0; this.status = 'saved'; this.error = ''; this.notify();
   }
 }

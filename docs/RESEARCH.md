@@ -2,7 +2,15 @@
 
 Research date: **2026-10-05**. This document separates verified library capabilities from proposed implementation choices and hardware behavior that still needs testing.
 
-Implementation update: **0.3.0 implements the text-only path**, with native overlays and icon tools, movable/resizable boxes, automatic wrapping and height growth, PDF-LIB form writing, embedded Noto Sans, persistent original/restore recovery copies, serialized saves, interaction-aware automatic writes and conflict detection. Printed worksheets receive editable AcroForm text fields; the proposed FreeText path below was not selected. Wacom remains future research. See [the app test record](TESTING.md) and [current limits](../README.md#current-limits). The rest records the original research, not completed features.
+Implementation update: **0.4.0 implements direct text editing and basic constant-width drawing**, with native overlays and icon tools, movable/resizable boxes, automatic wrapping and height growth, PDF-LIB writing, embedded Noto Sans, persistent original/restore recovery copies, serialized saves, interaction-aware automatic writes and conflict detection. Printed worksheets receive editable AcroForm text fields; the proposed FreeText path below was not selected. Existing fields accept a direct click, while new boxes require explicit placement. Wacom remains future research. See [the app test record](TESTING.md) and [current limits](../README.md#current-limits). The original proposals below are historical, not a list of completed features.
+
+## Implemented marker and scribble format
+
+Both tools store standard `/Subtype /Ink` annotations with stable `/NM` IDs, page-local `/InkList` coordinates, color, width, print flags and normal appearance streams. Marker uses yellow, 0.4 opacity and a Multiply blend mode; Scribble uses an opaque dark line. A marker is a freehand visual highlight, not a semantic `/Highlight` annotation anchored to selected text. This follows the PDF ink model and the appearance approach used by upstream PDF.js's freehand highlighter. [PDF annotation specification](https://pdf-issues.pdfa.org/32000-2-2020/clause12.html), [PDF.js 5.3.31 annotation writer](https://github.com/mozilla/pdf.js/blob/v5.3.31/src/core/annotation.js).
+
+Pointer capture collects coalesced samples where available. Simplification preserves endpoints/corners, and taps have a visible dot appearance. Shift locks marker strokes horizontally in the displayed viewport. The preview paints pending marks; after the native annotation layer renders a saved mark, its native appearance supplies the visible stroke so transparency is not doubled. The adapter isolates that rendering check.
+
+Text and ink share one document session and serialized writer. Before modifying a vault file, serialized bytes are reopened to verify stroke IDs, points, styles, bounds and appearance resources alongside form values and appearances. Tests also parse annotation/operator data with an independent PDF.js version. Unrelated annotations and editable forms are preserved. Undo covers marks created in the current session; arbitrary existing ink editing, pressure, smoothing, erasing and complete undo/redo remain future work.
 
 ## What the requested workflow requires
 

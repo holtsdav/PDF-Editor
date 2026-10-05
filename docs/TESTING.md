@@ -1,5 +1,28 @@
 # App test record
 
+## Version 0.4.0 direct editing, marker and scribble
+
+Checked on 2026-10-05 through Computer Use in an isolated vault and **Obsidian 1.13.7 desktop on macOS**. Anonymous two-page fixtures contained one authored field and one existing plugin-created box. The final build was installed and reloaded; fixtures and answers remain outside Git.
+
+| Scenario | Observed result |
+| --- | --- |
+| Default interaction | Select was active on opening; single clicks on the authored field and added box allowed typing without choosing Text |
+| Blank space | A canvas click in the PDF pop-out left the two existing fields unchanged |
+| Explicit placement | Text tool plus one tap created a focused box and returned to Select; Cmd+S saved it, leaving three fields |
+| Box growth | Multiple typed lines grew the existing box; the font-spacing confirmation pass showed a narrow box wrapping into two visible lines, also retained in the saved appearance |
+| Marker | Dragging across printed text produced a transparent yellow stroke; automatic save retained its color/opacity without double painting |
+| Scribble | A dragged pen stroke and a tap dot produced owned ink items; undo removed the last dot, and selecting a saved pen stroke then pressing Delete removed it |
+| Exit drawing | Escape returned to Select with normal direct text editing available |
+| Reading view | Direct typing and Cmd+S persisted edits in the embedded PDF; saved marks rendered there |
+| Live Preview | Direct typing, wrapping/growth and Cmd+S worked; native icon controls stayed within the existing bar |
+| PDF tab / pop-out | Direct fields were editable in the tab; canvas drawing, blank clicks, one-shot placement, undo/removal and saved appearances were checked in its pop-out |
+| Independent output | PDF parsing confirmed three fields, retained marker/pen styles and grown geometry; Poppler rendered the saved output; note Markdown remained byte-for-byte unchanged |
+| Recovery | Editing and app reloads retained one original recovery PDF for the fixture |
+
+The main-window coordinate tool again returned `windowNotFoundAtPosition`; the verified canvas gesture pass was in a pop-out. Drawing gestures inside Reading/Live Preview embeds, all brush-width choices, Shift-marker locking, rapid strokes, pointer cancellation/zoom during a stroke and edge/rotation combinations still need broader final-build app testing. Rendering and direct text editing in those embeds were checked. The final confirmation pass fixed browser kerning/ligature advances differing from the saved font advances, which had clipped the final wrapped line of a narrow box.
+
+`npm run check` passes **40 tests**, lint, TypeScript, build and plugin validation. Six new tests cover standard ink/appearance and Multiply opacity through independent PDF.js annotation/operator parsing; stable IDs and preservation of foreign annotations/forms; save/reopen/delete/undo; tap dots and rotated cropped coordinates; interaction gates and external-change conflicts; invalid/locked strokes; and bounded simplification. Earlier text/recovery regressions remain green. Ink uses constant width; no tablet-pressure or Wacom compatibility claim is made.
+
 ## Version 0.3.0 Preview-style text boxes
 
 Checked on 2026-10-05 through Computer Use in an isolated vault and **Obsidian 1.13.7 desktop on macOS**. The final 0.3.0 build was installed and reloaded there. Tests used anonymous form/worksheet fixtures; no private PDF or answers were committed.

@@ -9,7 +9,7 @@ export interface PageViewport {
   convertToPdfPoint(x: number, y: number): number[];
   convertToViewportRectangle(rect: number[]): number[];
 }
-export interface NativePage { div: HTMLElement; viewport: PageViewport; number: number }
+export interface NativePage { div: HTMLElement; viewport: PageViewport; number: number; hasRenderedAnnotation(id: string): boolean }
 export interface NativePdf {
   identity: object;
   source: object;
@@ -53,7 +53,8 @@ export function findNativePdfs(app: App): NativePdf[] {
               const view = record(getPage.call(object, number));
               const viewport = record(view?.viewport);
               if (viewport && typeof viewport.convertToPdfPoint === 'function' && typeof viewport.convertToViewportRectangle === 'function') {
-                pages.push({ div, viewport: viewport as unknown as PageViewport, number });
+                pages.push({ div, viewport: viewport as unknown as PageViewport, number,
+                  hasRenderedAnnotation: id => [...div.querySelectorAll<HTMLElement>('.annotationLayer [data-annotation-id]')].some(element => element.dataset.annotationId === id) });
               }
             } catch { /* Page not yet rendered; next scan retries. */ }
           }
