@@ -2,6 +2,8 @@
 
 Research date: **2026-10-05**. This document separates verified library capabilities from proposed implementation choices and hardware behavior that still needs testing.
 
+Implementation update: **0.2.0 implements the text-only path**, with native overlays, PDF-LIB form writing, embedded Noto Sans, verified backups, serialized saves and conflict detection. Printed worksheets receive editable AcroForm text fields; the proposed FreeText path below was not selected. Wacom remains future research. See [the app test record](TESTING.md) and [current limits](../README.md#current-limits). The rest records the original research, not completed features.
+
 ## What the requested workflow requires
 
 The screenshot shows a worksheet embedded in a note, with blank answer lines and table cells. It does not reveal whether those regions are interactive form fields. A blue region could be a form widget, selection, or another overlay; pixels cannot identify the PDF's field structure. The source PDF was not supplied, so its actual form type remains unverified.

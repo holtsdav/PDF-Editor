@@ -1,9 +1,9 @@
 {
   "id": "pdf-form-studio",
   "name": "PDF Form Studio",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "minAppVersion": "1.13.7",
-  "description": "Inspect PDF form fields and test pen input in preparation for editing PDFs inside notes.",
+  "description": "Fill PDF text fields and add editable text boxes inside note previews, saving directly into the PDF.",
   "author": "holtsdav",
   "authorUrl": "https://github.com/holtsdav",
   "isDesktopOnly": true

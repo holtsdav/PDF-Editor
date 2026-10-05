@@ -1,42 +1,32 @@
 # Implementation roadmap
 
-The requested destination is an ordinary PDF embedded in a note: click an answer line, type or draw, and see the PDF itself retain the result outside Obsidian.
+## 0.2.0 text development beta — implemented
 
-## Prepared foundation
+- [x] TypeScript plugin, native compatibility adapter, version/build validation and private GitHub integration.
+- [x] Read-only field inspector using Obsidian's PDF.js loader.
+- [x] Fill existing editable text fields and create borderless AcroForm text boxes on printed worksheets.
+- [x] Click placement, drag placement for multiline answers, new-field font size and removal.
+- [x] Shared document sessions, serialized saves, stale-session checks and verified recovery copies.
+- [x] Logical values/appearance verification, embedded Noto Sans and repeated saves without duplicate boxes.
+- [x] Tested Reading view, Live Preview, PDF tabs, multiple embeds, pop-outs, zoom/scrolling and a rotated CropBox.
+- [x] Independent PDF.js inspection and Poppler/pypdf verification.
 
-- [x] TypeScript plugin, manifest, desktop scope, and esbuild bundle.
-- [x] Read-only PDF field/widget inspector using the public PDF.js loader.
-- [x] In-app pen input test pad.
-- [x] Upstream PDF.js integration tests with generated PDFs.
-- [x] Development-vault installer, version synchronization, and artifact validation.
-- [x] GitHub CI and draft release workflows; research and contributor documentation.
+See [TESTING.md](TESTING.md) for exact coverage and [README.md](../README.md#current-limits) for limits. Handwriting/pen diagnostics were removed from this text-only version.
 
-## 1. Verify the native embed adapter
+## Next text milestones
 
-Prototype controls on an ordinary `![[worksheet.pdf]]` embed. Determine actual viewer/document access and bundled editor capability. Keep all undocumented access in one adapter. Use a disposable vault with the source worksheet and anonymous samples.
+1. Broader PDFs, Windows/Linux, app versions and third-party plugin compatibility; benchmark large documents.
+2. Move/resize existing boxes, change their font size, full edit undo/redo and durable pending-text recovery.
+3. Checkbox/radio/select fields, validation flags and richer form semantics.
+4. Font fallback and complex scripts; overflow indicators and improved appearance/layout fidelity.
+5. More independent viewers, rotation combinations, malformed form trees and file-integrity testing.
 
-Acceptance: overlay alignment survives zoom, rotation, scrolling, resizing, Reading view, Live Preview, PDF tabs, two copies of the same file, and pop-out windows. Plugin unload removes controls/listeners. Unsupported viewer versions retain a usable read-only viewer and report the unsupported editing state.
+Acceptance remains: values and appearances agree after reopening; no flattening/duplicate widgets/loss of unrelated data; conflicts stop stale writes; recovery works. Confirm minimum compatibility before public distribution.
 
-## 2. Existing form fields and reliable saves
+## Later: Wacom ink
 
-Expose text fields, checkboxes, radio groups, dropdowns, multiline text, required/read-only flags, and keyboard navigation. Implement one document session and save queue per vault PDF, recoverable originals, conflict detection, and save status. Evaluate PDF.js serialization before adding another writer.
+Add pointer capture, coalesced samples, pressure width, smoothing, erasing and undo/redo. Save standard ink annotations with appearances. Test actual hardware, OS and app build for pressure, dots/fast strokes, cancellation, buttons/eraser and zoom changes. Independently reopen/print output. Handwriting recognition is separate.
 
-Acceptance: saved field values and widget appearances agree after reopening; no flattening, no duplicate widgets, no loss of unrelated annotations/pages/metadata. German umlauts render correctly. Rapid edits and two open embeds do not overwrite each other. Save failure leaves the original available. External changes interrupt the stale session.
+## Community submission
 
-## 3. Printed worksheet typing
-
-Add Text mode with click-to-type and drag-to-place multiline areas. Use editable FreeText annotations initially; evaluate creating AcroForms as an optional “make this worksheet fillable” operation. Use stable item IDs, font embedding, and explicit save/undo behavior.
-
-Acceptance: answers align with a clicked line/cell at different zoom levels, can be edited/moved/deleted, and remain visible after Obsidian reload, external reopening, and printing. Repeated saves update existing content.
-
-## 4. Wacom ink
-
-Add Pen/Eraser modes, pointer capture, coalesced samples, optional pressure width, smoothing, stroke grouping, and undo/redo. Serialize standard ink annotations with appearances matching the preview. Fall back to a selectable constant width if pressure is unavailable.
-
-Acceptance: test on a real Wacom device in the target OS and Obsidian build. Verify light/heavy strokes, dots, fast curves, eraser/buttons, accidental touch, cancellation, and changes of zoom mid-session. Output survives independent viewer reopening and printing; erasing does not destroy page content.
-
-## 5. Community beta and submission
-
-Validate the minimum app version and the current plugin ID/name availability. Complete independent viewer and file-integrity checks, explain backups and limitations, make the source/distribution accessible, and publish a tested release. Submit through the current Community directory workflow. Revisit mobile as a separate tested target.
-
-First release excludes XFA editing, handwriting recognition, automatic OCR/line detection, certified/signature workflows, and collaborative editing. These are later candidates after the core document persistence is trustworthy.
+Broaden testing, validate ID/name/minimum version, make source and assets public when the owner chooses, publish a tested release and follow current Community submission requirements. Mobile is a separate target. XFA, signature workflows, OCR and collaborative editing remain outside this first version.

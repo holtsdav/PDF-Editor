@@ -41,10 +41,10 @@ export class PdfInspectionModal extends Modal {
       el.createEl('p', { text: `${inspection.pages} pages · ${inspection.fields.length} discovered fields · PDF.js ${library.version ?? 'unknown'}` });
       el.createEl('p', {
         text: inspection.fields.length > 0
-          ? 'This PDF contains field data or widgets. The inline form editor is planned.'
+          ? 'This PDF contains field data or widgets. Use Edit text in its PDF preview to fill supported text fields.'
           : inspection.scannedPages < inspection.pages || inspection.hasXfa || inspection.hasAcroForm
             ? 'No fields were discovered in this inspection. Further inspection is needed before choosing an editing mode.'
-            : 'No interactive fields were discovered. Typing on printed lines will need text annotations or newly added form fields.'
+            : 'No interactive fields were discovered. Use Edit text in its PDF preview to place new text boxes on printed lines.'
       });
       if (inspection.fields.length > 0) {
         const list = el.createEl('ul', { cls: 'pdf-form-studio-fields' });

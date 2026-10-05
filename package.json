@@ -1,14 +1,19 @@
 {
   "name": "pdf-form-studio",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Development foundation for editing PDF forms and handwriting in Obsidian note previews.",
+  "description": "Fill PDF text fields and add editable text boxes inside Obsidian note previews.",
   "type": "module",
   "main": "main.js",
   "license": "MIT",
   "author": "holtsdav",
-  "repository": { "type": "git", "url": "git+https://github.com/holtsdav/BetterPDF.git" },
-  "engines": { "node": ">=24" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/holtsdav/BetterPDF.git"
+  },
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "npm run typecheck && node esbuild.config.mjs production && node scripts/validate-plugin.mjs",
@@ -28,12 +33,15 @@
     "eslint-plugin-obsidianmd": "0.4.2",
     "globals": "17.13.0",
     "obsidian": "1.13.1",
-    "pdf-lib": "1.17.1",
     "pdfjs-dist": "5.3.31",
     "typescript": "5.9.3",
     "typescript-eslint": "8.71.0"
   },
   "overrides": {
     "moment": "2.31.0"
+  },
+  "dependencies": {
+    "@pdf-lib/fontkit": "1.1.1",
+    "pdf-lib": "1.17.1"
   }
 }

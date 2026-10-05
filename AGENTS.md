@@ -1,6 +1,6 @@
 # BetterPDF / PDF Form Studio
 
-This repository currently contains research and a diagnostic Obsidian plugin, not a finished PDF editor. Read `README.md`, `docs/RESEARCH.md`, and `docs/ROADMAP.md` before implementing editing features. Keep implementation status accurate in the README and manifest description.
+This repository contains research and a first text editing development beta for Obsidian. Read `README.md`, `docs/RESEARCH.md`, `docs/ROADMAP.md`, and `docs/TESTING.md` before extending editing features. Keep implementation status accurate in the README and manifest description.
 
 ## Working conventions
 
