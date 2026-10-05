@@ -17,7 +17,8 @@ export interface TextField {
 }
 export interface TextSnapshot { pages: Rect[]; fields: TextField[] }
 export interface AddedField { name: string; page: number; rect: Rect; fontSize: number; multiline: boolean; rotation: number }
-export interface TextChanges { values: Map<string, string>; added: Map<string, AddedField>; deleted: Set<string> }
+export interface BoxUpdate { rect: Rect; fontSize: number; multiline: boolean }
+export interface TextChanges { values: Map<string, string>; added: Map<string, AddedField>; boxes: Map<string, BoxUpdate>; deleted: Set<string> }
 
 async function loadWritable(bytes: Uint8Array): Promise<PDFDocument> {
   const pdf = await PDFDocument.load(bytes, { updateMetadata: false });
@@ -90,6 +91,19 @@ export async function writeTextPdf(seed: Uint8Array, changes: TextChanges, fontB
     // Rotate the widget appearance to follow the user's current viewport orientation.
     if (added.rotation) field.acroField.getWidgets()[0]?.getOrCreateAppearanceCharacteristics().setRotation(added.rotation);
   }
+  for (const [name, box] of changes.boxes) {
+    if (changes.deleted.has(name)) continue;
+    if (!name.startsWith(FIELD_PREFIX)) throw new Error('Only added text boxes can be moved or resized.');
+    const field = form.getTextField(name);
+    const widgets = field.acroField.getWidgets();
+    if (widgets.length !== 1 || field.isReadOnly()) throw new Error('This text box cannot be resized.');
+    const [x1, y1, x2, y2] = box.rect;
+    if (![...box.rect, box.fontSize].every(Number.isFinite) || x2 <= x1 || y2 <= y1 || box.fontSize <= 0) throw new Error('Invalid text box geometry.');
+    widgets[0]!.setRectangle({ x: x1, y: y1, width: x2 - x1, height: y2 - y1 });
+    field.setFontSize(box.fontSize);
+    if (box.multiline) field.enableMultiline(); else field.disableMultiline();
+    field.updateAppearances(font, box.multiline ? multilineAppearance : undefined);
+  }
   for (const [name, value] of changes.values) {
     if (changes.deleted.has(name)) continue;
     for (const character of value) {
@@ -119,6 +133,16 @@ export async function writeTextPdf(seed: Uint8Array, changes: TextChanges, fontB
   }
   for (const name of changes.deleted) {
     if (verified.getForm().getFieldMaybe(name)) throw new Error(`PDF deletion verification failed for ${name}.`);
+  }
+  for (const [name, box] of changes.boxes) {
+    if (changes.deleted.has(name)) continue;
+    const field = verified.getForm().getTextField(name);
+    const widget = field.acroField.getWidgets()[0]!;
+    const { x, y, width, height } = widget.getRectangle();
+    if ([x, y, x + width, y + height].some((value, index) => Math.abs(value - box.rect[index]!) > 0.001)
+      || field.isMultiline() !== box.multiline || !(widget.getAppearances()?.normal instanceof PDFStream)) {
+      throw new Error(`PDF text box verification failed for ${name}.`);
+    }
   }
   return bytes;
 }

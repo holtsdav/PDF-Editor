@@ -55,9 +55,20 @@
   touch-action: none;
 }
 .pdf-form-studio-layer[hidden] { display: none; }
-.pdf-form-studio-view .pdf-form-studio-layer > input.pdf-form-studio-field,
-.pdf-form-studio-view .pdf-form-studio-layer > textarea.pdf-form-studio-field {
+.pdf-form-studio-box {
   position: absolute;
+  outline: 1px solid transparent;
+  outline-offset: 0;
+}
+.pdf-form-studio-box:hover { outline-color: #8b8b8b; }
+.pdf-form-studio-box:focus-within { outline-color: #1476e5; }
+.pdf-form-studio-box.is-added.is-selected { outline-color: #1476e5; z-index: 2; }
+.pdf-form-studio-box.is-added.is-overflow.is-selected { outline-color: #c03434; }
+.pdf-form-studio-view .pdf-form-studio-box > input.pdf-form-studio-field,
+.pdf-form-studio-view .pdf-form-studio-box > textarea.pdf-form-studio-field {
+  display: block;
+  width: 100%;
+  height: 100%;
   box-sizing: border-box;
   margin: 0;
   min-width: 0;
@@ -67,20 +78,52 @@
   background: transparent !important;
   color: #161616;
   box-shadow: none;
-  outline: 1px solid transparent;
-  outline-offset: 1px;
+  outline: none;
   font-family: 'PDF Form Studio Text', sans-serif;
   line-height: 1.2;
   font-weight: 400;
   caret-color: #161616;
   appearance: none;
   resize: none;
+  overflow: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
-.pdf-form-studio-view .pdf-form-studio-layer > .pdf-form-studio-field:hover { outline-color: #8b8b8b; }
-.pdf-form-studio-view .pdf-form-studio-layer > input.pdf-form-studio-field:focus,
-.pdf-form-studio-view .pdf-form-studio-layer > textarea.pdf-form-studio-field:focus { outline: 1px solid var(--interactive-accent); box-shadow: none; }
-.pdf-form-studio-view .pdf-form-studio-layer > .pdf-form-studio-field:disabled { outline: none; opacity: 0.65; }
-.pdf-form-studio-view .pdf-form-studio-layer > .pdf-form-studio-field::selection { background: #cbd9f5; color: #161616; }
+.pdf-form-studio-view .pdf-form-studio-box > .pdf-form-studio-field:focus { outline: none; box-shadow: none; }
+.pdf-form-studio-view .pdf-form-studio-box > .pdf-form-studio-field:disabled { opacity: 0.65; }
+.pdf-form-studio-view .pdf-form-studio-box > .pdf-form-studio-field::selection { background: #cbd9f5; color: #161616; }
+.pdf-form-studio-box.is-added > .pdf-form-studio-field[readonly] { cursor: move; }
+.pdf-form-studio-view .pdf-form-studio-box > button.pdf-form-studio-handle {
+  display: none;
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  min-width: 0;
+  min-height: 0;
+  margin: -4px;
+  padding: 0;
+  border: 1px solid white;
+  border-radius: 50%;
+  background: #1476e5;
+  box-shadow: 0 0 0 1px #1476e5;
+  z-index: 3;
+  touch-action: none;
+}
+.pdf-form-studio-box.is-selected:not(.is-locked) > button.pdf-form-studio-handle { display: block; }
+.pdf-form-studio-handle[data-resize="n"] { left: 50%; top: 0; cursor: ns-resize; }
+.pdf-form-studio-handle[data-resize="ne"] { left: 100%; top: 0; cursor: nesw-resize; }
+.pdf-form-studio-handle[data-resize="e"] { left: 100%; top: 50%; cursor: ew-resize; }
+.pdf-form-studio-handle[data-resize="se"] { left: 100%; top: 100%; cursor: nwse-resize; }
+.pdf-form-studio-handle[data-resize="s"] { left: 50%; top: 100%; cursor: ns-resize; }
+.pdf-form-studio-handle[data-resize="sw"] { left: 0; top: 100%; cursor: nesw-resize; }
+.pdf-form-studio-handle[data-resize="w"] { left: 0; top: 50%; cursor: ew-resize; }
+.pdf-form-studio-handle[data-resize="nw"] { left: 0; top: 0; cursor: nwse-resize; }
+.pdf-form-studio-move-edge { display: none; position: absolute; cursor: move; touch-action: none; z-index: 2; }
+.pdf-form-studio-box.is-selected:not(.is-locked) > .pdf-form-studio-move-edge { display: block; }
+.pdf-form-studio-move-edge[data-edge="n"] { left: 0; right: 0; top: -3px; height: 6px; }
+.pdf-form-studio-move-edge[data-edge="s"] { left: 0; right: 0; bottom: -3px; height: 6px; }
+.pdf-form-studio-move-edge[data-edge="w"] { top: 0; bottom: 0; left: -3px; width: 6px; }
+.pdf-form-studio-move-edge[data-edge="e"] { top: 0; bottom: 0; right: -3px; width: 6px; }
 .pdf-form-studio-placement { position: absolute; pointer-events: none; outline: 1px solid var(--interactive-accent); background: rgb(110 130 180 / 6%); }
 
 /* PDF.js widgets remain available for normal viewing; the editing overlay owns input. */

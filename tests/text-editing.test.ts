@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { setImmediate } from 'node:timers/promises';
 import { PDFDocument, PDFDict, PDFName, PDFString, degrees } from 'pdf-lib';
 import { AnnotationMode, OPS, getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { TextSession } from '../src/pdf/text-session.ts';
@@ -75,6 +76,53 @@ test('new transparent text boxes keep stable IDs, stay editable, and do not accu
   reopened.delete(box.name); await reopened.save(); assert(!(await readTextPdf(file.bytes())).fields.some(field => field.name === box.name));
 });
 
+test('moving, resizing and changing size persist the same widget and regenerate editable appearances', async () => {
+  const file = memory(await fixture()); const session = await TextSession.open(file.store, font);
+  const box = session.add(1, [50, 250, 250, 275], 14, false);
+  session.setValue(box.name, 'A long answer with several words that wraps into a taller box.'); await session.save();
+  const reopened = await TextSession.open(file.store, font);
+  reopened.updateBox(box.name, [100, 200, 230, 360], { fontSize: 18, multiline: true }); await reopened.save();
+  reopened.updateBox(box.name, [120, 180, 320, 340]); await reopened.save();
+  const snapshot = await readTextPdf(file.bytes()); const owned = snapshot.fields.filter(field => field.owned);
+  assert.equal(owned.length, 1); assert.equal(owned[0]!.name, box.name); assert.equal(owned[0]!.widgets.length, 1);
+  assert.deepEqual(owned[0]!.widgets[0]!.rect, [120, 180, 320, 340]);
+  assert.equal(owned[0]!.fontSize, 18); assert.equal(owned[0]!.multiline, true);
+  assert.equal(snapshot.fields.find(field => field.name === 'Name')?.value, 'Before');
+  const task = getDocument({ data: file.bytes().slice(), standardFontDataUrl });
+  try {
+    const document = await task.promise; const page = await document.getPage(1);
+    const widget = (await page.getAnnotations({ intent: 'display' })).find(widget => widget.fieldName === box.name);
+    assert.deepEqual(widget?.rect, [120, 180, 320, 340]); assert.equal(widget?.hasAppearance, true);
+    assert.equal(widget?.fieldValue, box.value);
+  } finally { await task.destroy(); }
+  reopened.delete(box.name); await reopened.save();
+  assert(!(await readTextPdf(file.bytes())).fields.some(field => field.name === box.name));
+});
+
+test('box changes reject authored fields and invalid page geometry before mutating the model', async () => {
+  const file = memory(await fixture()); const session = await TextSession.open(file.store, font);
+  assert.throws(() => session.updateBox('Name', [50, 50, 150, 100]), /Only added/);
+  const box = session.add(1, [50, 250, 250, 275], 14, true); await session.save();
+  assert.throws(() => session.updateBox(box.name, [-1, 50, 100, 100]), /inside its PDF page/);
+  assert.throws(() => session.updateBox(box.name, [50, 50, 100, 100], { fontSize: NaN }), /inside its PDF page/);
+  assert.equal(session.dirty, false); assert.deepEqual(box.widgets[0]!.rect, [50, 250, 250, 275]);
+});
+
+test('long unbroken answers wrap in saved PDF appearances instead of extending beyond the box', async () => {
+  const file = memory(await fixture()); const session = await TextSession.open(file.store, font);
+  const box = session.add(1, [50, 200, 150, 500], 14, true);
+  const value = 'Supercalifragilisticexpialidocious'.repeat(3);
+  session.setValue(box.name, value); await session.save();
+  const task = getDocument({ data: file.bytes().slice(), standardFontDataUrl });
+  try {
+    const page = await (await task.promise).getPage(1);
+    const operators = await page.getOperatorList({ annotationMode: AnnotationMode.ENABLE });
+    const baselines = operators.fnArray.flatMap((op, index) => op === OPS.setTextMatrix ? [Number(operators.argsArray[index][0][5])] : []).filter(y => y < 300);
+    assert(baselines.length >= 6, `Expected wrapped lines, got ${baselines.length}`);
+    assert.equal((await readTextPdf(file.bytes())).fields.find(field => field.name === box.name)?.value, value);
+  } finally { await task.destroy(); }
+});
+
 test('external edits prevent overwriting and keep pending text for recovery', async () => {
   const file = memory(await fixture()); const session = await TextSession.open(file.store, font);
   session.setValue('Name', 'My pending answer');
@@ -122,6 +170,95 @@ test('changes during a write are queued and the final value wins without paralle
   assert.equal((await readTextPdf(file.bytes())).fields.find(field => field.name === 'Name')?.value, 'Final');
 });
 
+test('automatic saves wait through blank placement, typing, and focus moving to another box', async () => {
+  const seed = await fixture(); const file = memory(seed); const session = await TextSession.open(file.store, font);
+  const endPlacement = session.beginInteraction();
+  const first = session.add(1, [50, 250, 290, 270], 14, false);
+  const endFirstFocus = session.beginInteraction(); endPlacement();
+  const saving = session.saveWhenIdle();
+  await setImmediate(); assert.deepEqual(file.bytes(), seed); assert.equal(file.writes(), 0);
+  session.setValue(first.name, 'First answer');
+  // Blur and focus are consecutive synchronous browser events. A brief zero
+  // count must not let the queued writer refresh the PDF between them.
+  endFirstFocus(); const endNextPlacement = session.beginInteraction();
+  const second = session.add(1, [50, 200, 290, 220], 14, false);
+  const endSecondFocus = session.beginInteraction(); endNextPlacement();
+  session.setValue(second.name, 'Second answer');
+  await setImmediate(); assert.equal(file.writes(), 0);
+  endSecondFocus(); endSecondFocus(); await saving;
+  assert.equal(file.writes(), 1);
+  const owned = (await readTextPdf(file.bytes())).fields.filter(field => field.owned);
+  assert.deepEqual(owned.map(field => field.value), ['First answer', 'Second answer']);
+  assert.equal(session.status, 'saved');
+});
+
+test('a tap during save preparation defers the write and saves the final answer once', async () => {
+  const file = memory(await fixture());
+  let prepared!: () => void; let continueBackup!: () => void;
+  const preparation = new Promise<void>(resolve => { prepared = resolve; });
+  const barrier = new Promise<void>(resolve => { continueBackup = resolve; });
+  let first = true;
+  const session = await TextSession.open({ ...file.store, backup: async bytes => {
+    if (first) { first = false; prepared(); await barrier; }
+    return file.store.backup(bytes);
+  } }, font);
+  session.setValue('Name', 'Before the next tap'); const saving = session.saveWhenIdle();
+  await preparation;
+  const endPlacement = session.beginInteraction();
+  const box = session.add(2, [50, 350, 300, 375], 14, false);
+  const endFocus = session.beginInteraction(); endPlacement();
+  session.setValue(box.name, 'Typed while preparation was pending'); continueBackup();
+  await setImmediate(); assert.equal(file.writes(), 0);
+  endFocus(); await saving;
+  assert.equal(file.writes(), 1); assert.equal(session.dirty, false);
+  assert.equal((await readTextPdf(file.bytes())).fields.find(field => field.name === box.name)?.value, 'Typed while preparation was pending');
+});
+
+test('a focused second view delays automatic saving but explicit Save flushes without deadlocking', { timeout: 5000 }, async () => {
+  const file = memory(await fixture()); const session = await TextSession.open(file.store, font);
+  const endFocus = session.beginInteraction(); session.setValue('Name', 'Saved explicitly');
+  const automatic = session.saveWhenIdle(); await setImmediate(); assert.equal(file.writes(), 0);
+  await Promise.all([automatic, session.save()]);
+  assert.equal(file.writes(), 1); assert.equal(session.status, 'saved'); endFocus();
+  assert.equal((await readTextPdf(file.bytes())).fields.find(field => field.name === 'Name')?.value, 'Saved explicitly');
+});
+
+test('a new interaction during the final vault read also defers automatic replacement', async () => {
+  const file = memory(await fixture()); let reads = 0;
+  let reading!: () => void; let continueRead!: () => void;
+  const finalRead = new Promise<void>(resolve => { reading = resolve; });
+  const barrier = new Promise<void>(resolve => { continueRead = resolve; });
+  const session = await TextSession.open({ ...file.store, read: async () => {
+    const bytes = await file.store.read();
+    if (++reads === 3) { reading(); await barrier; }
+    return bytes;
+  } }, font);
+  session.setValue('Name', 'Initial'); const saving = session.saveWhenIdle(); await finalRead;
+  const endFocus = session.beginInteraction(); session.setValue('Name', 'Final after tap'); continueRead();
+  await setImmediate(); assert.equal(file.writes(), 0); endFocus(); await saving;
+  assert.equal(file.writes(), 1);
+  assert.equal((await readTextPdf(file.bytes())).fields.find(field => field.name === 'Name')?.value, 'Final after tap');
+});
+
+test('discard/reload cancels a waiting automatic save without writing the discarded text', { timeout: 5000 }, async () => {
+  const seed = await fixture(); const file = memory(seed); const session = await TextSession.open(file.store, font);
+  const endFocus = session.beginInteraction(); session.setValue('Name', 'Discard this');
+  const automatic = session.saveWhenIdle(); await setImmediate();
+  await session.reload(); await automatic; endFocus();
+  assert.equal(file.writes(), 0); assert.deepEqual(file.bytes(), seed);
+  assert.equal(session.snapshot.fields.find(field => field.name === 'Name')?.value, 'Before');
+});
+
+test('an external change while autosave waits is detected before the PDF is overwritten', async () => {
+  const file = memory(await fixture()); const session = await TextSession.open(file.store, font);
+  const endFocus = session.beginInteraction(); session.setValue('Name', 'Pending answer');
+  const automatic = session.saveWhenIdle();
+  const other = await PDFDocument.load(file.bytes()); other.setTitle('Changed while focused');
+  const external = await other.save(); file.replace(external); endFocus();
+  await assert.rejects(automatic, /changed outside/);
+  assert.equal(file.writes(), 0); assert.deepEqual(file.bytes(), external); assert.equal(session.status, 'conflict');
+});
+
 test('backup failure leaves the source byte-for-byte unchanged and supports retry', async () => {
   const seed = await fixture(); const file = memory(seed); let fail = true;
   const session = await TextSession.open({ ...file.store, backup: async bytes => {
@@ -146,6 +283,17 @@ test('unsupported glyphs do not silently save missing-letter appearances', async
   const seed = await fixture(); const file = memory(seed); const session = await TextSession.open(file.store, font);
   session.setValue('Name', 'An emoji 😀'); await assert.rejects(session.save(), /cannot render U\+1F600/);
   assert.deepEqual(file.bytes(), seed); assert.equal(session.dirty, true);
+});
+
+test('a clean automatic save leaves Saved status intact even while a box is focused', { timeout: 5000 }, async () => {
+  const file = memory(await fixture()); const session = await TextSession.open(file.store, font);
+  session.setValue('Name', 'Committed'); await session.save();
+  const release = session.beginInteraction();
+  try {
+    await session.saveWhenIdle();
+    assert.equal(session.status, 'saved'); assert.equal(session.dirty, false);
+    assert.equal(file.writes(), 1);
+  } finally { release(); }
 });
 
 test('cropped rotated pages retain widget geometry and editable orientation', async () => {

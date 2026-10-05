@@ -2,7 +2,7 @@
 
 Research date: **2026-10-05**. This document separates verified library capabilities from proposed implementation choices and hardware behavior that still needs testing.
 
-Implementation update: **0.2.1 implements the text-only path**, with native overlays and icon tools, PDF-LIB form writing, embedded Noto Sans, persistent original/restore recovery copies, serialized saves and conflict detection. Printed worksheets receive editable AcroForm text fields; the proposed FreeText path below was not selected. Wacom remains future research. See [the app test record](TESTING.md) and [current limits](../README.md#current-limits). The rest records the original research, not completed features.
+Implementation update: **0.3.0 implements the text-only path**, with native overlays and icon tools, movable/resizable boxes, automatic wrapping and height growth, PDF-LIB form writing, embedded Noto Sans, persistent original/restore recovery copies, serialized saves, interaction-aware automatic writes and conflict detection. Printed worksheets receive editable AcroForm text fields; the proposed FreeText path below was not selected. Wacom remains future research. See [the app test record](TESTING.md) and [current limits](../README.md#current-limits). The rest records the original research, not completed features.
 
 ## What the requested workflow requires
 

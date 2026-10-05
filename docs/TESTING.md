@@ -1,5 +1,27 @@
 # App test record
 
+## Version 0.3.0 Preview-style text boxes
+
+Checked on 2026-10-05 through Computer Use in an isolated vault and **Obsidian 1.13.7 desktop on macOS**. The final 0.3.0 build was installed and reloaded there. Tests used anonymous form/worksheet fixtures; no private PDF or answers were committed.
+
+| Scenario | Observed result |
+| --- | --- |
+| Reading view | A 24pt-high box grew to show multiple lines; selection displayed eight blue handles; keyboard movement/resizing changed the box and saved its text and geometry |
+| Selected font size | The native size picker changed the selected box from 14pt to 16pt; saving and reopening retained it |
+| Live Preview | Enter opened selected text for editing; new lines remained visible; explicit Save persisted them. The final shortcut fix saved with Cmd+S and retained text focus after native viewer replacement |
+| Standalone PDF tab | Keyboard movement and resizing saved successfully; the final save indicator remained Saved across a subsequent idle autosave |
+| Pop-out | Text editing, automatic growth and Cmd+S worked. A mouse drag of the right handle narrowed the box; dragging selected text moved it. Independent parsing confirmed both saved geometry changes |
+| Tap placement | In the pop-out, a tap created a focused editable box, two lines grew its height, and the file on disk retained its previous field count throughout focused typing; Done saved the new box |
+| Independent output | PDF parsing confirmed values and geometry; Poppler rendered the saved multiline answer; note Markdown stayed unchanged |
+
+The main-window coordinate automation initially returned `windowNotFoundAtPosition`; the successful mouse gesture pass above was in a pop-out. One earlier corner drag changed the on-screen preview without verified persistence; the subsequent right-handle resize and move were verified on disk. All eight handles, drag-to-create, rapid consecutive placement, zoom during gestures and quarter-turn combinations still need broader final-build app testing. Earlier app-version coverage below is historical, not a substitute for those checks.
+
+The save-stability work was developed under an unreleased 0.2.2 version before inclusion here. During that work, focused typing left the vault PDF unchanged, and leaving a field for the quick switcher saved its final value without stealing the switcher's focus.
+
+`npm run check` passes **34 tests**, lint, TypeScript, build and plugin validation. Regressions cover movement/page bounds and rotated geometry; stable widgets after move/resize/font changes; long-word/grapheme wrapping and independently parsed appearances; blank placement without immediate writes; focus handoff; interactions during save preparation and the final vault read; explicit saving with another focused view; cancellation on reload; stale-file detection; and clean autosaves retaining Saved status. Existing recovery/form-preservation tests also pass.
+
+Automatic saving waits while any view is typing, placing, moving or resizing a box, or using its toolbar/menu. Save, Done or Cmd/Ctrl+S commit explicitly; an explicit commit can refresh Obsidian's native viewer. The app pass found and fixed Live Preview shortcut interception and a queued clean autosave incorrectly changing Saved to Waiting.
+
 ## Version 0.2.1 refinement
 
 Tested on 2026-10-05 through Computer Use in **Obsidian 1.13.7 desktop on macOS**, using an isolated vault and a newly generated anonymous form/worksheet.
@@ -45,4 +67,4 @@ Tested on 2026-10-05 through the native Obsidian UI using Computer Use. App: **O
 
 App tests found and resolved separate Reading view ownership, autosave focus loss, observer feedback during file switches, PDF-tab viewer replacement and widget/page rotation sign differences. This is representative first-version coverage, not a guarantee for every PDF.
 
-Not established: Windows/Linux/mobile, older app versions, malformed PDFs, large-file performance, all quarter-turn combinations, third-party PDF plugin interoperability, CJK/emoji fallback, non-text form editing, moving/resizing boxes or Wacom input. Test separately before expanding support claims.
+Not established across releases: Windows/Linux/mobile, older app versions, malformed PDFs, large-file performance, all quarter-turn combinations, third-party PDF plugin interoperability, CJK/emoji fallback, non-text form editing or Wacom input. Test separately before expanding support claims.

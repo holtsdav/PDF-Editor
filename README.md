@@ -2,17 +2,20 @@
 
 Fill PDF text fields and type answers directly on printed worksheets embedded in Obsidian notes. Answers are saved into the vault PDF as editable AcroForm fields, with embedded fonts and appearance streams for other viewers and printing.
 
-**Version 0.2.1: text editing development beta.** Compact native PDF toolbar, transparent on-page text and recovery copies that persist across reloads. Tested through the actual Obsidian 1.13.7 desktop UI on macOS in an isolated vault. Development is private in [holtsdav/BetterPDF](https://github.com/holtsdav/BetterPDF). This is not yet a published Community plugin.
+**Version 0.3.0: text editing development beta.** Preview-style text boxes with blue resize handles, dragging, automatic wrapping and height growth. Development is private in [holtsdav/BetterPDF](https://github.com/holtsdav/BetterPDF). This is not yet a published Community plugin. See [the test record](docs/TESTING.md) for actual Obsidian 1.13.7 desktop coverage and limitations.
 
 ## Use
 
 1. Embed a PDF normally, for example `![[worksheet.pdf]]`, or open its PDF tab.
 2. Click the **T** icon (**Edit text**) in the PDF's existing toolbar. Hover over icons for their labels.
-3. Fill an existing text field, click a printed answer line to add text, or drag an area for a multiline answer. The drag shows the area being created. Choose the point size before creating a box.
-4. Changes save after a short pause, on leaving a field, with the **Save PDF** disk icon, or with Cmd/Ctrl+S inside a field. Wait for the status check (**Saved to PDF**) before closing Obsidian.
-5. Click the editing checkmark (**Done editing**) to return to normal viewing. Select a created box to reveal its **Remove text box** trash icon.
+3. Fill an existing text field, click a printed answer line to add text, or drag an area for an answer. New boxes wrap text and grow downward as you type, up to the page edge.
+4. Click a created box to select it. Drag its text or border to move it; drag a blue handle to resize it. Double-click or press Enter to edit the text. While typing, use its border to move it. **Text size** changes the selected box or the default for the next box. Delete/Backspace on a selected box, or its trash icon, removes it.
+5. Changes save automatically after leaving the editor's controls, once no view of that PDF is editing or placing a box. Use the **Save PDF** disk icon, Cmd/Ctrl+S inside a field or selected box, or **Done editing** to save immediately. Wait for the status check (**Saved to PDF**) before closing Obsidian.
+6. Click the editing checkmark (**Done editing**) to return to normal viewing.
 
-Text stays transparent, including while focused. A thin outline appears on hover or focus; the preview uses the same Noto Sans font embedded in saved text. The **PDF text options** ellipsis contains reload and recovery actions. A separate compact toolbar is used only when the native toolbar host is unavailable.
+Text stays transparent, including while focused. Selection uses a blue outline and eight handles, following [Preview's text-box interaction](https://support.apple.com/en-ie/guide/preview/prvw11580/mac). The preview uses the same Noto Sans font embedded in saved text. Arrow keys move a selected box; Shift increases the step, and Alt/Option+arrows resize its right or bottom edge. Shift+Tab leaves text editing for box selection. The **PDF text options** ellipsis contains reload and recovery actions. A separate compact toolbar is used only when the native toolbar host is unavailable.
+
+Creating a box keeps it in the shared editing session without immediately rewriting the PDF. Existing inputs stay mounted when another box is added or the viewer zooms. Automatic writes wait during placement, movement, resizing, focused editing and use of the toolbar/menu, including pauses in typing. Explicit saving can still make Obsidian refresh its viewer.
 
 Editing works in Reading view, Live Preview, PDF tabs and pop-out windows in the tested app version. Views of the same PDF share one document session and serialized writer. Overlays follow zoom, scrolling and cropped, rotated pages. New boxes retain the orientation in which they were created.
 
@@ -28,10 +31,10 @@ External changes stop stale saves. Pending answers remain in the open session; c
 
 ## Current limits
 
-- Text fields and manually placed boxes only. No Wacom/ink, OCR, recognition, field moving/resizing, or document-level undo. Ordinary text undo uses the browser's focused-field editing behavior.
+- Text fields and manually placed boxes only. Moving/resizing and font-size changes apply to boxes created by this plugin; existing authored form fields keep their original geometry. No Wacom/ink, OCR, recognition or document-level undo. Ordinary text undo uses the browser's focused-field editing behavior.
 - Other form controls are preserved, but changes to checkboxes, radio groups and dropdowns are not saved by this version. Use **Edit text** for persistent text changes.
 - Read-only, password and rich text fields cannot be edited. XFA, encrypted PDFs and PDFs containing signature fields are rejected for editing.
-- Noto Sans supports the tested German, Latin and Greek text. Unsupported glyphs produce a save error; there is no CJK/emoji font fallback. Long answers can be clipped; drag a larger multiline box when needed.
+- Noto Sans supports the tested German, Latin and Greek text. Unsupported glyphs produce a save error; there is no CJK/emoji font fallback. Growth stops at the page edge, where an overflow outline asks you to widen the box or reduce its text size. Original authored form regions can still clip long answers.
 - Native integration uses an undocumented compatibility adapter. Other app versions/platforms, arbitrary PDFs and third-party PDF plugins need further testing. Large PDFs are rewritten on save; this is not a collaborative or atomic compare-and-swap editor.
 - Pending text after a failed save is held in memory, not durable across termination. Wait for **Saved** or copy the text before closing. Backups preserve the PDF already on disk.
 

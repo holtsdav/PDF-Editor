@@ -1,6 +1,7 @@
 import { FIELD_PREFIX, readTextPdf, writeTextPdf } from './text-engine.ts';
-import type { AddedField, Rect, TextChanges, TextField, TextSnapshot } from './text-engine.ts';
+import type { AddedField, BoxUpdate, Rect, TextChanges, TextField, TextSnapshot } from './text-engine.ts';
 import type { BackupPurpose } from './recovery.ts';
+import { InteractionGate } from './interaction-gate.ts';
 
 export interface PdfStore {
   read(): Promise<Uint8Array>;
@@ -22,12 +23,15 @@ export class TextSession {
   private baseline: Uint8Array;
   private store: PdfStore;
   private font: Uint8Array;
-  private changes: TextChanges = { values: new Map(), added: new Map(), deleted: new Set() };
+  private changes: TextChanges = { values: new Map(), added: new Map(), boxes: new Map(), deleted: new Set() };
   private revision = 0;
   private savedRevision = 0;
   private queue: Promise<void> = Promise.resolve();
   private listeners = new Set<() => void>();
   private writing = false;
+  private interactions = new InteractionGate();
+  private editEpoch = 0;
+  private waitingForInteraction = false;
 
   private constructor(store: PdfStore, font: Uint8Array, seed: Uint8Array, snapshot: TextSnapshot) {
     this.store = store; this.font = font; this.seed = seed; this.baseline = seed; this.snapshot = snapshot;
@@ -40,7 +44,7 @@ export class TextSession {
 
   subscribe(callback: () => void): () => void { this.listeners.add(callback); return () => this.listeners.delete(callback); }
   private notify(): void { for (const listener of this.listeners) listener(); }
-  private changed(): void { this.revision++; if (this.status !== 'conflict') this.status = this.writing ? 'saving' : 'unsaved'; this.error = ''; this.notify(); }
+  private changed(): void { this.revision++; if (this.status !== 'conflict') this.status = this.writing && !this.waitingForInteraction ? 'saving' : 'unsaved'; this.error = ''; this.notify(); }
   get dirty(): boolean { return this.revision !== this.savedRevision; }
   private get conflicted(): boolean { return this.status === 'conflict'; }
 
@@ -68,16 +72,58 @@ export class TextSession {
     if (this.changes.added.has(name)) this.changes.added.delete(name);
     else this.changes.deleted.add(name);
     this.changes.values.delete(name);
+    this.changes.boxes.delete(name);
     this.snapshot.fields = this.snapshot.fields.filter(field => field.name !== name); this.changed();
   }
 
+  updateBox(name: string, rect: Rect, options: Partial<Omit<BoxUpdate, 'rect'>> = {}): void {
+    if (this.status === 'conflict') throw new Error('Reload the PDF before moving or resizing text.');
+    const field = this.snapshot.fields.find(field => field.name === name);
+    if (!field?.owned || field.readOnly || field.widgets.length !== 1) throw new Error('Only added text boxes can be moved or resized.');
+    const widget = field.widgets[0]!;
+    const bounds = this.snapshot.pages[widget.page - 1]!;
+    const fontSize = options.fontSize ?? field.fontSize;
+    const multiline = options.multiline ?? field.multiline;
+    if (![...rect, fontSize].every(Number.isFinite) || rect[2] <= rect[0] || rect[3] <= rect[1] || fontSize <= 0
+      || rect[0] < bounds[0] - 0.001 || rect[1] < bounds[1] - 0.001 || rect[2] > bounds[2] + 0.001 || rect[3] > bounds[3] + 0.001) {
+      throw new Error('Keep the text box inside its PDF page.');
+    }
+    if (widget.rect.every((value, index) => Math.abs(value - rect[index]!) < 0.001) && fontSize === field.fontSize && multiline === field.multiline) return;
+    widget.rect = [...rect]; field.fontSize = fontSize; field.multiline = multiline;
+    this.changes.boxes.set(name, { rect: [...rect], fontSize, multiline });
+    this.changes.values.set(name, field.value); this.changed();
+  }
+
   save(): Promise<void> {
+    // Explicit Save/Done/close must also release an automatic save already
+    // waiting in the queue, otherwise the explicit request would deadlock.
+    this.interactions.flush();
     const result = this.queue.catch(() => {}).then(() => this.performSave());
+    this.queue = result; return result;
+  }
+
+  beginInteraction(): () => void { return this.interactions.begin(); }
+
+  private async waitForInteraction(generation: number): Promise<void> {
+    if (this.interactions.isIdle(generation)) return;
+    this.waitingForInteraction = true;
+    if (this.status !== 'conflict') { this.status = 'unsaved'; this.notify(); }
+    await this.interactions.whenIdle(generation);
+    this.waitingForInteraction = false;
+    if (this.writing && this.status !== 'conflict') { this.status = 'saving'; this.notify(); }
+  }
+
+  saveWhenIdle(): Promise<void> {
+    const generation = this.interactions.generation;
+    const epoch = this.editEpoch;
+    const result = this.queue.catch(() => {}).then(() => this.performSave(generation, epoch));
     this.queue = result; return result;
   }
 
   /** Caller confirms discarding pending edits. The current PDF is backed up first. */
   restore(bytes: Uint8Array): Promise<void> {
+    this.editEpoch++;
+    this.interactions.flush();
     const restore = async (): Promise<void> => {
       const snapshot = await readTextPdf(bytes);
       if (!equalBytes(await this.store.read(), this.baseline)) return this.conflict();
@@ -88,7 +134,7 @@ export class TextSession {
         await this.store.write(bytes);
         if (!equalBytes(await this.store.read(), bytes)) return this.conflict();
         this.seed = bytes.slice(); this.baseline = bytes.slice(); this.snapshot = snapshot;
-        this.changes = { values: new Map(), added: new Map(), deleted: new Set() };
+        this.changes = { values: new Map(), added: new Map(), boxes: new Map(), deleted: new Set() };
         this.revision = 0; this.savedRevision = 0; this.backupPath = recovery;
         this.status = 'saved'; this.error = ''; this.notify();
       } catch (error) {
@@ -100,21 +146,39 @@ export class TextSession {
     this.queue = result; return result;
   }
 
-  private async performSave(): Promise<void> {
+  private async performSave(generation?: number, epoch?: number): Promise<void> {
+    // A queued autosave may follow an explicit commit. A clean document must
+    // not wait for focus or change its already-saved status.
+    if (epoch !== undefined && epoch !== this.editEpoch) return;
+    if (!this.dirty && this.status !== 'conflict') return;
+    if (generation !== undefined) await this.waitForInteraction(generation);
+    if (epoch !== undefined && epoch !== this.editEpoch) return;
     if (this.status === 'conflict') throw new Error(this.error || 'The PDF changed outside this editing session. Reload before saving.');
     if (!this.dirty) return;
     this.status = 'saving'; this.error = ''; this.notify();
     this.writing = true;
-    const revision = this.revision;
-    const changes: TextChanges = {
-      values: new Map(this.changes.values), added: new Map(this.changes.added), deleted: new Set(this.changes.deleted)
-    };
     try {
-      if (!equalBytes(await this.store.read(), this.baseline)) return this.conflict();
-      const output = await writeTextPdf(this.seed, changes, this.font);
-      this.backupPath = await this.store.backup(this.baseline);
-      // Recheck after serialization/backup: sync or another editor may have written meanwhile.
-      if (!equalBytes(await this.store.read(), this.baseline)) return this.conflict();
+      let revision: number;
+      let output: Uint8Array;
+      do {
+        if (generation !== undefined) await this.waitForInteraction(generation);
+        if (epoch !== undefined && epoch !== this.editEpoch) return;
+        revision = this.revision;
+        const changes: TextChanges = {
+          values: new Map(this.changes.values), added: new Map(this.changes.added), boxes: new Map(this.changes.boxes), deleted: new Set(this.changes.deleted)
+        };
+        if (!equalBytes(await this.store.read(), this.baseline)) return this.conflict();
+        output = await writeTextPdf(this.seed, changes, this.font);
+        this.backupPath = await this.store.backup(this.baseline);
+        // A new tap/focus can arrive during PDF serialization or backup I/O.
+        // Wait again at the write boundary and regenerate if the answer changed.
+        if (generation !== undefined) await this.waitForInteraction(generation);
+        if (epoch !== undefined && epoch !== this.editEpoch) return;
+        // Recheck after serialization/backup/waiting. The synchronous idle check
+        // also catches a new interaction during this final asynchronous read.
+        if (!equalBytes(await this.store.read(), this.baseline)) return this.conflict();
+        if (epoch !== undefined && epoch !== this.editEpoch) return;
+      } while (generation !== undefined && (revision !== this.revision || !this.interactions.isIdle(generation)));
       await this.store.write(output);
       if (!equalBytes(await this.store.read(), output)) return this.conflict();
       this.baseline = output;
@@ -142,11 +206,13 @@ export class TextSession {
 
   /** Caller must explicitly discard pending changes before reload if dirty. */
   async reload(): Promise<void> {
+    this.editEpoch++;
+    this.interactions.flush();
     await this.queue.catch(() => {});
     const bytes = await this.store.read();
     const snapshot = await readTextPdf(bytes);
     this.seed = bytes.slice(); this.baseline = bytes; this.snapshot = snapshot;
-    this.changes = { values: new Map(), added: new Map(), deleted: new Set() };
+    this.changes = { values: new Map(), added: new Map(), boxes: new Map(), deleted: new Set() };
     this.revision = 0; this.savedRevision = 0; this.status = 'saved'; this.error = ''; this.notify();
   }
 }
