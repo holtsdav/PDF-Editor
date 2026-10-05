@@ -1,6 +1,7 @@
 import { PDFArray, PDFDict, PDFHexString, PDFName, PDFNumber, PDFRef, PDFStream, PDFString } from 'pdf-lib';
 import type { PDFDocument } from 'pdf-lib';
 import type { Rect } from './text-engine.ts';
+import { referencedObjects, pruneReplacedObjects } from './object-references.ts';
 
 export const INK_PREFIX = 'pdf-form-studio-ink-';
 export type Point = [number, number];
@@ -9,6 +10,7 @@ export interface InkStroke {
   id: string; page: number; kind: InkKind; points: Point[]; width: number;
   color: [number, number, number]; opacity: number; rect: Rect; readOnly: boolean;
   annotationId?: string;
+  hidden?: boolean;
 }
 
 function text(dict: PDFDict, key: string): string | undefined {
@@ -23,6 +25,10 @@ function numbers(dict: PDFDict, key: string): number[] | undefined {
 }
 function number(dict: PDFDict, key: string, fallback: number): number {
   const value = dict.lookup(PDFName.of(key)); return value instanceof PDFNumber ? value.asNumber() : fallback;
+}
+function owns(dict: PDFDict, id: string): boolean {
+  return dict.get(PDFName.of('Subtype'))?.toString() === '/Ink' && text(dict, 'NM') === id
+    && ['/Marker', '/Scribble'].includes(dict.get(PDFName.of('PFSKind'))?.toString() ?? '');
 }
 
 export function strokeBounds(points: Point[], width: number, bounds: Rect): Rect {
@@ -70,8 +76,9 @@ export function readInk(pdf: PDFDocument): InkStroke[] {
       if (color.length !== 3 || rect?.length !== 4) throw new Error('Invalid drawing appearance in this PDF.');
       const stroke: InkStroke = { id, page: index + 1, kind: tag === '/Marker' ? 'marker' : 'scribble', points, width,
         opacity: number(dict, 'CA', 1), color: color as InkStroke['color'], rect: rect as Rect,
-        readOnly: !!(number(dict, 'F', 0) & (64 | 128 | 512)),
+        readOnly: !!(number(dict, 'F', 0) & (1 | 2 | 32 | 64 | 128 | 256 | 512)),
         annotationId: ref instanceof PDFRef ? `${ref.objectNumber}R${ref.generationNumber || ''}` : undefined };
+      if (number(dict, 'F', 0) & (1 | 2 | 32 | 256)) stroke.hidden = true;
       validateStroke(stroke, bounds); strokes.push(stroke);
     }
   });
@@ -103,6 +110,12 @@ function appearance(stroke: InkStroke): string {
 
 export function writeInk(pdf: PDFDocument, added: Map<string, InkStroke>, deleted: Set<string>): void {
   const existing = new Map(readInk(pdf).map(stroke => [stroke.id, stroke]));
+  const replaced = referencedObjects(pdf, pdf.getPages().flatMap(page => (page.node.Annots()?.asArray() ?? []).flatMap(ref => {
+    const dict = pdf.context.lookup(ref);
+    if (!(dict instanceof PDFDict)) return [];
+    const id = text(dict, 'NM');
+    return id && owns(dict, id) && (added.has(id) || deleted.has(id)) ? [dict.get(PDFName.of('AP'))] : [];
+  })));
   for (const id of deleted) {
     if (!id.startsWith(INK_PREFIX) || existing.get(id)?.readOnly) throw new Error('This drawing cannot be removed.');
     for (const page of pdf.getPages()) {
@@ -110,7 +123,7 @@ export function writeInk(pdf: PDFDocument, added: Map<string, InkStroke>, delete
       if (!annotations) continue;
       for (let i = annotations.size() - 1; i >= 0; i--) {
         const dict = annotations.lookup(i);
-        if (dict instanceof PDFDict && text(dict, 'NM') === id && existing.has(id)) annotations.remove(i);
+        if (dict instanceof PDFDict && owns(dict, id) && existing.has(id)) annotations.remove(i);
       }
     }
   }
@@ -134,12 +147,13 @@ export function writeInk(pdf: PDFDocument, added: Map<string, InkStroke>, delete
       PFSKind: stroke.kind === 'marker' ? 'Marker' : 'Scribble', AP: { N: ap } });
     if (stroke.kind === 'marker') dict.set(PDFName.of('IT'), PDFName.of('InkHighlight'));
     if (prior) {
-      const target = page.node.Annots()!.asArray().map(ref => context.lookup(ref, PDFDict)).find(value => text(value, 'NM') === stroke.id)!;
+      const target = page.node.Annots()!.asArray().map(ref => context.lookup(ref)).find((value): value is PDFDict => value instanceof PDFDict && owns(value, stroke.id))!;
       for (const [key, value] of dict.entries()) {
         if (key.toString() !== '/F' && key.toString() !== '/Contents') target.set(key, value);
       }
     } else page.node.addAnnot(context.register(dict));
   }
+  pruneReplacedObjects(pdf, replaced);
 }
 
 export function verifyInk(pdf: PDFDocument, added: Map<string, InkStroke>, deleted: Set<string>): void {
@@ -153,7 +167,7 @@ export function verifyInk(pdf: PDFDocument, added: Map<string, InkStroke>, delet
       || JSON.stringify(output.points) !== JSON.stringify(points) || JSON.stringify(output.color) !== JSON.stringify(stroke.color)
       || output.rect.some((value, i) => Math.abs(value - stroke.rect[i]!) > 0.001)) throw new Error('PDF drawing value verification failed.');
     const page = pdf.getPages()[output.page - 1]!;
-    const dict = page.node.Annots()!.asArray().map(ref => pdf.context.lookup(ref, PDFDict)).find(dict => text(dict, 'NM') === stroke.id)!;
+    const dict = page.node.Annots()!.asArray().map(ref => pdf.context.lookup(ref)).find((dict): dict is PDFDict => dict instanceof PDFDict && owns(dict, stroke.id))!;
     const ap = dict.lookup(PDFName.of('AP'), PDFDict).lookup(PDFName.of('N'));
     if (!(ap instanceof PDFStream) || !ap.dict.has(PDFName.of('Resources'))) throw new Error('PDF drawing appearance verification failed.');
   }

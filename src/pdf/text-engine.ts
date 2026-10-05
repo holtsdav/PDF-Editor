@@ -1,4 +1,4 @@
-import { PDFDocument, PDFHexString, PDFString, PDFDict, PDFName, PDFStream, PDFTextField, rgb, setFontAndSize, setFillingRgbColor } from 'pdf-lib';
+import { PDFDocument, PDFHexString, PDFString, PDFDict, PDFArray, PDFName, PDFNumber, PDFStream, PDFTextField, rgb, setFontAndSize, setFillingRgbColor } from 'pdf-lib';
 import type { PDFFont } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import { multilineAppearance } from './text-appearance.ts';
@@ -6,6 +6,7 @@ import { readInk, verifyInk, writeInk } from './ink-engine.ts';
 import type { InkStroke } from './ink-engine.ts';
 import { defaultColor, validColor } from './text-format.ts';
 import type { FontFamily, PdfColor, PdfFonts, TextFormat } from './text-format.ts';
+import { referencedObjects, pruneReplacedObjects } from './object-references.ts';
 
 export const FIELD_PREFIX = 'pdf-form-studio-';
 export type Rect = [number, number, number, number];
@@ -35,12 +36,55 @@ async function loadWritable(bytes: Uint8Array): Promise<PDFDocument> {
   const pdf = await PDFDocument.load(bytes, { updateMetadata: false });
   const acroForm = pdf.catalog.lookupMaybe(PDFName.of('AcroForm'), PDFDict);
   if (acroForm?.has(PDFName.of('XFA'))) throw new Error('XFA PDFs are read only in this version.');
-  for (const [, object] of pdf.context.enumerateIndirectObjects()) {
-    if (object instanceof PDFDict && (object.has(PDFName.of('ByteRange')) || object.get(PDFName.of('FT'))?.toString() === '/Sig')) {
+  const pending = pdf.context.enumerateIndirectObjects().map(([, object]) => object), visited = new Set();
+  while (pending.length) {
+    const object = pending.pop()!;
+    if (visited.has(object)) continue; visited.add(object);
+    if (object instanceof PDFDict && (object.has(PDFName.of('ByteRange')) || object.get(PDFName.of('FT'))?.toString() === '/Sig' || object.get(PDFName.of('Type'))?.toString() === '/Sig')) {
       throw new Error('PDFs containing signature fields are read only in this version.');
     }
+    if (object instanceof PDFDict) pending.push(...object.values());
+    if (object instanceof PDFArray) pending.push(...object.asArray());
+  }
+  validateTree(pdf, pdf.catalog.lookup(PDFName.of('Pages')), 'page');
+  const roots = acroForm?.lookup(PDFName.of('Fields'));
+  if (roots instanceof PDFArray) validateTree(pdf, roots, 'form');
+  const names = new Set<string>();
+  for (const field of pdf.getForm().getFields()) {
+    const name = field.getName();
+    if (names.has(name)) throw new Error('The PDF contains duplicate field names. Editing would be ambiguous.');
+    names.add(name);
   }
   return pdf;
+}
+
+/** Bound recursive library traversal before entering page/form trees. */
+function validateTree(pdf: PDFDocument, root: unknown, kind: string): void {
+  const pending = [{ value: root, depth: 0 }], seen = new Set<PDFDict | PDFArray>();
+  while (pending.length) {
+    const { value, depth } = pending.pop()!;
+    if (value instanceof PDFArray) {
+      if (seen.has(value)) throw new Error(`Malformed PDF ${kind} tree: cyclic array.`);
+      seen.add(value); for (const child of value.asArray()) pending.push({ value: pdf.context.lookup(child), depth }); continue;
+    }
+    if (!(value instanceof PDFDict) || depth > 128 || seen.has(value)) throw new Error(`Malformed PDF ${kind} tree: cyclic, repeated or excessively deep entries.`);
+    seen.add(value);
+    const parents = new Set<PDFDict>([value]); let parent = value.lookup(PDFName.of('Parent'));
+    while (parent instanceof PDFDict) {
+      if (parents.has(parent) || parents.size > 128) throw new Error(`Malformed PDF ${kind} parent chain.`);
+      parents.add(parent); parent = parent.lookup(PDFName.of('Parent'));
+    }
+    const children = value.lookup(PDFName.of('Kids'));
+    if (children !== undefined) {
+      if (!(children instanceof PDFArray)) throw new Error(`Malformed PDF ${kind} children.`);
+      pending.push({ value: children, depth: depth + 1 });
+    }
+  }
+}
+
+function editableText(field: PDFTextField): boolean {
+  return !field.isReadOnly() && !field.isPassword() && !field.isRichFormatted()
+    && field.acroField.getWidgets().every(widget => !(widget.getFlags() & (1 | 2 | 32 | 64 | 128 | 256 | 512)));
 }
 
 export async function readTextPdf(bytes: Uint8Array): Promise<TextSnapshot> {
@@ -66,7 +110,7 @@ export async function readTextPdf(bytes: Uint8Array): Promise<TextSnapshot> {
       name: field.getName(), value: field.getText() ?? '', fontSize: Number(size) || 14,
       fontFamily: field.acroField.dict.get(PDFName.of('PFSFont'))?.toString() === '/serif' ? 'serif'
         : field.acroField.dict.get(PDFName.of('PFSFont'))?.toString() === '/mono' ? 'mono' : 'sans', color: defaultColor(da),
-      multiline: field.isMultiline(), readOnly: field.isReadOnly() || field.isPassword() || field.isRichFormatted(),
+      multiline: field.isMultiline(), readOnly: !editableText(field),
       owned: field.getName().startsWith(FIELD_PREFIX), maxLength: field.getMaxLength(), widgets
     });
   }
@@ -83,17 +127,29 @@ export async function writeTextPdf(seed: Uint8Array, changes: TextChanges, fontB
   const pdf = await loadWritable(seed);
   pdf.registerFontkit(fontkit);
   const form = pdf.getForm();
+  const replaced = referencedObjects(pdf, form.getFields().flatMap(field =>
+    changes.values.has(field.getName()) || changes.boxes.has(field.getName()) || changes.deleted.has(field.getName())
+      ? field.acroField.getWidgets().flatMap(widget => widget.dict.lookupMaybe(PDFName.of('AP'), PDFDict)?.values() ?? []) : []));
   const embedded = new Map<FontFamily, PDFFont>();
   const getFont = async (family: FontFamily): Promise<PDFFont> => {
     let font = embedded.get(family);
     if (!font) { font = await pdf.embedFont(fontBytes instanceof Uint8Array ? fontBytes : fontBytes[family], { subset: true }); embedded.set(family, font); }
     return font;
   };
-  const font = await getFont('sans');
   for (const name of changes.deleted) {
     if (!name.startsWith(FIELD_PREFIX)) throw new Error('Only text boxes created by this plugin can be deleted.');
     const field = form.getFieldMaybe(name);
-    if (field) form.removeField(field);
+    if (field) {
+      // PDF-LIB 1.17 removes appearance refs instead of separate widget refs.
+      // Capture the exact page entries before it deletes their dictionaries.
+      const widgets = new Set(field.acroField.getWidgets().map(widget => widget.dict));
+      const entries = pdf.getPages().map(page => ({ annotations: page.node.Annots(),
+        refs: new Set(page.node.Annots()?.asArray().filter(ref => widgets.has(pdf.context.lookup(ref) as PDFDict)) ?? []) }));
+      form.removeField(field);
+      for (const { annotations, refs } of entries) if (annotations) {
+        for (let i = annotations.size() - 1; i >= 0; i--) if (refs.has(annotations.get(i))) annotations.remove(i);
+      }
+    }
   }
   for (const added of changes.added.values()) {
     if (!added.name.startsWith(FIELD_PREFIX) || form.getFieldMaybe(added.name)) throw new Error('Invalid or duplicate text box ID.');
@@ -104,7 +160,7 @@ export async function writeTextPdf(seed: Uint8Array, changes: TextChanges, fontB
     const field = form.createTextField(added.name);
     if (added.multiline) field.enableMultiline();
     field.addToPage(page, { x: x1, y: y1, width: x2 - x1, height: y2 - y1, borderWidth: 0,
-      backgroundColor: undefined, borderColor: undefined, textColor: rgb(0.05, 0.05, 0.05), font });
+      backgroundColor: undefined, borderColor: undefined, textColor: rgb(0.05, 0.05, 0.05), font: await getFont('sans') });
     field.setFontSize(added.fontSize);
     // Rotate the widget appearance to follow the user's current viewport orientation.
     if (added.rotation) field.acroField.getWidgets()[0]?.getOrCreateAppearanceCharacteristics().setRotation(added.rotation);
@@ -133,7 +189,7 @@ export async function writeTextPdf(seed: Uint8Array, changes: TextChanges, fontB
         throw new Error(`The PDF font cannot render U+${code.toString(16).toUpperCase()}. Your text is kept here; replace the unsupported character before saving.`);
       }
     }
-    if (field.isReadOnly() || field.isPassword() || field.isRichFormatted()) throw new Error(`Field ${name} is read only or unsupported.`);
+    if (!editableText(field)) throw new Error(`Field ${name} is read only or unsupported.`);
     const maximum = field.getMaxLength();
     if (maximum !== undefined && value.length > maximum) throw new Error(`Field ${name} allows at most ${maximum} characters.`);
     field.setText(value);
@@ -144,9 +200,14 @@ export async function writeTextPdf(seed: Uint8Array, changes: TextChanges, fontB
     const da = `${setFillingRgbColor(...color)}\n${setFontAndSize(font.name, size)}`;
     field.acroField.setDefaultAppearance(da); field.acroField.dict.set(PDFName.of('PFSFont'), PDFName.of(family));
     for (const widget of field.acroField.getWidgets()) widget.setDefaultAppearance(da);
+    // Capture stream refs now: PDF-LIB mutates the AP dictionary in place.
+    for (const ref of referencedObjects(pdf, field.acroField.getWidgets().flatMap(widget => widget.dict.lookupMaybe(PDFName.of('AP'), PDFDict)?.values() ?? []))) replaced.add(ref);
     field.updateAppearances(font, field.getName().startsWith(FIELD_PREFIX) && field.isMultiline() ? multilineAppearance : undefined);
   }
   writeInk(pdf, changes.strokes, changes.deletedStrokes);
+  await pdf.flush();
+  // Embedded fonts may only resolve after flush; expand the captured refs then.
+  pruneReplacedObjects(pdf, referencedObjects(pdf, [...replaced]));
   const bytes = await pdf.save({ updateFieldAppearances: false });
   // Reopen and verify logical values, widget appearances, and page count before any vault write.
   const verified = await PDFDocument.load(bytes, { updateMetadata: false });
@@ -187,12 +248,17 @@ export async function writeTextPdf(seed: Uint8Array, changes: TextChanges, fontB
 /** Display copy only: keep foreign annotations and editable widgets; own ink is painted live. */
 export async function renderTextPdf(seed: Uint8Array): Promise<Uint8Array> {
   const pdf = await loadWritable(seed);
+  // Text widgets are painted by the stable editable layer. Preserve other
+  // controls and foreign annotations in the background, including checkboxes.
+  const textWidgets = new Set(pdf.getForm().getFields().flatMap(field => field instanceof PDFTextField && editableText(field) ? field.acroField.getWidgets().map(widget => widget.dict) : []));
   for (const page of pdf.getPages()) {
     const annotations = page.node.Annots(); if (!annotations) continue;
     for (let i = annotations.size() - 1; i >= 0; i--) {
       const dict = annotations.lookup(i);
+      if (dict instanceof PDFDict && textWidgets.has(dict)) { annotations.remove(i); continue; }
       if (dict instanceof PDFDict && ['/Marker', '/Scribble'].includes(dict.get(PDFName.of('PFSKind'))?.toString() ?? '')
         && dict.get(PDFName.of('Subtype'))?.toString() === '/Ink'
+        && !((dict.lookupMaybe(PDFName.of('F'), PDFNumber)?.asNumber() ?? 0) & (1 | 2 | 32 | 256))
         && readInkId(dict)?.startsWith('pdf-form-studio-ink-')) annotations.remove(i);
     }
   }

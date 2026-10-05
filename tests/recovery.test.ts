@@ -37,7 +37,7 @@ test('legacy index reuses the prior recovery file, without deleting older copies
   assert(records['Worksheet.pdf']?.originalHash); assert.equal(records.invalid, undefined);
 });
 
-test('repeated restores and reverse restores reuse one slot and preserve the original', async () => {
+test('repeated restores and reverse restores reuse two slots and preserve the original', async () => {
   const memoryStore = memory(); const original = new Uint8Array([1]); const edited = new Uint8Array([2]);
   const copies = new RecoveryCopies(memoryStore.store, memoryStore.records, memoryStore.persist);
   await copies.protect('Worksheet.pdf', 'Worksheet.pdf', original);
@@ -45,7 +45,21 @@ test('repeated restores and reverse restores reuse one slot and preserve the ori
     await copies.protect('Worksheet.pdf', 'Worksheet.pdf', number % 2 === 0 ? edited : original, 'restore');
     assert.deepEqual(await copies.read('Worksheet.pdf', 'recovery'), number % 2 === 0 ? edited : original);
   }
-  assert.equal(memoryStore.files.size, 2); assert.deepEqual(await copies.read('Worksheet.pdf'), original);
+  assert.equal(memoryStore.files.size, 3); assert.deepEqual(await copies.read('Worksheet.pdf'), original);
+});
+
+test('legacy originals named like restore slots cannot be overwritten by a restore', async () => {
+  for (const filename of ['before-restore.pdf', 'before-restore-next.pdf', 'before-restore-spare.pdf']) {
+    const m = memory(), original = `${BACKUP_ROOT}/legacy/${filename}`; m.files.set(original, new Uint8Array([1]));
+    m.records['Worksheet.pdf'] = { original }; const copies = new RecoveryCopies(m.store, m.records, m.persist);
+    for (let i = 0; i < 4; i++) await copies.protect('Worksheet.pdf', 'Worksheet.pdf', new Uint8Array([i + 2]), 'restore');
+    assert.deepEqual(await copies.read('Worksheet.pdf'), new Uint8Array([1]));
+  }
+});
+
+test('recovery indexes cannot redirect restores outside hidden storage through traversal', () => {
+  const records = loadBackups({ 'Bad.pdf': `${BACKUP_ROOT}/../../../outside.pdf`, 'AlsoBad.pdf': { original: `${BACKUP_ROOT}/ok/original.pdf`, recovery: `${BACKUP_ROOT}/ok/../../outside.pdf` } });
+  assert.equal(records['Bad.pdf'], undefined); assert.equal(records['AlsoBad.pdf']!.recovery, undefined);
 });
 
 test('concurrent protection requests create just one verified original', async () => {
@@ -84,4 +98,24 @@ test('recovery PDFs cannot recursively produce backups of backups', async () => 
   const memoryStore = memory(); const copies = new RecoveryCopies(memoryStore.store, memoryStore.records, memoryStore.persist);
   await assert.rejects(copies.protect(`${BACKUP_ROOT}/copy/Worksheet.pdf`, 'Worksheet.pdf', new Uint8Array([1])), /read only/);
   assert.equal(memoryStore.files.size, 0);
+});
+
+test('a missing original is never silently replaced by a later edited PDF', async () => {
+  const memoryStore = memory(), copies = new RecoveryCopies(memoryStore.store, memoryStore.records, memoryStore.persist);
+  const path = await copies.protect('Worksheet.pdf', 'Worksheet.pdf', new Uint8Array([1]));
+  const expectedHash = memoryStore.records['Worksheet.pdf']!.originalHash; memoryStore.files.delete(path);
+  await assert.rejects(copies.protect('Worksheet.pdf', 'Worksheet.pdf', new Uint8Array([2])), /removed/);
+  assert.equal(memoryStore.records['Worksheet.pdf']!.originalHash, expectedHash); assert(!memoryStore.files.has(path));
+});
+
+test('an interrupted restore-copy write preserves the prior reverse-restore copy', async () => {
+  const memoryStore = memory(); let fail = false;
+  const copies = new RecoveryCopies({ ...memoryStore.store, write: async (path, bytes) => {
+    if (fail) { memoryStore.files.set(path, new Uint8Array([99])); throw new Error('Interrupted restore copy'); }
+    await memoryStore.store.write(path, bytes);
+  } }, memoryStore.records, memoryStore.persist);
+  await copies.protect('Worksheet.pdf', 'Worksheet.pdf', new Uint8Array([1]));
+  await copies.protect('Worksheet.pdf', 'Worksheet.pdf', new Uint8Array([2]), 'restore'); fail = true;
+  await assert.rejects(copies.protect('Worksheet.pdf', 'Worksheet.pdf', new Uint8Array([3]), 'restore'), /Interrupted/);
+  assert.deepEqual(await copies.read('Worksheet.pdf', 'recovery'), new Uint8Array([2]));
 });

@@ -11,16 +11,19 @@ export interface RecoveryStore {
 }
 
 export function isRecoveryPath(path: string, root = BACKUP_ROOT): boolean { return path.startsWith(root + '/') || path.startsWith(LEGACY_BACKUP_ROOT + '/'); }
+function safeRecoveryPath(path: string, root: string): boolean {
+  return isRecoveryPath(path, root) && !path.includes('\\') && !path.split('/').some(part => part === '.' || part === '..');
+}
 export function loadBackups(value: unknown, root = BACKUP_ROOT): Record<string, BackupRecord> {
   if (!value || typeof value !== 'object') return {};
-  const result: Record<string, BackupRecord> = {};
+  const result: Record<string, BackupRecord> = Object.create(null) as Record<string, BackupRecord>;
   for (const [source, saved] of Object.entries(value)) {
     // 0.2.0 stored only the latest backup path. Reuse that file without copying it.
-    if (typeof saved === 'string' && isRecoveryPath(saved, root)) result[source] = { original: saved };
-    else if (saved && typeof saved === 'object' && 'original' in saved && typeof saved.original === 'string' && isRecoveryPath(saved.original, root)) {
+    if (typeof saved === 'string' && safeRecoveryPath(saved, root)) result[source] = { original: saved };
+    else if (saved && typeof saved === 'object' && 'original' in saved && typeof saved.original === 'string' && safeRecoveryPath(saved.original, root)) {
       const record: BackupRecord = { original: saved.original };
       if ('originalHash' in saved && typeof saved.originalHash === 'string') record.originalHash = saved.originalHash;
-      if ('recovery' in saved && typeof saved.recovery === 'string' && isRecoveryPath(saved.recovery, root)) record.recovery = saved.recovery;
+      if ('recovery' in saved && typeof saved.recovery === 'string' && safeRecoveryPath(saved.recovery, root)) record.recovery = saved.recovery;
       if ('recoveryHash' in saved && typeof saved.recoveryHash === 'string') record.recoveryHash = saved.recoveryHash;
       result[source] = record;
     }
@@ -33,7 +36,7 @@ export async function hash(bytes: Uint8Array): Promise<string> {
   return Array.from(new Uint8Array(digest), value => value.toString(16).padStart(2, '0')).join('');
 }
 
-/** One retained original and one reusable restore slot per PDF, across app reloads. */
+/** One retained original and two alternating restore slots, across app reloads. */
 export class RecoveryCopies {
   private store: RecoveryStore;
   private records: Record<string, BackupRecord>;
@@ -82,8 +85,7 @@ export class RecoveryCopies {
     } else {
       const existing = await this.store.read(record.original);
       if (!existing) {
-        await this.writeVerified(record.original, bytes);
-        record.originalHash = await hash(bytes);
+        throw new Error('The original recovery copy was removed. Restore the missing copy before saving; it will not be replaced with a newer PDF.');
       } else {
         const actual = await hash(existing);
         if (record.originalHash && record.originalHash !== actual) throw new Error('The original recovery copy changed outside PDF Form Studio. Your pending text is kept; recover the backup before saving.');
@@ -91,14 +93,18 @@ export class RecoveryCopies {
       }
     }
     let path = record.original;
+    const previousRecovery = record.recovery, previousHash = record.recoveryHash;
     if (purpose === 'restore') {
       const directory = record.original.slice(0, record.original.lastIndexOf('/'));
-      path = record.recovery ?? `${directory}/before-restore${record.original.endsWith('/before-restore.pdf') ? '-1' : ''}.pdf`;
+      const slots = ['before-restore.pdf', 'before-restore-next.pdf', 'before-restore-spare.pdf'].map(name => `${directory}/${name}`).filter(candidate => candidate !== record.original);
+      path = slots.find(candidate => candidate !== record.recovery)!;
       await this.writeVerified(path, bytes);
       record.recovery = path; record.recoveryHash = await hash(bytes);
     }
     // Also retry failed index writes when reusing an already verified copy.
-    await this.persist();
+    try { await this.persist(); } catch (error) {
+      record.recovery = previousRecovery; record.recoveryHash = previousHash; throw error;
+    }
     return path;
   }
 }

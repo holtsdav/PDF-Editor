@@ -12,12 +12,14 @@ export interface PageViewport {
 export interface NativePage { div: HTMLElement; viewport: PageViewport; number: number; annotationElements(id: string): HTMLElement[] }
 export interface NativePdf {
   identity: object;
-  source: object;
   element: HTMLElement;
   file: TFile;
+  initialPage?: number;
+  embedHeight?: number;
+}
+export interface EditorSurface extends NativePdf {
   pages(): NativePage[];
-  textInputs(): (HTMLInputElement | HTMLTextAreaElement)[];
-  toolbarHost(): HTMLElement | null;
+  toolbarHost(): HTMLElement;
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -37,30 +39,17 @@ export function findNativePdfs(app: App): NativePdf[] {
     if (!object || seen.has(object) || depth > 12) return;
     seen.add(object);
     const anchor = owner ?? (object.file instanceof TFile && object.file.extension.toLowerCase() === 'pdf' ? object : undefined);
-    if (object.file instanceof TFile && object.file.extension.toLowerCase() === 'pdf' && element(object.containerEl)
+    // The native child temporarily clears file while reopening after a vault
+    // write. Its owner still identifies the document during that interval.
+    const file = object.file instanceof TFile ? object.file : record(anchor)?.file;
+    if (file instanceof TFile && file.extension.toLowerCase() === 'pdf' && element(object.containerEl)
       && object.containerEl.isConnected && typeof object.getPage === 'function' && record(object.pdfViewer)) {
       const container = object.containerEl;
-      const getPage = object.getPage as (page: number) => unknown;
-      found.push({
-        identity: anchor ?? object, source: object, element: container, file: object.file,
-        textInputs: () => [...container.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('.annotationLayer input[type="text"], .annotationLayer textarea')],
-        toolbarHost: () => container.querySelector<HTMLElement>('.pdf-toolbar:not(.pdf-findbar)'),
-        pages: () => {
-          const pages: NativePage[] = [];
-          for (const div of container.querySelectorAll<HTMLElement>('.page[data-page-number]')) {
-            const number = Number(div.dataset.pageNumber);
-            try {
-              const view = record(getPage.call(object, number));
-              const viewport = record(view?.viewport);
-              if (viewport && typeof viewport.convertToPdfPoint === 'function' && typeof viewport.convertToViewportRectangle === 'function') {
-                pages.push({ div, viewport: viewport as unknown as PageViewport, number,
-                  annotationElements: id => [...div.querySelectorAll<HTMLElement>('.annotationLayer [data-annotation-id]')].filter(element => element.dataset.annotationId === id) });
-              }
-            } catch { /* Page not yet rendered; next scan retries. */ }
-          }
-          return pages;
-        }
-      });
+      const subpath = record(anchor)?.subpath;
+      const params = typeof subpath === 'string' ? new URLSearchParams(subpath.replace(/^#/, '')) : undefined;
+      const initialPage = Number(params?.get('page')) || 1;
+      const embedHeight = Number(params?.get('height')) || undefined;
+      found.push({ identity: anchor ?? object, element: container, file, initialPage, embedHeight });
     }
     if (Array.isArray(object._children)) for (const child of object._children) visit(child, depth + 1, anchor);
     // Reading mode owns embed components separately from the view's _children.

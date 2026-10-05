@@ -1,9 +1,10 @@
 import { FuzzySuggestModal, Modal, Notice, Plugin, TFile } from 'obsidian';
 import { PdfInspectionModal } from './ui/pdf-inspection-modal';
 import { findNativePdfs } from './compat/native-pdf';
-import { TextEditor } from './ui/text-editor';
+import { PdfSurface } from './ui/pdf-surface';
 import { VaultSessions } from './pdf/vault-sessions';
 import { isRecoveryPath, loadBackups } from './pdf/recovery';
+import { loadToolPreferences } from './pdf/tool-preferences';
 import type { BackupRecord } from './pdf/recovery';
 import fontBytes from '../assets/fonts/NotoSans-Regular.ttf';
 import serifBytes from '../assets/fonts/NotoSerif-Regular.ttf';
@@ -25,10 +26,11 @@ class PdfPicker extends FuzzySuggestModal<TFile> {
 
 export default class PdfFormStudio extends Plugin {
   private modals = new Set<Modal>();
-  private editors = new Map<object, TextEditor>();
-  private recentEditors = new Map<object, { file: TFile; state: ReturnType<TextEditor['captureState']>; until: number }>();
+  private editors = new Map<object, PdfSurface>();
+  private recentEditors = new Map<object, { file: TFile; state: ReturnType<PdfSurface['captureState']>; until: number }>();
   private sessions!: VaultSessions;
   private backups: Record<string, BackupRecord> = {};
+  private preferences = loadToolPreferences(null);
   private persistence: Promise<void> = Promise.resolve();
 
   async onload(): Promise<void> {
@@ -36,11 +38,12 @@ export default class PdfFormStudio extends Plugin {
     if (saved && typeof saved === 'object' && 'backups' in saved && saved.backups && typeof saved.backups === 'object') {
       this.backups = loadBackups(saved.backups, `${this.app.vault.configDir}/plugins/pdf-form-studio/recovery`);
     }
+    if (saved && typeof saved === 'object' && 'preferences' in saved) this.preferences = loadToolPreferences(saved.preferences);
     this.sessions = new VaultSessions(this.app, { sans: fontBytes, serif: serifBytes, mono: monoBytes }, this.backups, () => {
-      const snapshot = { backups: Object.fromEntries(Object.entries(this.backups).map(([source, record]) => [source, { ...record }])) };
+      const snapshot = { preferences: structuredClone(this.preferences), backups: Object.fromEntries(Object.entries(this.backups).map(([source, record]) => [source, { ...record }])) };
       this.persistence = this.persistence.catch(() => {}).then(() => this.saveData(snapshot));
       return this.persistence;
-    });
+    }, this.preferences);
     await this.sessions.initialize();
     this.addCommand({
       id: 'inspect-pdf-form-fields',
@@ -58,7 +61,7 @@ export default class PdfFormStudio extends Plugin {
     this.registerEvent(this.app.vault.on('modify', file => {
       if (file instanceof TFile && file.extension.toLowerCase() === 'pdf') void this.sessions.modified(file).catch(error => new Notice(String(error)));
     }));
-    this.registerEvent(this.app.vault.on('rename', (file, oldPath) => { if (file instanceof TFile) this.sessions.renamed(file, oldPath); }));
+    this.registerEvent(this.app.vault.on('rename', (file, oldPath) => { void this.sessions.renamed(file, oldPath).catch(error => new Notice(String(error))); }));
     this.registerEvent(this.app.workspace.on('file-menu', (menu, file) => {
       if (!(file instanceof TFile) || file.extension.toLowerCase() !== 'pdf') return;
       menu.addItem(item => item.setTitle('Inspect PDF form fields').setIcon('file-search').onClick(() => this.inspect(file)));
@@ -85,7 +88,7 @@ export default class PdfFormStudio extends Plugin {
         state = editor.captureState(viewer); this.removeChild(editor); editor = undefined;
       }
       if (!editor) {
-        editor = this.addChild(new TextEditor(this.app, viewer, this.sessions, state));
+        editor = this.addChild(new PdfSurface(this.app, viewer, this.sessions, state));
         this.editors.set(viewer.identity, editor);
       }
       editor.refresh();

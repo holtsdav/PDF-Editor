@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { setImmediate } from 'node:timers/promises';
-import { PDFDocument, PDFDict, PDFName, PDFString } from 'pdf-lib';
+import { PDFDocument, PDFDict, PDFName, PDFRef, PDFString } from 'pdf-lib';
 import { getDocument, OPS } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { TextSession } from '../src/pdf/text-session.ts';
 import type { PdfDraft } from '../src/pdf/text-session.ts';
@@ -17,6 +17,40 @@ const fonts = {
   serif: new Uint8Array(await readFile(new URL('../assets/fonts/NotoSerif-Regular.ttf', import.meta.url))),
   mono: new Uint8Array(await readFile(new URL('../assets/fonts/NotoSansMono-Regular.ttf', import.meta.url)))
 };
+test('empty owned boxes are removed after editing ends, while authored fields and other active views are protected', async () => {
+  const file = await fixture(), session = await TextSession.open(file.store, fonts);
+  const blank = session.add(1, [30, 30, 200, 60], 14, true);
+  const releaseA = session.beginTextEdit(blank.name), releaseB = session.beginTextEdit(blank.name);
+  assert.equal(session.pruneEmptyBoxes(), 0);
+  releaseA(); releaseA(); assert.equal(session.pruneEmptyBoxes(), 0);
+  releaseB(); session.setValue(blank.name, ' \n '); assert.equal(session.pruneEmptyBoxes(), 1);
+  session.setValue('Answer', ''); assert.equal(session.pruneEmptyBoxes(), 0);
+  await session.save(); const reopened = await readTextPdf(file.bytes());
+  assert.equal(reopened.fields.length, 1); assert.equal(reopened.fields[0]!.name, 'Answer');
+});
+test('deleting a reopened box removes its widget references and subsequent ink saves remain valid', async () => {
+  const file = await fixture(), first = await TextSession.open(file.store, fonts);
+  const box = first.add(1, [30, 30, 200, 60], 14, true); first.setValue(box.name, 'Remove me'); await first.save();
+  const session = await TextSession.open(file.store, fonts);
+  session.delete(box.name); session.addStroke(1, 'marker', [[60, 300], [250, 320]]); await session.save();
+  const output = await PDFDocument.load(file.bytes());
+  const annotations = output.getPages()[0]!.node.Annots()!.asArray();
+  assert.equal(annotations.length, 2);
+  assert(annotations.every(ref => output.context.lookup(ref) instanceof PDFDict));
+  const task = getDocument({ data: file.bytes().slice(), standardFontDataUrl: new URL('../node_modules/pdfjs-dist/standard_fonts/', import.meta.url).pathname });
+  try { assert.equal((await (await (await task.promise).getPage(1)).getAnnotations()).length, 2); } finally { await task.destroy(); }
+  const reopened = await TextSession.open(file.store, fonts), stroke = reopened.snapshot.strokes[0]!;
+  reopened.moveStroke(stroke.id, [10, 5]); await reopened.save();
+  assert.deepEqual((await readTextPdf(file.bytes())).strokes[0]!.points, [[70, 305], [260, 325]]);
+});
+test('ink remains writable in PDFs with a pre-existing dangling annotation reference', async () => {
+  const file = await fixture(), pdf = await PDFDocument.load(file.bytes());
+  pdf.getPages()[0]!.node.addAnnot(PDFRef.of(999999)); file.replace(await pdf.save());
+  const session = await TextSession.open(file.store, fonts);
+  const stroke = session.addStroke(1, 'scribble', [[40, 40], [100, 80]]); await session.save();
+  const reopened = await TextSession.open(file.store, fonts); reopened.moveStroke(stroke.id, [5, 5]); await reopened.save();
+  assert.deepEqual((await readTextPdf(file.bytes())).strokes[0]!.points, [[45, 45], [105, 85]]);
+});
 async function fixture() {
   const pdf = await PDFDocument.create(); const page = pdf.addPage([600, 800]);
   const field = pdf.getForm().createTextField('Answer'); field.setText('Original'); field.addToPage(page, { x: 50, y: 600, width: 300, height: 24 });
@@ -78,7 +112,7 @@ test('whole-field fonts, colors and sizes survive edits and produce actual appea
   const fields = (await readTextPdf(file.bytes())).fields;
   assert.equal(fields[0]!.fontFamily, 'mono'); assert.equal(fields[0]!.fontSize, 18); assert.deepEqual(fields[0]!.color, [0.7, 0.1, 0.1]);
   const saved = fields.find(field => field.name === box.name)!; assert.equal(saved.fontFamily, 'serif'); assert.equal(saved.fontSize, 24); assert.deepEqual(saved.color, [0.1, 0.3, 0.8]);
-  const task = getDocument({ data: file.bytes().slice() });
+  const task = getDocument({ data: file.bytes().slice(), standardFontDataUrl: new URL('../node_modules/pdfjs-dist/standard_fonts/', import.meta.url).pathname });
   try {
     const operators = await (await (await task.promise).getPage(1)).getOperatorList();
     assert(operators.fnArray.includes(OPS.setFillRGBColor)); assert(operators.fnArray.includes(OPS.setFont));
@@ -115,4 +149,67 @@ test('the display copy removes only owned ink while preserving foreign annotatio
   const clean = await PDFDocument.load(copy);
   assert.equal(clean.getForm().getTextField('Answer').getText(), 'Original');
   assert(clean.getPages()[0]!.node.Annots()!.asArray().some(ref => clean.context.lookup(ref, PDFDict).get(PDFName.of('NM'))?.toString() === '(foreign)'));
+});
+
+test('gesture ownership prevents cancellation in another view from losing marks', async () => {
+  const file = await fixture(), session = await TextSession.open(file.store, fonts);
+  const firstView = {}, secondView = {};
+  assert.equal(session.beginInkAction(firstView), true);
+  const a = session.addStroke(1, 'scribble', [[40, 40], [80, 80]], 2, undefined, firstView);
+  assert.equal(session.beginInkAction(secondView), false);
+  session.finishInkAction(true, secondView);
+  assert.equal(session.snapshot.strokes.length, 1);
+  assert.throws(() => session.deleteStroke(a.id, secondView), /current drawing gesture/);
+  assert.throws(() => session.addStroke(1, 'scribble', [[100, 100]], 2, undefined, secondView), /current drawing gesture/);
+  session.finishInkAction(false, firstView);
+  assert.equal(session.beginInkAction(secondView), true);
+  session.moveStroke(a.id, [10, 10], secondView);
+  session.finishInkAction(true, secondView);
+  assert.deepEqual(session.snapshot.strokes[0]!.points, [[40, 40], [80, 80]]);
+  await session.save(); assert.equal((await readTextPdf(file.bytes())).strokes.length, 1);
+});
+
+test('redo survives PDF saves and a new mark invalidates the redo branch', async () => {
+  const file = await fixture(), session = await TextSession.open(file.store, fonts);
+  const a = session.addStroke(1, 'scribble', [[40, 40], [80, 80]]);
+  await session.save(); session.deleteStroke(a.id); await session.save();
+  session.undoStroke(); await session.save(); assert.equal((await readTextPdf(file.bytes())).strokes.length, 1);
+  assert.equal(session.canRedoStroke, true); session.redoStroke(); await session.save();
+  assert.equal((await readTextPdf(file.bytes())).strokes.length, 0);
+  session.undoStroke(); session.addStroke(1, 'marker', [[100, 100], [200, 100]]);
+  assert.equal(session.canRedoStroke, false);
+});
+
+test('a prepared draft never overwrites newer edits or an explicitly reloaded baseline', async () => {
+  const file = await fixture(), session = await TextSession.open(file.store, fonts);
+  session.setValue('Answer', 'Checkpoint'); await session.checkpoint();
+  session.setValue('Answer', 'Latest'); await session.save();
+  assert.equal((await readTextPdf(file.bytes())).fields[0]!.value, 'Latest');
+  await session.reload(); session.setValue('Answer', 'After reload'); await session.save();
+  assert.equal((await readTextPdf(file.bytes())).fields[0]!.value, 'After reload');
+});
+
+test('the controlled background excludes editable text appearances and retains checkbox widgets', async () => {
+  const file = await fixture(), pdf = await PDFDocument.load(file.bytes());
+  const checkbox = pdf.getForm().createCheckBox('Check'); checkbox.addToPage(pdf.getPages()[0]!, { x: 30, y: 30, width: 20, height: 20 }); checkbox.check();
+  const copy = await PDFDocument.load(await renderTextPdf(await pdf.save()));
+  const textWidgets = copy.getForm().getTextField('Answer').acroField.getWidgets().map(widget => widget.dict);
+  const annots = copy.getPages()[0]!.node.Annots()!.asArray().map(ref => copy.context.lookup(ref));
+  assert(!annots.some(dict => textWidgets.includes(dict as PDFDict)));
+  assert(annots.includes(copy.getForm().getCheckBox('Check').acroField.getWidgets()[0]!.dict));
+  assert.equal(copy.getForm().getCheckBox('Check').isChecked(), true);
+});
+
+test('document undo and redo recover saved text boxes, formatting and deletion alongside ink', async () => {
+  const file = await fixture(), session = await TextSession.open(file.store, fonts);
+  const box = session.add(1, [60, 200, 300, 250], 14, true); session.setValue(box.name, 'Recover this answer');
+  session.formatField(box.name, { fontFamily: 'serif', color: [1, 0, 0] }); await session.save();
+  session.addStroke(1, 'scribble', [[20, 20], [40, 40]]); await session.save();
+  session.delete(box.name); await session.save();
+  session.undoStroke(); await session.save();
+  let saved = await readTextPdf(file.bytes()); assert.equal(saved.fields.find(f => f.name === box.name)?.value, 'Recover this answer');
+  assert.equal(saved.fields.find(f => f.name === box.name)?.fontFamily, 'serif'); assert.equal(saved.strokes.length, 1);
+  session.redoStroke(); await session.save(); assert(!(await readTextPdf(file.bytes())).fields.some(f => f.name === box.name));
+  session.undoStroke(); session.undoStroke(); await session.save(); saved = await readTextPdf(file.bytes());
+  assert(saved.fields.some(f => f.name === box.name)); assert.equal(saved.strokes.length, 0);
 });

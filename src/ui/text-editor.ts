@@ -1,6 +1,6 @@
 import { Component, Menu, Modal, Notice, setIcon, setTooltip } from 'obsidian';
 import type { App } from 'obsidian';
-import type { NativePage, NativePdf } from '../compat/native-pdf';
+import type { NativePage, NativePdf, EditorSurface } from '../compat/native-pdf';
 import { pdfRectangle, screenRectangle } from '../compat/native-pdf';
 import type { Rect, TextField } from '../pdf/text-engine';
 import type { BackupKind } from '../pdf/recovery';
@@ -9,14 +9,17 @@ import type { TextSession } from '../pdf/text-session';
 import type { VaultSessions } from '../pdf/vault-sessions';
 import { growBox, rotatedHandle, transformBox } from '../pdf/box-geometry';
 import type { ResizeHandle } from '../pdf/box-geometry';
+import { ObjectSelection } from './object-selection';
 import { InkLayer } from './ink-layer';
 import type { EditorTool } from './ink-layer';
-import { cssColor, fontFaces, fontNames, parseColor } from '../pdf/text-format';
+import { cssColor, fontFaces } from '../pdf/text-format';
 import type { FontFamily, PdfColor, TextFormat } from '../pdf/text-format';
-import { PdfBackdrop } from './pdf-backdrop';
+import { RecoveryInfo } from './recovery-info';
 import { RecoveryPreview } from './recovery-preview';
+import { ToolPopover } from './tool-popover';
 
-const palette = [['Black', '#161616'], ['Red', '#c62828'], ['Orange', '#ee7900'], ['Yellow', '#ffd600'], ['Green', '#22813e'], ['Blue', '#1769ce'], ['Purple', '#8347b5']] as const;
+
+interface AnswerLine { page: number; rect: Rect }
 
 interface FieldControl {
   frame: HTMLElement; input: HTMLInputElement | HTMLTextAreaElement;
@@ -24,16 +27,15 @@ interface FieldControl {
 }
 interface PageLayer { page: NativePage; layer: HTMLElement; controls: Map<string, FieldControl>; ink: InkLayer; cancelPlacement?: () => void }
 interface EditorState {
-  tool: EditorTool; fontSize: number; markerWidth: number; penWidth: number; markerColor: PdfColor; penColor: PdfColor; selected?: string; selectedStroke?: string;
+  tool: EditorTool; textFamily: FontFamily; textColor: PdfColor; fontSize: number; markerWidth: number; penWidth: number; markerColor: PdfColor; penColor: PdfColor; selected?: string; selectedStroke?: string;
   focused?: { input: HTMLInputElement | HTMLTextAreaElement; page: number; name: string };
 }
 
 export class TextEditor extends Component {
   private app: App;
-  private native: NativePdf;
+  private native: EditorSurface;
   private sessions: VaultSessions;
   private session?: TextSession;
-  private backdrop?: PdfBackdrop;
   private toolbar: HTMLElement;
   private tools = new Map<EditorTool, HTMLButtonElement>();
   private status: HTMLElement;
@@ -42,18 +44,21 @@ export class TextEditor extends Component {
   private removeButton: HTMLButtonElement;
   private undoButton: HTMLButtonElement;
   private editControls: HTMLElement;
-  private size: HTMLSelectElement;
-  private font: HTMLSelectElement;
-  private colorButton: HTMLButtonElement;
-  private drawingInteraction?: () => void;
+  private propertiesButton: HTMLButtonElement;
+  private redoButton: HTMLButtonElement;
+  private popover?: ToolPopover;
+  private textFamily: FontFamily = 'sans';
+  private textColor: PdfColor = [0.05, 0.05, 0.05];
   private markerColor: PdfColor = [1, 0.84, 0];
   private penColor: PdfColor = [0.085, 0.085, 0.085];
   private menu?: Menu;
   private layers = new Map<HTMLElement, PageLayer>();
-  private nativeInputs = new Map<HTMLInputElement | HTMLTextAreaElement, { readOnly: boolean; tabIndex: number; ariaHidden: string | null }>();
   private tool: EditorTool = 'select';
   private markerWidth = 14;
   private penWidth = 2;
+  private smoothPen = true;
+  private holdShapes = false;
+  private holdHighlighter = true;
   private loadError = '';
   private loaded = true;
   private fontSize = 14;
@@ -64,10 +69,17 @@ export class TextEditor extends Component {
   private unsubscribe?: () => void;
   private focusInteraction?: { input: HTMLElement; release: () => void };
   private composing = new Set<HTMLInputElement | HTMLTextAreaElement>();
+  private editing?: string;
+  private selection?: ObjectSelection;
+  private activeBox?: string;
+  private answerLines: AnswerLine[] = [];
+  private answerFields = new Set<string>();
+  private releaseEditing?: () => void;
 
-  constructor(app: App, native: NativePdf, sessions: VaultSessions, state?: EditorState) {
+  constructor(app: App, native: EditorSurface, sessions: VaultSessions, state?: EditorState) {
     super(); this.app = app; this.native = native; this.sessions = sessions;
-    if (state) { this.tool = state.tool; this.fontSize = state.fontSize; this.markerWidth = state.markerWidth; this.penWidth = state.penWidth; this.markerColor = state.markerColor; this.penColor = state.penColor;
+    Object.assign(this, sessions.preferences);
+    if (state) { this.textFamily = state.textFamily; this.textColor = state.textColor; this.tool = state.tool; this.fontSize = state.fontSize; this.markerWidth = state.markerWidth; this.penWidth = state.penWidth; this.markerColor = state.markerColor; this.penColor = state.penColor;
       this.selected = state.selected; this.selectedStroke = state.selectedStroke; this.focused = state.focused; }
     const doc = native.element.ownerDocument;
     this.register(usePdfFont(doc));
@@ -80,46 +92,36 @@ export class TextEditor extends Component {
       this.registerDomEvent(element, 'click', callback); parent.append(element); return element;
     };
     for (const [tool, label, icon] of [
-      ['select', 'Select and type — click existing text to edit', 'mouse-pointer-2'], ['text', 'Add text box — click or drag on the PDF', 'type'],
-      ['marker', 'Marker — drag to highlight; tap again for color and width', 'highlighter'], ['scribble', 'Pen — draw; tap again for color and width', 'pencil'], ['eraser', 'Eraser — drag over marks to remove them', 'eraser']
-    ] as const) this.tools.set(tool, button(this.toolbar, label, icon, () => { if (this.tool === tool && (tool === 'marker' || tool === 'scribble')) this.openBrushMenu(tool, this.tools.get(tool)!); else this.setTool(tool); }));
+      ['select', 'Select — drag blank space for objects; drag printed text to select text', 'mouse-pointer-2'], ['text', 'Add text box — click or drag on the PDF', 'type'],
+      ['marker', 'Highlighter — draw and hold for a straight line', 'highlighter'], ['scribble', 'Pen — draw', 'pencil'], ['eraser', 'Eraser — drag over marks to remove them', 'eraser']
+    ] as const) this.tools.set(tool, button(this.toolbar, label, icon, () => { if (this.tool === tool) this.closePopover(); else this.setTool(tool); }));
     this.editControls = doc.createElement('div'); this.editControls.className = 'pdf-form-studio-edit-controls'; this.toolbar.append(this.editControls);
-    const size = this.size = doc.createElement('select'); size.setAttribute('aria-label', 'Text size');
-    size.className = 'pdf-form-studio-size'; setTooltip(size, 'Text size');
-    for (const value of [8, 10, 12, 14, 16, 18, 24, 32, 48, 64, 96]) { const option = doc.createElement('option'); option.value = String(value); option.textContent = `${value} pt`; size.append(option); }
-    this.registerDomEvent(size, 'change', () => { this.fontSize = Number(size.value); this.formatSelected({ fontSize: this.fontSize }); });
-    this.font = doc.createElement('select'); this.font.className = 'pdf-form-studio-font'; this.font.setAttribute('aria-label', 'Text font'); setTooltip(this.font, 'Text font');
-    for (const [family, name] of Object.entries(fontNames)) { const option = doc.createElement('option'); option.value = family; option.textContent = name; this.font.append(option); }
-    this.registerDomEvent(this.font, 'change', () => this.formatSelected({ fontFamily: this.font.value as FontFamily }));
-    this.editControls.append(this.font);
-    this.colorButton = button(this.editControls, 'Text color', 'palette', () => this.openColorMenu(this.colorButton));
-    this.editControls.append(size);
+    this.propertiesButton = button(this.editControls, 'Tool settings', 'sliders-horizontal', () => this.openProperties());
+    this.propertiesButton.classList.add('pfs-properties-button');
+    const settingsIcon = this.propertiesButton.createSpan({ cls: 'pfs-settings-icon', attr: { 'aria-hidden': 'true' } });
+    settingsIcon.append(this.propertiesButton.querySelector('svg')!);
+    settingsIcon.createSpan({ cls: 'pfs-settings-color' });
+    this.propertiesButton.createSpan({ cls: 'pfs-tool-value' });
     this.saveButton = button(this.editControls, 'Save PDF', 'save', () => { void this.save(); });
     this.removeButton = button(this.editControls, 'Remove selection', 'trash-2', () => this.removeSelection());
-    this.undoButton = button(this.editControls, 'Undo last mark edit', 'undo-2', () => {
+    this.undoButton = button(this.editControls, 'Undo · Cmd/Ctrl+Z', 'undo-2', () => {
       try { this.session?.undoStroke(); this.selectedStroke = undefined; this.updateStatus(); this.refresh(); this.scheduleSave(); }
       catch (error) { this.showError(error); }
     });
+    this.redoButton = button(this.editControls, 'Redo · Shift+Cmd/Ctrl+Z', 'redo-2', () => { this.session?.redoStroke(); this.scheduleSave(); });
     this.status = doc.createElement('span'); this.status.className = 'pdf-form-studio-status'; this.status.setAttribute('role', 'status');
-    this.editControls.append(this.status);
+    this.toolbar.append(this.status);
     const more = button(this.toolbar, 'PDF options', 'ellipsis', () => this.openMenu(more));
     this.message = doc.createElement('div'); this.message.className = 'pdf-form-studio-message';
     this.message.setAttribute('role', 'status');
     this.mountToolbar();
     this.register(() => this.menu?.hide());
-    const observe = () => observer.observe(native.element, { childList: true, subtree: true });
-    const observer = new doc.defaultView!.MutationObserver(() => {
-      // Never observe our own layer rebuild: detached pages can otherwise cause
-      // a self-sustaining microtask loop while Obsidian switches files.
-      observer.disconnect(); this.refresh();
-      if (this.loaded) observe();
-    });
-    observe();
-    this.register(() => observer.disconnect());
     this.registerDomEvent(doc, 'pointerdown', event => {
       if (this.focused && event.target !== this.focused.input) this.focused = undefined;
       const target = event.target;
-      if (target instanceof doc.defaultView!.Element && !target.closest('.pdf-form-studio-box, .pdf-form-studio-ink-control, .pdf-form-studio-toolbar')) {
+      if (target instanceof doc.defaultView!.Element && !target.closest('.pdf-form-studio-toolbar, .pfs-tool-popover')
+        && target.closest('.pdf-form-studio-box')?.querySelector<HTMLElement>('[data-pdf-field]')?.dataset.pdfField !== this.activeBox) this.endTextEditing();
+      if (target instanceof doc.defaultView!.Element && !target.closest('.pdf-form-studio-box, .pdf-form-studio-ink-control, .pdf-form-studio-toolbar, .pfs-tool-popover')) {
         this.selected = undefined; this.selectedStroke = undefined; this.updateStatus(); this.refresh();
         const active = doc.activeElement;
         if (active instanceof doc.defaultView!.HTMLElement && [...this.layers.values()].some(entry => entry.layer.contains(active))) active.blur();
@@ -129,6 +131,7 @@ export class TextEditor extends Component {
       // Keyboard-opened dialogs also move focus deliberately. Never restore
       // a PDF input over the quick switcher, command palette or another note.
       if (this.focused && event.target !== this.focused.input) this.focused = undefined;
+      if (event.target instanceof doc.defaultView!.Element && !this.native.element.contains(event.target) && !event.target.closest('.pfs-tool-popover')) this.endTextEditing();
       if (event.target instanceof doc.defaultView!.HTMLElement && this.toolbar.contains(event.target) && this.session) {
         this.releaseFocus(); this.focusInteraction = { input: event.target, release: this.session.beginInteraction() };
       }
@@ -141,20 +144,31 @@ export class TextEditor extends Component {
     // Claim Save at the window capture phase, scoped to this editor's controls.
     this.registerDomEvent(doc.defaultView!, 'keydown', event => {
       const target = event.target;
-      if (!(target instanceof doc.defaultView!.Node) || (!native.element.contains(target) && !(event.key === 'Escape' && this.tool !== 'select' && target === doc.body))) return;
+      if (!(target instanceof doc.defaultView!.Node) || (!native.element.contains(target) && !(target === doc.body && (this.selection?.active || (event.key === 'Escape' && this.tool !== 'select'))))) return;
+      if (event.key === 'Tab' && !event.metaKey && !event.ctrlKey && !event.altKey && target instanceof doc.defaultView!.HTMLElement
+        && target.dataset.pdfField && !event.isComposing && this.navigateAnswerLine(target.dataset.pdfField, event.shiftKey ? -1 : 1)) {
+        event.preventDefault(); event.stopImmediatePropagation(); return;
+      }
       if (event.key === 'Escape') {
+        this.selection?.cancel(); this.selection?.clear();
         for (const entry of this.layers.values()) { entry.ink.cancel(); entry.cancelPlacement?.(); for (const control of entry.controls.values()) control.cancel?.(); }
-        this.selected = undefined; this.selectedStroke = undefined;
+        this.endTextEditing(); this.selected = undefined; this.selectedStroke = undefined;
         if (target instanceof doc.defaultView!.HTMLElement) target.blur();
         this.updateStatus(); this.refresh(); return;
       }
-      if (!(event.metaKey || event.ctrlKey)) return;
-      if (event.key.toLowerCase() === 's' && [...this.layers.values()].some(entry => entry.layer.contains(target))) {
+      if (!(event.metaKey || event.ctrlKey)) {
+        if (!(target instanceof doc.defaultView!.HTMLInputElement || target instanceof doc.defaultView!.HTMLTextAreaElement) && !event.altKey) {
+          const shortcut: Record<string, EditorTool> = { v: 'select', t: 'text', p: 'scribble', h: 'marker', e: 'eraser' };
+          const tool = shortcut[event.key.toLowerCase()]; if (tool) { event.preventDefault(); event.stopPropagation(); this.setTool(tool); }
+        }
+        return;
+      }
+      if (event.key.toLowerCase() === 's') {
         event.preventDefault(); event.stopImmediatePropagation(); void this.save();
       }
-      if (event.key.toLowerCase() === 'z' && !event.shiftKey && this.session?.canUndoStroke
+      if (event.key.toLowerCase() === 'z' && (event.shiftKey ? this.session?.canRedoStroke : this.session?.canUndoStroke)
         && !(target instanceof doc.defaultView!.HTMLInputElement || target instanceof doc.defaultView!.HTMLTextAreaElement)) {
-        event.preventDefault(); event.stopImmediatePropagation(); this.session.undoStroke(); this.selectedStroke = undefined; this.scheduleSave();
+        event.preventDefault(); event.stopImmediatePropagation(); if (event.shiftKey) this.session?.redoStroke(); else this.session?.undoStroke(); this.selectedStroke = undefined; this.scheduleSave();
       }
     }, true);
     this.updateStatus();
@@ -164,10 +178,9 @@ export class TextEditor extends Component {
     });
   }
 
-  matches(native: NativePdf): boolean { return this.native.file === native.file && this.native.source === native.source && this.native.element === native.element; }
   get file() { return this.native.file; }
   captureState(native?: NativePdf): EditorState | undefined {
-    return !native || this.native.file === native.file ? { tool: this.tool, fontSize: this.fontSize, markerWidth: this.markerWidth, penWidth: this.penWidth, markerColor: this.markerColor, penColor: this.penColor,
+    return !native || this.native.file === native.file ? { tool: this.tool, textFamily: this.textFamily, textColor: this.textColor, fontSize: this.fontSize, markerWidth: this.markerWidth, penWidth: this.penWidth, markerColor: this.markerColor, penColor: this.penColor,
       selected: this.selected, selectedStroke: this.selectedStroke, focused: this.focused } : undefined;
   }
   private async openSession(): Promise<void> {
@@ -175,24 +188,91 @@ export class TextEditor extends Component {
     this.status.textContent = 'Loading…';
     const session = await this.sessions.get(this.native.file);
     if (!this.loaded || this.session) return;
-    this.session = session; this.backdrop = this.addChild(new PdfBackdrop(session, this.native.element.ownerDocument, error => this.showError(error))); this.updateDrawingInteraction();
+    this.session = session;
+    this.selection = this.addChild(new ObjectSelection(session, this.native.element, {
+      enabled: () => this.tool === 'select', changed: () => { this.updateStatus(); this.refresh(); }, save: () => this.scheduleSave(), error: error => this.showError(error),
+      endTyping: () => { this.selected = undefined; this.selectedStroke = undefined; this.focused = undefined; this.endTextEditing(); }
+    }, this.app));
     this.unsubscribe = session.subscribe(() => { this.updateStatus(); this.refresh(); });
+    if (session.pruneEmptyBoxes()) this.scheduleSave();
+  }
+
+  private activateBox(name: string): void {
+    if (this.activeBox === name) return;
+    this.endTextEditing();
+    this.activeBox = name; this.releaseEditing = this.session!.beginTextEdit(name);
+  }
+
+  private endTextEditing(retain?: string): void {
+    const wasEditing = this.editing; this.editing = undefined;
+    const name = this.activeBox;
+    if (name !== retain) {
+      this.activeBox = undefined; this.releaseEditing?.(); this.releaseEditing = undefined;
+      if (name && this.session?.pruneEmptyBoxes(name)) this.scheduleSave();
+    }
+    if (wasEditing || name) this.refresh();
   }
 
   private setTool(tool: EditorTool): void {
-    if (!this.session || this.session.status === 'conflict') return;
-    for (const entry of this.layers.values()) { entry.cancelPlacement?.(); entry.ink.cancel(); for (const control of entry.controls.values()) control.cancel?.(); }
+    if (!this.session || (this.session.status === 'conflict' || this.session.replacing)) return;
+    this.closePopover(); this.selection?.cancel(); this.selection?.clear();
+    const retain = tool === 'select' || tool === 'text' ? this.activeBox : undefined;
+    this.endTextEditing(retain);
+    for (const entry of this.layers.values()) { entry.cancelPlacement?.(); entry.ink.finishPending(); for (const control of entry.controls.values()) control.cancel?.(); }
     this.releaseFocus(); this.focused = undefined;
     const active = this.native.element.ownerDocument.activeElement;
     if (active instanceof this.native.element.ownerDocument.defaultView!.HTMLElement && [...this.layers.values()].some(entry => entry.layer.contains(active))) active.blur();
-    this.tool = tool; this.updateDrawingInteraction(); this.selected = undefined; this.selectedStroke = undefined;
-    this.updateStatus(); this.refresh(); if (this.session.dirty) this.scheduleSave();
+    this.tool = tool; this.selected = retain; this.selectedStroke = undefined;
+    this.updateStatus(); this.refresh();
+    if (retain) for (const entry of this.layers.values()) entry.controls.get(`${retain}:0`)?.frame.focus({ preventScroll: true });
+    if (this.session.dirty) this.scheduleSave();
   }
 
-  private updateDrawingInteraction(): void {
-    const drawing = this.tool === 'marker' || this.tool === 'scribble' || this.tool === 'eraser';
-    if (drawing && !this.drawingInteraction && this.session) this.drawingInteraction = this.session.beginInteraction();
-    else if (!drawing) { this.drawingInteraction?.(); this.drawingInteraction = undefined; }
+  /** Detected lines stay transient; clicking or tabbing to one creates a field. */
+  setAnswerLines(lines: AnswerLine[]): void {
+    this.answerLines = lines.map(line => ({ page: line.page, rect: [...line.rect] as Rect }))
+      .sort((a, b) => a.page - b.page || b.rect[3] - a.rect[3] || a.rect[0] - b.rect[0]);
+    for (const field of this.session?.snapshot.fields ?? []) if (this.answerLines.some(line => this.answerWidget(field, line) >= 0)) this.answerFields.add(field.name);
+    this.refresh();
+  }
+  private answerWidget(field: TextField, line: AnswerLine): number {
+    return field.widgets.findIndex(widget => widget.page === line.page && line.rect[0] < widget.rect[2] && line.rect[2] > widget.rect[0]
+      && line.rect[1] < widget.rect[3] && line.rect[3] > widget.rect[1]);
+  }
+  private navigateAnswerLine(name: string, direction: number): boolean {
+    if (!this.session || this.session.replacing || this.session.status === 'conflict') return false;
+    const field = this.session.snapshot.fields.find(field => field.name === name);
+    if (!field || !this.answerFields.has(name)) return false;
+    const index = this.answerLines.findIndex(line => this.answerWidget(field, line) >= 0);
+    if (index < 0) return false;
+    for (let next = index + direction; next >= 0 && next < this.answerLines.length; next += direction) {
+      const line = this.answerLines[next]!;
+      const existing = this.session.snapshot.fields.find(field => this.answerWidget(field, line) >= 0);
+      if (existing?.readOnly || existing?.name === name) continue;
+      this.addSuggestedField(line.page, line.rect, true); return true;
+    }
+    return false;
+  }
+  addSuggestedField(page: number, rect: Rect, scroll = false): void {
+    if (!this.session || this.session.replacing || this.session.status === 'conflict') return;
+    try {
+      const entry = [...this.layers.values()].find(layer => layer.page.number === page);
+      if (!entry) return;
+      // Filling never arms the tool that creates boxes on arbitrary page clicks.
+      const line = { page, rect };
+      let field = this.session.snapshot.fields.find(field => this.answerWidget(field, line) >= 0);
+      if (field?.readOnly) return;
+      this.setTool('select'); this.endTextEditing(field?.name);
+      if (!field) {
+        const size = Math.min(this.fontSize, Math.max(6, (rect[3] - rect[1] - 2) / 1.2));
+        field = this.session.add(page, rect, size, false, 0);
+        this.session.formatField(field.name, { fontFamily: this.textFamily, color: this.textColor });
+      }
+      this.answerFields.add(field.name); this.selected = field.name; this.selectedStroke = undefined; this.updateStatus(); this.refresh();
+      const input = entry.controls.get(`${field.name}:${this.answerWidget(field, line)}`)?.input;
+      if (scroll) input?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      input?.focus({ preventScroll: true });
+    } catch (error) { this.showError(error); }
   }
 
   private formatSelected(format: Partial<TextFormat>): void {
@@ -203,25 +283,39 @@ export class TextEditor extends Component {
       this.scheduleSave();
     } catch (error) { this.showError(error); }
   }
-  private openColorMenu(anchor: HTMLElement): void {
-    this.showPalette(anchor, this.session?.snapshot.fields.find(field => field.name === this.selected)?.color, color => this.formatSelected({ color }));
+  private rememberPreferences(): void {
+    void this.sessions.updatePreferences({ fontSize: this.fontSize, textFamily: this.textFamily, textColor: this.textColor, penColor: this.penColor, markerColor: this.markerColor, penWidth: this.penWidth, markerWidth: this.markerWidth, smoothPen: this.smoothPen, holdShapes: this.holdShapes, holdHighlighter: this.holdHighlighter }).catch(error => this.showError(error));
   }
-  private showPalette(anchor: HTMLElement, color: PdfColor | undefined, change: (color: PdfColor) => void, widths?: { values: number[]; current: number; change(value: number): void }): void {
-    this.menu?.hide(); const menu = this.menu = new Menu();
-    const release = this.session?.beginInteraction(); menu.onHide(() => release?.());
-    for (const [name, hex] of palette) menu.addItem(item => item.setTitle(name).setIcon('circle').setChecked(!!color && cssColor(color) === hex).onClick(() => change(parseColor(hex))));
-    if (widths) { menu.addSeparator(); for (const value of widths.values) menu.addItem(item => item.setTitle(`${value} pt`).setChecked(value === widths.current).onClick(() => widths.change(value))); }
-    const bounds = anchor.getBoundingClientRect(); menu.showAtPosition({ x: bounds.left, y: bounds.bottom }, anchor.ownerDocument);
+  private closePopover(): void { if (this.popover) { this.removeChild(this.popover); this.popover = undefined; } this.propertiesButton.setAttribute('aria-expanded', 'false'); }
+  private openProperties(): void {
+    if (this.popover) { this.closePopover(); return; }
+    if (this.tool === 'marker' || this.tool === 'scribble') { this.openBrushMenu(this.tool, this.propertiesButton); return; }
+    const field = this.session?.snapshot.fields.find(field => field.name === this.selected);
+    if (!field && this.tool !== 'text') return;
+    this.popover = this.addChild(new ToolPopover(this.propertiesButton, {
+      title: 'Text', color: field?.color ?? this.textColor,
+      changeColor: color => { this.textColor = color; this.rememberPreferences(); this.formatSelected({ color }); this.updateStatus(); },
+      text: { font: field?.fontFamily ?? this.textFamily, size: field?.fontSize ?? this.fontSize,
+        change: (fontFamily, fontSize) => { this.textFamily = fontFamily; this.fontSize = fontSize; this.rememberPreferences(); this.formatSelected({ fontFamily, fontSize }); this.updateStatus(); } },
+      close: () => this.closePopover()
+    })); this.updateStatus(); this.propertiesButton.setAttribute('aria-expanded', 'true');
   }
   private openBrushMenu(kind: 'marker' | 'scribble', anchor: HTMLElement): void {
-    this.showPalette(anchor, kind === 'marker' ? this.markerColor : this.penColor, color => {
-      if (kind === 'marker') this.markerColor = color; else this.penColor = color; this.updateStatus();
-    }, { values: kind === 'marker' ? [8, 14, 22] : [1, 2, 4], current: kind === 'marker' ? this.markerWidth : this.penWidth,
-      change: value => { if (kind === 'marker') this.markerWidth = value; else this.penWidth = value; } });
+    this.closePopover();
+    this.popover = this.addChild(new ToolPopover(anchor, {
+      title: kind === 'marker' ? 'Highlighter' : 'Pen', color: kind === 'marker' ? this.markerColor : this.penColor,
+      changeColor: color => { if (kind === 'marker') this.markerColor = color; else this.penColor = color; this.rememberPreferences(); this.updateStatus(); },
+      widths: { values: kind === 'marker' ? [8, 14, 22, 30] : [1, 2, 4, 6], value: kind === 'marker' ? this.markerWidth : this.penWidth,
+        change: value => { if (kind === 'marker') this.markerWidth = value; else this.penWidth = value; this.rememberPreferences(); this.updateStatus(); } }, close: () => this.closePopover(),
+      toggles: kind === 'marker' ? [{ label: 'Hold for straight line', description: 'Pause at the end before lifting.', value: this.holdHighlighter, change: value => { this.holdHighlighter = value; this.rememberPreferences(); } }]
+        : [{ label: 'Smooth ink', description: 'Reduce wobble while keeping your handwriting.', value: this.smoothPen, change: value => { this.smoothPen = value; this.rememberPreferences(); } },
+          { label: 'Draw & hold shapes', description: 'Lines, rectangles, triangles, circles, ellipses and arrows. Keep holding and drag to resize.', value: this.holdShapes, change: value => { this.holdShapes = value; this.rememberPreferences(); } }]
+    })); this.updateStatus(); this.propertiesButton.setAttribute('aria-expanded', 'true');
   }
 
   private removeSelection(): void {
     try {
+      if (this.selection?.objects.length) { this.selection.remove(); return; }
       if (this.selectedStroke) { this.session?.deleteStroke(this.selectedStroke); this.selectedStroke = undefined; this.scheduleSave(); }
       else if (this.selected) { this.focused = undefined; this.session?.delete(this.selected); this.selected = undefined; this.scheduleSave(); }
       this.updateStatus(); this.refresh();
@@ -231,40 +325,46 @@ export class TextEditor extends Component {
   private showError(error: unknown): void {
     if (!this.loaded) return;
     const message = error instanceof Error ? error.message : String(error);
-    if (this.session?.status === 'conflict' || this.session?.status === 'error') this.updateStatus();
+    if ((this.session?.status === 'conflict' || this.session?.replacing) || this.session?.status === 'error') this.updateStatus();
     else { this.message.textContent = message; this.status.textContent = 'Read only / save failed'; }
     new Notice(message);
   }
 
   private updateStatus(): void {
     const session = this.session;
+    const blocked = session?.status === 'conflict' || !!session?.replacing;
     const selected = session?.snapshot.fields.find(field => field.name === this.selected);
-    this.size.value = String(selected?.fontSize ?? this.fontSize);
-    if (selected && this.size.value === '') { const option = this.size.ownerDocument.createElement('option'); option.value = String(selected.fontSize); option.textContent = `${selected.fontSize} pt`; this.size.append(option); this.size.value = option.value; }
-    this.font.value = selected?.fontFamily ?? 'sans';
-    for (const control of [this.size, this.font, this.colorButton]) { control.hidden = !selected; control.disabled = !selected || selected.readOnly || session?.status === 'conflict'; }
-    this.colorButton.style.setProperty('--pdf-tool-color', cssColor(selected?.color ?? [0.05, 0.05, 0.05]));
+    const brush = this.tool === 'marker' || this.tool === 'scribble';
+    this.propertiesButton.disabled = !session || blocked || (!brush && this.tool !== 'text' && !selected) || !!selected?.readOnly;
+    const color = brush ? this.tool === 'marker' ? this.markerColor : this.penColor : selected?.color ?? this.textColor;
+    this.propertiesButton.style.setProperty('--pdf-tool-color', cssColor(color));
+    this.propertiesButton.setAttribute('aria-haspopup', 'dialog');
+    const width = brush ? this.tool === 'marker' ? this.markerWidth : this.penWidth : selected?.fontSize ?? this.fontSize;
+    this.propertiesButton.setAttribute('aria-label', brush ? `Brush settings, ${width} point` : 'Text settings');
+    this.propertiesButton.querySelector('.pfs-tool-value')!.textContent = `${Number(width.toFixed(1))} pt`;
     for (const [tool, button] of this.tools) {
       if (tool === 'marker' || tool === 'scribble') button.style.setProperty('--pdf-tool-color', cssColor(tool === 'marker' ? this.markerColor : this.penColor));
-      button.setAttribute('aria-pressed', String(this.tool === tool)); button.disabled = !session || session.status === 'conflict';
+      button.setAttribute('aria-pressed', String(this.tool === tool)); button.disabled = !session || blocked;
     }
-    this.editControls.hidden = !session?.dirty && !session?.canUndoStroke && !this.selected && !this.selectedStroke && this.tool === 'select';
+    this.editControls.hidden = false;
     this.native.element.classList.toggle('pdf-form-studio-editing', !!session);
     this.native.element.dataset.pdfTool = this.tool;
-    this.saveButton.disabled = !session?.dirty || session.status === 'conflict';
+    this.saveButton.disabled = !session?.dirty || blocked;
     const stroke = session?.snapshot.strokes.find(stroke => stroke.id === this.selectedStroke);
-    this.removeButton.disabled = (!selected?.owned && !stroke) || !!selected?.readOnly || !!stroke?.readOnly || session?.status === 'conflict';
-    this.removeButton.hidden = !selected?.owned && !stroke;
-    setTooltip(this.removeButton, stroke ? 'Remove mark' : 'Remove text box');
-    this.undoButton.hidden = !session?.canUndoStroke; this.undoButton.disabled = session?.status === 'conflict';
-    const status = session ? ({ saved: 'Saved to PDF', saving: 'Saving…', unsaved: this.drawingInteraction ? session.drafted ? 'Draft saved locally · Select or Save to write PDF' : 'Unsaved drawing · Select or Save to write PDF' : 'Waiting to save', error: 'Save failed', conflict: 'File changed' }[session.status]) : 'Loading…';
+    this.removeButton.disabled = (!this.selection?.objects.length && !selected?.owned && !stroke) || !!selected?.readOnly || !!stroke?.readOnly || blocked;
+    this.removeButton.hidden = false;
+    setTooltip(this.removeButton, this.selection?.objects.length ? `Remove ${this.selection.objects.length} selected objects` : stroke ? 'Remove mark' : 'Remove text box');
+    this.undoButton.disabled = !session?.canUndoStroke || blocked;
+    this.redoButton.disabled = !session?.canRedoStroke || blocked;
+    const status = session ? ({ saved: 'Saved to PDF', saving: 'Saving…', unsaved: session.drafted ? 'Draft saved locally · Saving PDF…' : 'Unsaved changes', error: 'Save failed', conflict: 'File changed' }[session.status]) : 'Loading…';
     this.status.replaceChildren();
-    setIcon(this.status, session?.status === 'saved' ? 'check' : session?.status === 'error' || session?.status === 'conflict' ? 'triangle-alert' : 'loader-circle');
+    setIcon(this.status, session?.status === 'saved' ? 'check' : session?.status === 'error' || blocked ? 'triangle-alert' : 'loader-circle');
     setTooltip(this.status, status); this.status.dataset.state = session?.status;
     const accessible = this.status.ownerDocument.createElement('span'); accessible.className = 'pdf-form-studio-sr-only'; accessible.textContent = status;
     this.status.append(accessible);
+    { accessible.className = 'pfs-save-label'; accessible.textContent = session?.status === 'saved' ? 'Saved' : session?.status === 'saving' ? 'Saving…' : session?.status === 'unsaved' ? 'Unsaved' : status; }
     this.message.textContent = session?.error || this.loadError;
-    this.message.classList.toggle('is-error', !!this.loadError || session?.status === 'error' || session?.status === 'conflict');
+    this.message.classList.toggle('is-error', !!this.loadError || session?.status === 'error' || blocked);
   }
 
   private mountToolbar(): void {
@@ -281,9 +381,10 @@ export class TextEditor extends Component {
     const release = this.session?.beginInteraction(); menu.onHide(() => release?.());
     const file = this.native.file;
     const original = this.sessions.backupFor(file); const recovery = this.sessions.backupFor(file, 'recovery');
-    const blocked = this.session?.status === 'conflict' || this.session?.status === 'saving';
+    const blocked = (this.session?.status === 'conflict' || this.session?.replacing) || this.session?.status === 'saving';
     menu.addItem(item => item.setTitle('Reload PDF').setIcon('refresh-cw').setDisabled(!this.session).onClick(() => this.requestReload()));
     menu.addSeparator();
+    menu.addItem(item => item.setTitle('Recovery copies…').setIcon('shield-check').onClick(() => { const modal = new RecoveryInfo(this.app, this.sessions, file); this.register(() => modal.close()); modal.open(); }));
     menu.addItem(item => item.setTitle('Preview original PDF').setIcon('folder-open').setDisabled(!original).onClick(() => {
       if (original) { const modal = new RecoveryPreview(this.app, () => this.sessions.readRecovery(file)); this.register(() => modal.close()); modal.open(); }
     }));
@@ -307,7 +408,7 @@ export class TextEditor extends Component {
     if (this.timer !== undefined) this.native.element.ownerDocument.defaultView!.clearTimeout(this.timer);
     this.timer = this.native.element.ownerDocument.defaultView!.setTimeout(() => {
       this.timer = undefined;
-      void this.session?.checkpoint().then(() => this.session?.saveWhenIdle()).catch(error => this.showError(error));
+      void this.session?.checkpoint().then(() => this.session?.save()).catch(error => this.showError(error));
     }, 900);
   }
 
@@ -333,13 +434,6 @@ export class TextEditor extends Component {
 
   refresh(): void {
     if (!this.loaded) return;
-    for (const input of this.native.textInputs()) {
-      if (!this.nativeInputs.has(input)) this.nativeInputs.set(input, { readOnly: input.readOnly, tabIndex: input.tabIndex, ariaHidden: input.getAttribute('aria-hidden') });
-      // Native form input changes do not participate in the verified vault writer.
-      input.readOnly = true;
-      if (this.session) { input.tabIndex = -1; input.setAttribute('aria-hidden', 'true'); }
-    }
-    for (const input of this.nativeInputs.keys()) if (!input.isConnected) this.nativeInputs.delete(input);
     // Obsidian may replace toolbar content while refreshing a file.
     if (this.native.element.isConnected && (!this.toolbar.isConnected || this.toolbar.parentElement !== (this.native.toolbarHost() ?? this.native.element))) this.mountToolbar();
     const pages = this.native.pages();
@@ -353,7 +447,6 @@ export class TextEditor extends Component {
       entry.layer.remove(); this.layers.delete(div);
     }
     if (!this.session) return;
-    this.backdrop?.update(pages);
     for (const page of pages) {
       let entry = this.layers.get(page.div);
       if (!entry) {
@@ -362,7 +455,8 @@ export class TextEditor extends Component {
         page.div.append(layer);
         const ink = this.addChild(new InkLayer(page, layer, this.session, {
           tool: () => this.tool, width: kind => kind === 'marker' ? this.markerWidth : this.penWidth, color: kind => kind === 'marker' ? this.markerColor : this.penColor, selected: () => this.selectedStroke,
-          select: id => { this.selectedStroke = id; this.selected = undefined; this.focused = undefined; this.updateStatus(); this.refresh(); },
+          smooth: () => this.smoothPen, shapes: () => this.holdShapes, straightHold: () => this.holdHighlighter,
+          select: id => { this.selection?.clear(); this.selectedStroke = id; this.selected = undefined; this.focused = undefined; this.updateStatus(); this.refresh(); },
           start: () => {
             this.focused = undefined; this.selected = undefined; this.selectedStroke = undefined;
             const active = layer.ownerDocument.activeElement;
@@ -377,7 +471,7 @@ export class TextEditor extends Component {
       entry.page = page;
       entry.layer.dataset.tool = this.tool;
       entry.ink.update(page);
-      const fieldWidgets = this.session.snapshot.fields.flatMap(field => field.widgets.flatMap((widget, index) =>
+      const fieldWidgets = this.session.snapshot.fields.filter(field => !field.readOnly).flatMap(field => field.widgets.flatMap((widget, index) =>
         widget.page === page.number ? [{ field, widget, key: `${field.name}:${index}` }] : []));
       const keys = new Set(fieldWidgets.map(({ key }) => key));
       for (const [key, control] of entry.controls) if (!keys.has(key)) {
@@ -393,14 +487,18 @@ export class TextEditor extends Component {
         if (!control.preview) this.positionField(entry, control, field, widget.rect, widget.rotation);
         if (!this.composing.has(control.input) && control.input.value !== field.value) control.input.value = field.value;
         control.input.disabled = field.readOnly;
-        control.input.readOnly = this.session.status === 'conflict';
-        control.input.tabIndex = this.tool === 'marker' || this.tool === 'scribble' || this.tool === 'eraser' ? -1 : 0;
-        if (field.owned) control.frame.tabIndex = control.input.tabIndex;
-        control.frame.classList.toggle('is-selected', field.name === this.selected && field.owned);
-        control.frame.classList.toggle('is-locked', this.session.status === 'conflict' || field.readOnly || (field.owned && field.widgets.length !== 1));
+        control.input.readOnly = (this.session.status === 'conflict' || this.session.replacing) || this.editing !== field.name;
+        const drawing = this.tool === 'marker' || this.tool === 'scribble' || this.tool === 'eraser';
+        control.input.tabIndex = !drawing && this.editing === field.name ? 0 : -1;
+        control.frame.tabIndex = drawing ? -1 : 0;
+        control.frame.classList.toggle('is-answer-field', this.answerFields.has(field.name));
+        if (this.answerFields.has(field.name)) control.frame.setAttribute('aria-label', 'Detected answer. Click to edit; Tab or Shift+Tab to change answer lines.');
+        control.frame.classList.toggle('is-editing', this.editing === field.name);
+        control.frame.classList.toggle('is-selected', field.name === this.selected);
+        control.frame.classList.toggle('is-locked', (this.session.status === 'conflict' || this.session.replacing) || field.readOnly || (field.owned && field.widgets.length !== 1));
       }
-      // A vault write makes the native viewer recreate pages. Keep typing in the
-      // replacement control instead of sending subsequent keys to the note.
+      // Explicit reload/recovery can replace pages. Restore focus only when
+      // the user has not deliberately moved it elsewhere.
       const active = page.div.ownerDocument.activeElement;
       if (resume?.page === page.number && this.tool !== 'marker' && this.tool !== 'scribble' && this.tool !== 'eraser' && (!active || active === page.div.ownerDocument.body || active === resume.input)) {
         const input = [...entry.controls.values()].find(control => control.input.dataset.pdfField === resume.name)?.input;
@@ -411,6 +509,7 @@ export class TextEditor extends Component {
         }
       }
     }
+    this.selection?.update(pages);
   }
 
   private positionField(entry: PageLayer, control: FieldControl, field: TextField, rect: Rect, rotation: number): void {
@@ -442,10 +541,11 @@ export class TextEditor extends Component {
     input.spellcheck = false;
     if (field.maxLength !== undefined) input.maxLength = field.maxLength;
     input.addEventListener('focus', () => {
+      this.activateBox(field.name); this.editing = field.name;
       this.releaseFocus();
       this.focusInteraction = { input, release: this.session!.beginInteraction() };
       this.focused = { input, page: entry.page.number, name: field.name };
-      input.readOnly = this.session?.status === 'conflict';
+      input.readOnly = this.session?.status === 'conflict' || !!this.session?.replacing;
       this.selected = field.name; this.selectedStroke = undefined; this.updateStatus(); this.refresh();
     });
     input.addEventListener('input', event => {
@@ -461,8 +561,8 @@ export class TextEditor extends Component {
       if (this.timer !== undefined) { doc.defaultView!.clearTimeout(this.timer); this.timer = undefined; }
     });
     input.addEventListener('blur', () => {
-      // Native PDF reloads blur the control before detaching it. Explicit clicks,
-      // Tab and Escape clear the focus record; this blur must keep it for refresh.
+      // Explicit clicks, Tab and Escape clear the focus record; retain it when
+      // a document reload detaches this control before replacement.
       if (this.focusInteraction?.input === input) this.releaseFocus();
       if (this.loaded && this.session?.dirty && this.session.status !== 'conflict') this.scheduleSave();
     });
@@ -475,12 +575,12 @@ export class TextEditor extends Component {
       if (key.key === 'Escape') { input.blur(); }
     });
     frame.append(input); entry.layer.append(frame); entry.controls.set(key, control);
-    if (field.owned) control.dispose = this.bindBox(entry, control, field.name);
+    control.dispose = this.bindBox(entry, control, field.name);
   }
 
   private growField(entry: PageLayer, control: FieldControl): void {
     const field = this.session?.snapshot.fields.find(field => field.name === control.input.dataset.pdfField);
-    if (!field?.owned || field.readOnly || field.widgets.length !== 1 || this.session?.status === 'conflict' || this.composing.has(control.input)) return;
+    if (!field?.owned || field.readOnly || field.widgets.length !== 1 || (this.session?.status === 'conflict' || this.session?.replacing) || this.composing.has(control.input)) return;
     const widget = field.widgets[0]!;
     const doc = control.input.ownerDocument;
     const style = doc.defaultView!.getComputedStyle(control.input);
@@ -511,31 +611,43 @@ export class TextEditor extends Component {
     const { frame, input } = control;
     const doc = frame.ownerDocument;
     frame.tabIndex = 0; frame.setAttribute('role', 'group');
-    frame.setAttribute('aria-label', 'Text box. Click text to type; drag the border to move.');
+    const owned = this.session!.snapshot.fields.find(field => field.name === name)!.owned;
+    frame.setAttribute('aria-label', owned ? 'Text box. Click to select, drag to move, double-click or Enter to edit, Backspace to delete.' : 'Form field. Double-click or Enter to edit.');
     const labels: Record<ResizeHandle, string> = {
       n: 'top', ne: 'top right', e: 'right', se: 'bottom right', s: 'bottom', sw: 'bottom left', w: 'left', nw: 'top left'
     };
-    for (const handle of Object.keys(labels) as ResizeHandle[]) {
+    for (const handle of (owned ? Object.keys(labels) : []) as ResizeHandle[]) {
       const button = doc.createElement('button'); button.type = 'button'; button.tabIndex = -1;
       button.className = 'pdf-form-studio-handle'; button.dataset.resize = handle;
       button.setAttribute('aria-label', `Resize text box from ${labels[handle]}`); frame.append(button);
     }
-    for (const edge of ['n', 'e', 's', 'w']) {
+    for (const edge of owned ? ['n', 'e', 's', 'w'] : []) {
       const border = doc.createElement('div'); border.className = 'pdf-form-studio-move-edge'; border.dataset.edge = edge;
       border.setAttribute('aria-hidden', 'true'); frame.append(border);
     }
     const select = () => {
+      this.selection?.clear();
       this.selected = name; this.selectedStroke = undefined; this.updateStatus(); this.refresh();
     };
     frame.addEventListener('focus', () => {
+      this.activateBox(name); this.endTextEditing(name);
       this.releaseFocus(); this.focusInteraction = { input: frame, release: this.session!.beginInteraction() }; select();
     });
     frame.addEventListener('blur', () => {
       if (this.focusInteraction?.input === frame) this.releaseFocus();
       if (this.loaded && this.session?.dirty) this.scheduleSave();
     });
+    frame.addEventListener('focusout', () => {
+      // Focus can move from textarea to its frame/handles during a drag. Only
+      // leaving the whole box ends its lifetime; toolbar formatting also retains it.
+      queueMicrotask(() => {
+        const active = doc.activeElement;
+        if (this.loaded && this.activeBox === name && active !== doc.body && active !== doc.documentElement && !(active && (frame.contains(active) || this.toolbar.contains(active)
+          || (active instanceof doc.defaultView!.Element && active.closest('.pfs-tool-popover'))))) this.endTextEditing();
+      });
+    });
     frame.addEventListener('dblclick', event => {
-      if (doc.activeElement === input || this.session?.status === 'conflict' || (event.target as HTMLElement).dataset.resize) return;
+      if (doc.activeElement === input || (this.session?.status === 'conflict' || this.session?.replacing) || (event.target as HTMLElement).dataset.resize) return;
       event.preventDefault(); event.stopPropagation(); input.focus({ preventScroll: true });
       input.setSelectionRange(input.value.length, input.value.length);
     });
@@ -552,10 +664,15 @@ export class TextEditor extends Component {
       if (previous && this.loaded && repaint) this.refresh();
     };
     frame.addEventListener('pointerdown', event => {
-      if (event.button !== 0 || this.tool === 'marker' || this.tool === 'scribble' || this.tool === 'eraser' || this.session?.status === 'conflict') return;
-      if (event.target === input) return;
+      if (event.button !== 0 || this.tool === 'marker' || this.tool === 'scribble' || this.tool === 'eraser' || (this.session?.status === 'conflict' || this.session?.replacing)) return;
+      if (event.target === input && this.editing === name) return;
       const field = this.session?.snapshot.fields.find(field => field.name === name);
-      if (!field || field.readOnly || field.widgets.length !== 1) return;
+      if (!field || field.readOnly) return;
+      if (this.answerFields.has(name) && !event.shiftKey && !(event.target as HTMLElement).closest('[data-resize], [data-edge]')) {
+        event.preventDefault(); event.stopPropagation(); this.selection?.clear(); input.focus({ preventScroll: true }); return;
+      }
+      event.preventDefault(); event.stopPropagation(); select(); frame.focus({ preventScroll: true });
+      if (!owned || field.widgets.length !== 1 || !this.session!.snapshot.fields.includes(field)) return;
       const viewport = entry.page.viewport; const widget = field.widgets[0]!;
       const handle = (event.target as HTMLElement).dataset.resize as ResizeHandle | undefined;
       event.preventDefault(); event.stopPropagation(); cancel();
@@ -569,6 +686,7 @@ export class TextEditor extends Component {
       if (gesture.signature !== signature()) { cancel(); return; }
       const field = this.session!.snapshot.fields.find(field => field.name === name)!;
       const widget = field.widgets[0]!; const viewport = entry.page.viewport; const end = point(event);
+      if (!control.preview && Math.hypot(end[0] - gesture.start[0], end[1] - gesture.start[1]) < 3) return;
       const angle = ((viewport.rotation - widget.rotation) % 360 + 360) % 360;
       const minimum: [number, number] = [40 * viewport.scale, (field.fontSize * 1.2 + 2) * viewport.scale];
       if (angle === 90 || angle === 270) minimum.reverse();
@@ -596,7 +714,7 @@ export class TextEditor extends Component {
       if (event.key === 'Escape') { event.preventDefault(); cancel(); this.selected = undefined; frame.blur(); this.updateStatus(); this.refresh(); return; }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') { event.preventDefault(); void this.save(); return; }
       const field = this.session?.snapshot.fields.find(field => field.name === name);
-      if (!field || field.readOnly || field.widgets.length !== 1 || this.session?.status === 'conflict') return;
+      if (!field?.owned || field.readOnly || field.widgets.length !== 1 || (this.session?.status === 'conflict' || this.session?.replacing)) return;
       if (event.key === 'Delete' || event.key === 'Backspace') {
         event.preventDefault(); this.session?.delete(name); this.selected = undefined; this.scheduleSave(); return;
       }
@@ -627,7 +745,7 @@ export class TextEditor extends Component {
         Math.max(0, Math.min(entry.page.viewport.height, (event.clientY - box.top) * entry.page.viewport.height / box.height))];
     };
     entry.layer.addEventListener('pointerdown', event => {
-      if (event.target !== entry.layer || event.button !== 0 || this.tool !== 'text' || !this.session || this.session.status === 'conflict') return;
+      if (event.target !== entry.layer || event.button !== 0 || this.tool !== 'text' || !this.session || (this.session.status === 'conflict' || this.session.replacing)) return;
       event.preventDefault(); event.stopPropagation(); start = point(event); pointer = event.pointerId;
       release?.(); release = this.session?.beginInteraction();
       entry.layer.setPointerCapture(event.pointerId);
@@ -658,6 +776,7 @@ export class TextEditor extends Component {
       try {
         if (rect[2] - rect[0] < 8 || rect[3] - rect[1] < 8) return;
         const field = this.session.add(entry.page.number, rect, this.fontSize, true, entry.page.viewport.rotation);
+        this.session.formatField(field.name, { fontFamily: this.textFamily, color: this.textColor });
         this.selected = field.name; this.selectedStroke = undefined; this.updateStatus(); this.refresh();
         entry.controls.get(`${field.name}:0`)?.input.focus({ preventScroll: true });
         // A blank box stays in the shared model while focused. Its eventual
@@ -674,8 +793,11 @@ export class TextEditor extends Component {
   }
 
   onunload(): void {
+    this.closePopover(); this.selection?.cancel(); this.selection?.clear();
+    this.endTextEditing();
+    for (const entry of this.layers.values()) entry.ink.finishPending();
     this.loaded = false;
-    this.drawingInteraction?.(); this.drawingInteraction = undefined; this.releaseFocus();
+    this.releaseFocus();
     if (this.timer !== undefined) this.native.element.ownerDocument.defaultView!.clearTimeout(this.timer);
     this.unsubscribe?.();
     // Commit edits when a note/embed closes; errors remain in the shared session.
@@ -687,10 +809,6 @@ export class TextEditor extends Component {
     this.composing.clear();
     this.native.element.classList.remove('pdf-form-studio-view', 'pdf-form-studio-editing');
     delete this.native.element.dataset.pdfTool;
-    for (const [input, original] of this.nativeInputs) {
-      input.readOnly = original.readOnly; input.tabIndex = original.tabIndex;
-      if (original.ariaHidden === null) input.removeAttribute('aria-hidden'); else input.setAttribute('aria-hidden', original.ariaHidden);
-    }
-    this.nativeInputs.clear();
+
   }
 }

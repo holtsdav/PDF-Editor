@@ -71,7 +71,10 @@
 }
 .pdf-form-studio-box:hover { outline-color: #8b8b8b; }
 .pdf-form-studio-box:focus-within { outline-color: #1476e5; }
-.pdf-form-studio-box.is-added.is-selected { outline-color: #1476e5; z-index: 2; }
+.pdf-form-studio-box.is-selected { outline-color: #1476e5; z-index: 2; }
+.pdf-form-studio-box:not(.is-editing) > .pdf-form-studio-field { pointer-events: none; user-select: none; }
+.pdf-form-studio-box.is-added:not(.is-editing) { cursor: move; }
+.pdf-form-studio-box.is-answer-field { cursor: text; }
 .pdf-form-studio-box.is-added.is-overflow.is-selected { outline-color: #c03434; }
 .pdf-form-studio-view .pdf-form-studio-box > input.pdf-form-studio-field,
 .pdf-form-studio-view .pdf-form-studio-box > textarea.pdf-form-studio-field {
@@ -145,23 +148,109 @@
 .pdf-form-studio-stroke-outline.is-selected,
 .pdf-form-studio-ink-control:focus-visible .pdf-form-studio-stroke-outline { display: block; }
 
-/* The always-available overlay owns verified text input; native widgets stay read only. */
-.pdf-form-studio-view .annotationLayer input[type="text"],
-.pdf-form-studio-view .annotationLayer textarea { background: transparent !important; border-radius: 0 !important; box-shadow: none !important; }
-.pdf-form-studio-editing .annotationLayer input[type="text"],
-.pdf-form-studio-editing .annotationLayer textarea { opacity: 0; }
-
 .pdf-form-studio-toolbar .pdf-form-studio-font { width: 78px; height: 28px; padding: 0 6px; font-size: var(--font-ui-small); }
 .pdf-form-studio-toolbar .pdf-form-studio-icon[style*="--pdf-tool-color"] { position: relative; }
-.pdf-form-studio-toolbar .pdf-form-studio-icon[style*="--pdf-tool-color"]::after { content: ''; position: absolute; bottom: 2px; left: 9px; right: 9px; height: 3px; border-radius: 1px; background: var(--pdf-tool-color); }
+.pdf-form-studio-toolbar .pdf-form-studio-icon[style*="--pdf-tool-color"]:not(.pfs-properties-button)::after { content: ''; position: absolute; bottom: 2px; left: 9px; right: 9px; height: 3px; border-radius: 1px; background: var(--pdf-tool-color); }
 .pdf-form-studio-hidden-ink { visibility: hidden !important; pointer-events: none !important; }
 .pdf-form-studio-recovery-canvas { display: block; width: 100%; height: auto; margin-top: 12px; }
 
-.pdf-form-studio-backdrop { position: absolute; inset: 0; pointer-events: none; visibility: hidden; }
-.pdf-form-studio-backdrop canvas { width: 100%; height: 100%; }
-.pdf-form-studio-clean-page:has(> .pdf-form-studio-backdrop) > .canvasWrapper { visibility: hidden; }
-.pdf-form-studio-clean-page > .pdf-form-studio-backdrop { visibility: visible; }
+/* A persistent editor lives beside the native viewer, outside its reload tree. */
+.pfs-integrated > :not(.pfs-surface) { display: none !important; }
+.pfs-surface { display: flex; flex-direction: column; width: 100%; height: 100%; min-height: 320px; isolation: isolate; color: var(--text-normal); background: var(--background-primary); border: 1px solid var(--background-modifier-border); border-radius: var(--radius-m); overflow: hidden; }
+.pdf-embed.pfs-integrated { height: var(--pfs-embed-height, 1100px) !important; min-height: 240px; }
+.pdf-embed.pfs-integrated > .pfs-surface { height: 100%; min-height: 0; flex: 1; }
+.pfs-navigation { display: flex; align-items: center; gap: 4px; padding: 6px 10px; min-height: 42px; flex-shrink: 0; overflow-x: auto; border-bottom: 1px solid var(--background-modifier-border); }
+.pfs-title-area { flex: 1; min-width: 24px; margin-right: 8px; }
+.pfs-navigation .pfs-document-title, .pfs-navigation .pfs-title-input { width: 100%; min-width: 24px; height: 28px; padding: 0 4px; text-align: left; font-size: var(--font-ui-small); font-weight: var(--font-medium); }
+.pfs-navigation .pfs-document-title { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; background: transparent; box-shadow: none; border: 1px solid transparent; }
+.pfs-navigation .pfs-document-title:hover { background: var(--background-modifier-hover); }
+.pfs-navigation [hidden] { display: none; }
+.pfs-navigation .pfs-title-input[aria-invalid="true"] { border-color: var(--text-error); }
+.pfs-navigation button, .pfs-search button { height: 28px; flex-shrink: 0; box-shadow: none; }
+.pfs-nav-button { width: 28px; min-width: 28px; }
+.pfs-navigation .pfs-page-number { width: 40px; height: 26px; padding: 2px 4px; text-align: center; font-variant-numeric: tabular-nums; -moz-appearance: textfield; background: transparent; border: 1px solid transparent; box-shadow: none; }
+.pfs-page-number::-webkit-inner-spin-button { -webkit-appearance: none; }
+.pfs-navigation .pfs-page-number:focus { border-color: var(--interactive-accent); }
+.pfs-page-count { white-space: nowrap; font-size: var(--font-ui-small); color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.pfs-divider { width: 1px; height: 18px; background: var(--background-modifier-border); margin: 0 4px; }
+.pfs-navigation .pfs-zoom { width: 68px; min-width: 68px; padding: 0 2px; background: transparent; font-size: var(--font-ui-smaller); font-variant-numeric: tabular-nums; }
+.pfs-tools-host { flex-shrink: 0; border-bottom: 1px solid var(--background-modifier-border); }
+.pfs-tools-host > .pdf-form-studio-toolbar { display: flex; justify-content: flex-start; height: 44px; padding: 6px 10px; gap: 4px; overflow-x: auto; }
+.pfs-tools-host .pdf-form-studio-icon { width: 30px; min-width: 30px; height: 30px; border-radius: var(--radius-s); }
+.pfs-tools-host .pdf-form-studio-edit-controls { border-left: 1px solid var(--background-modifier-border); padding-left: 8px; margin-left: 4px; gap: 4px; }
+.pfs-tools-host .pdf-form-studio-icon[aria-pressed="true"] { background: var(--background-modifier-active-hover); color: var(--interactive-accent); }
+.pfs-tools-host .pdf-form-studio-icon[aria-pressed="true"] svg { stroke-width: 2.5px; }
+.pfs-tools-host .pfs-properties-button { display: grid; grid-template-columns: 18px 1fr; width: 70px; min-width: 70px; padding: 0 8px; align-items: center; gap: 6px; }
+.pfs-settings-icon { position: relative; display: grid; place-items: center; width: 18px; height: 26px; padding-bottom: 2px; }
+.pfs-tools-host .pfs-settings-icon svg { display: block; width: 18px; height: 18px; }
+.pfs-settings-color { position: absolute; bottom: 0; left: 50%; transform: translateX(-50%); width: 16px; height: 3px; border-radius: 1px; background: var(--pdf-tool-color); }
+.pfs-tool-value { font-size: 11px; font-variant-numeric: tabular-nums; color: var(--text-muted); line-height: 1; white-space: nowrap; }
+.pfs-ink-hint { position: absolute; z-index: 4; padding: 4px 8px; border-radius: var(--radius-s); background: var(--background-primary); color: var(--text-normal); font: 12px var(--font-interface); pointer-events: none; box-shadow: var(--shadow-s); }
+.pfs-ink-hint[hidden] { display: none; }
+.pfs-tool-popover .pfs-assist-toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; height: auto; padding: 10px 0; border: 0; border-top: 1px solid var(--background-modifier-border); border-radius: 0; background: transparent; box-shadow: none; text-align: left; white-space: normal; }
+.pfs-assist-toggle strong { display: block; font-size: var(--font-ui-small); font-weight: var(--font-medium); }
+.pfs-assist-description { display: block; margin-top: 4px; font-size: var(--font-ui-smaller); color: var(--text-muted); line-height: 1.4; }
+.pfs-switch-track { flex: 0 0 30px; height: 18px; padding: 3px; background: var(--background-modifier-border-hover); border-radius: 12px; }
+.pfs-switch-track::after { content: ''; display: block; width: 12px; height: 12px; border-radius: 50%; background: var(--text-on-accent); }
+.pfs-assist-toggle[aria-checked="true"] .pfs-switch-track { background: var(--interactive-accent); }
+.pfs-assist-toggle[aria-checked="true"] .pfs-switch-track::after { transform: translateX(12px); }
+.pfs-tools-host .pdf-form-studio-status { margin-left: auto; gap: 5px; min-width: 64px; white-space: nowrap; font-size: 11px; }
+.pfs-tools-host .pdf-form-studio-status[data-state="saved"] { color: var(--text-muted); }
+.pfs-save-label { overflow: hidden; max-width: 90px; text-overflow: ellipsis; }
+.pfs-surface-message:empty { display: none; }
+.pfs-surface-message { padding: 10px 12px; font-size: var(--font-ui-small); color: var(--text-muted); }
+.pfs-surface-message.is-error { color: var(--text-error); }
+.pfs-pages { position: relative; flex: 1; overflow: auto; min-height: 100px; background: var(--background-secondary); overscroll-behavior: contain; scrollbar-gutter: stable; outline: none; }
+.pfs-page-stack { display: flex; flex-direction: column; align-items: center; gap: 16px; padding: 16px; width: max-content; min-width: 100%; }
+.pfs-page { position: relative; background: white; flex-shrink: 0; box-shadow: 0 2px 8px rgb(0 0 0 / 12%); color: #161616; overflow: hidden; --user-unit: 1; --min-font-size: 1; }
+.pfs-page-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.pfs-text-layer { position: absolute; inset: 0; overflow: clip; opacity: 1; line-height: 1; text-align: initial; transform-origin: 0 0; caret-color: CanvasText; z-index: 2; }
+.pfs-text-layer :is(span, br) { color: transparent; position: absolute; white-space: pre; cursor: text; transform-origin: 0% 0%; }
+.pfs-text-layer > :not(.markedContent), .pfs-text-layer .markedContent span:not(.markedContent) { z-index: 1; }
+.pfs-text-layer ::selection { background: rgb(55 130 235 / 30%); }
+.pfs-text-layer .pfs-search-hit { background: rgb(255 214 0 / 40%); }
+.pfs-links { position: absolute; inset: 0; z-index: 3; pointer-events: none; }
+.pfs-pdf-link { position: absolute; pointer-events: auto; cursor: pointer; }
+.pfs-pdf-link:hover, .pfs-pdf-link:focus-visible { background: rgb(55 130 235 / 12%); outline: 1px solid #1769ce; }
+.pfs-search { display: flex; align-items: center; padding: 6px 10px; gap: 6px; border-bottom: 1px solid var(--background-modifier-border); }
+.pfs-search[hidden] { display: none; }
+.pfs-search input { min-width: 70px; flex: 1; height: 30px; }
+.pfs-search-status { font-size: var(--font-ui-smaller); color: var(--text-muted); }
+.pfs-tool-popover { position: fixed; z-index: 1000; width: 272px; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); overflow-y: auto; padding: 12px; border-radius: var(--radius-m); background: var(--background-primary); color: var(--text-normal); box-shadow: 0 6px 24px rgb(0 0 0 / 24%); font-size: var(--font-ui-small); }
+.pfs-popover-heading { display: flex; align-items: center; justify-content: space-between; font-weight: var(--font-semibold); margin-bottom: 8px; }
+.pfs-popover-heading button { width: 26px; height: 26px; }
+.pfs-brush-preview { display: flex; align-items: center; height: 42px; padding: 0 16px; background: #fff; border-radius: var(--radius-s); }
+.pfs-brush-preview[hidden] { display: none; }
+.pfs-brush-preview > span { display: block; width: 100%; border-radius: 20px; }
+.pfs-property-label { color: var(--text-muted); font-size: var(--font-ui-smaller); margin: 12px 0 8px; }
+.pfs-color-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; }
+.pfs-tool-popover .pfs-swatch { background: var(--swatch); padding: 4px; width: 26px; height: 26px; border: 2px solid transparent; border-radius: 50%; box-shadow: none; }
+.pfs-swatch-check { display: none; }
+.pfs-swatch-check svg { width: 14px; height: 14px; color: white; filter: drop-shadow(0 1px 1px rgb(0 0 0 / 70%)); }
+.pfs-swatch[aria-pressed="true"] .pfs-swatch-check { display: flex; }
+.pfs-tool-popover button:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
+.pfs-widths, .pfs-fonts, .pfs-text-sizes { display: grid; gap: 6px; grid-template-columns: repeat(4, 1fr); }
+.pfs-fonts { grid-template-columns: repeat(3, 1fr); }
+.pfs-tool-popover .pfs-width-option { display: flex; flex-direction: column; height: 52px; padding: 4px; gap: 4px; font-size: 11px; background: var(--background-secondary); border: 1px solid transparent; box-shadow: none; }
+.pfs-width-track { height: 25px; width: 100%; display: flex; align-items: center; justify-content: center; }
+.pfs-width-track > span { display: block; width: 26px; border-radius: 12px; background: var(--text-normal); }
+.pfs-tool-popover :is(.pfs-width-option, .pfs-fonts button, .pfs-text-sizes button)[aria-pressed="true"] { background: var(--background-modifier-active-hover); border-color: var(--interactive-accent); color: var(--text-normal); }
+.pfs-fonts button, .pfs-text-sizes button { padding: 4px; box-shadow: none; border: 1px solid transparent; background: var(--background-secondary); height: 30px; }
+.pfs-tool-popover button:hover { filter: brightness(0.94); }
+@media (prefers-reduced-motion: no-preference) { .pfs-tool-popover button, .pfs-tools-host button { transition: background-color 120ms ease-out; } }
+.pfs-recovery-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; border-top: 1px solid var(--background-modifier-border); }
 
-/* Keep the annotation row at a fixed height as selection controls change. */
-.pdf-form-studio-view .pdf-toolbar:has(> .pdf-form-studio-toolbar) { flex-wrap: wrap; height: auto; max-height: none; min-height: 68px; }
-.pdf-form-studio-view .pdf-toolbar > .pdf-form-studio-toolbar { flex: 1 0 100%; width: 100%; min-width: 0; height: 32px; box-sizing: border-box; justify-content: flex-end; overflow-x: auto; padding: 2px 4px; }
+.pfs-answer-suggestions { position: absolute; inset: 0; z-index: 6; pointer-events: none; }
+.pfs-page button.pfs-answer-suggestion { position: absolute; pointer-events: auto; cursor: text; padding: 0; min-height: 0; border: 1px dashed #1476e5; border-radius: 2px; background: rgb(20 118 229 / 8%); box-shadow: none; }
+.pfs-page button.pfs-answer-suggestion:hover, .pfs-page button.pfs-answer-suggestion:focus-visible { background: rgb(20 118 229 / 18%); outline: 2px solid #1476e5; }
+
+.pfs-object-selection {
+  position: absolute;
+  z-index: 7;
+  pointer-events: none;
+  border: 1px dashed #1476e5;
+  box-sizing: border-box;
+}
+.pfs-object-selection.is-marquee { background: rgb(20 118 229 / 10%); border-style: solid; }
+.pdf-form-studio-box.is-multi-selected { outline: 2px solid #1476e5; }
+.pdf-form-studio-ink-control.is-multi-selected .pdf-form-studio-stroke-outline { display: block; }

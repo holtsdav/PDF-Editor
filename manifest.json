@@ -1,9 +1,9 @@
 {
   "id": "pdf-form-studio",
   "name": "PDF Form Studio",
-  "version": "0.5.0",
+  "version": "0.7.6",
   "minAppVersion": "1.13.7",
-  "description": "Edit and format PDF text, highlight, draw, move and erase marks inside note previews, with PDF saving and local recovery drafts.",
+  "description": "Integrated PDF editing beta with answer-line detection inside frames, direct filling, held shapes, automatic saving and recovery.",
   "author": "holtsdav",
   "authorUrl": "https://github.com/holtsdav",
   "isDesktopOnly": true
