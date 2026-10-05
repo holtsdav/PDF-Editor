@@ -9,7 +9,7 @@ export interface PageViewport {
   convertToPdfPoint(x: number, y: number): number[];
   convertToViewportRectangle(rect: number[]): number[];
 }
-export interface NativePage { div: HTMLElement; viewport: PageViewport; number: number; hasRenderedAnnotation(id: string): boolean }
+export interface NativePage { div: HTMLElement; viewport: PageViewport; number: number; annotationElements(id: string): HTMLElement[] }
 export interface NativePdf {
   identity: object;
   source: object;
@@ -44,7 +44,7 @@ export function findNativePdfs(app: App): NativePdf[] {
       found.push({
         identity: anchor ?? object, source: object, element: container, file: object.file,
         textInputs: () => [...container.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('.annotationLayer input[type="text"], .annotationLayer textarea')],
-        toolbarHost: () => container.querySelector<HTMLElement>('.pdf-toolbar:not(.pdf-findbar) .pdf-toolbar-right'),
+        toolbarHost: () => container.querySelector<HTMLElement>('.pdf-toolbar:not(.pdf-findbar)'),
         pages: () => {
           const pages: NativePage[] = [];
           for (const div of container.querySelectorAll<HTMLElement>('.page[data-page-number]')) {
@@ -54,7 +54,7 @@ export function findNativePdfs(app: App): NativePdf[] {
               const viewport = record(view?.viewport);
               if (viewport && typeof viewport.convertToPdfPoint === 'function' && typeof viewport.convertToViewportRectangle === 'function') {
                 pages.push({ div, viewport: viewport as unknown as PageViewport, number,
-                  hasRenderedAnnotation: id => [...div.querySelectorAll<HTMLElement>('.annotationLayer [data-annotation-id]')].some(element => element.dataset.annotationId === id) });
+                  annotationElements: id => [...div.querySelectorAll<HTMLElement>('.annotationLayer [data-annotation-id]')].filter(element => element.dataset.annotationId === id) });
               }
             } catch { /* Page not yet rendered; next scan retries. */ }
           }

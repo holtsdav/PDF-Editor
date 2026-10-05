@@ -116,7 +116,8 @@ export function writeInk(pdf: PDFDocument, added: Map<string, InkStroke>, delete
   }
   for (const stroke of added.values()) {
     if (deleted.has(stroke.id)) continue;
-    if (existing.has(stroke.id)) throw new Error('Duplicate drawing ID.');
+    const prior = existing.get(stroke.id);
+    if (prior?.readOnly || (prior && prior.page !== stroke.page)) throw new Error('This drawing cannot be moved.');
     const page = pdf.getPages()[stroke.page - 1];
     if (!page) throw new Error('The drawing page no longer exists.');
     const box = page.getCropBox(); validateStroke(stroke, [box.x, box.y, box.x + box.width, box.y + box.height]);
@@ -132,7 +133,12 @@ export function writeInk(pdf: PDFDocument, added: Map<string, InkStroke>, delete
       Contents: PDFString.of(stroke.kind === 'marker' ? 'Marker' : 'Scribble'),
       PFSKind: stroke.kind === 'marker' ? 'Marker' : 'Scribble', AP: { N: ap } });
     if (stroke.kind === 'marker') dict.set(PDFName.of('IT'), PDFName.of('InkHighlight'));
-    page.node.addAnnot(context.register(dict));
+    if (prior) {
+      const target = page.node.Annots()!.asArray().map(ref => context.lookup(ref, PDFDict)).find(value => text(value, 'NM') === stroke.id)!;
+      for (const [key, value] of dict.entries()) {
+        if (key.toString() !== '/F' && key.toString() !== '/Contents') target.set(key, value);
+      }
+    } else page.node.addAnnot(context.register(dict));
   }
 }
 

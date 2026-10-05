@@ -6,6 +6,8 @@ import { VaultSessions } from './pdf/vault-sessions';
 import { isRecoveryPath, loadBackups } from './pdf/recovery';
 import type { BackupRecord } from './pdf/recovery';
 import fontBytes from '../assets/fonts/NotoSans-Regular.ttf';
+import serifBytes from '../assets/fonts/NotoSerif-Regular.ttf';
+import monoBytes from '../assets/fonts/NotoSansMono-Regular.ttf';
 
 class PdfPicker extends FuzzySuggestModal<TFile> {
   private choose: (file: TFile) => void;
@@ -32,13 +34,14 @@ export default class PdfFormStudio extends Plugin {
   async onload(): Promise<void> {
     const saved: unknown = await this.loadData();
     if (saved && typeof saved === 'object' && 'backups' in saved && saved.backups && typeof saved.backups === 'object') {
-      this.backups = loadBackups(saved.backups);
+      this.backups = loadBackups(saved.backups, `${this.app.vault.configDir}/plugins/pdf-form-studio/recovery`);
     }
-    this.sessions = new VaultSessions(this.app, fontBytes, this.backups, () => {
+    this.sessions = new VaultSessions(this.app, { sans: fontBytes, serif: serifBytes, mono: monoBytes }, this.backups, () => {
       const snapshot = { backups: Object.fromEntries(Object.entries(this.backups).map(([source, record]) => [source, { ...record }])) };
       this.persistence = this.persistence.catch(() => {}).then(() => this.saveData(snapshot));
       return this.persistence;
     });
+    await this.sessions.initialize();
     this.addCommand({
       id: 'inspect-pdf-form-fields',
       name: 'Inspect PDF form fields',
@@ -63,7 +66,7 @@ export default class PdfFormStudio extends Plugin {
   }
 
   private scanEditors(): void {
-    const viewers = findNativePdfs(this.app).filter(viewer => !isRecoveryPath(viewer.file.path));
+    const viewers = findNativePdfs(this.app).filter(viewer => !isRecoveryPath(viewer.file.path, this.sessions.root));
     const alive = new Set(viewers.map(viewer => viewer.identity));
     for (const [identity, recent] of this.recentEditors) if (recent.until < Date.now()) this.recentEditors.delete(identity);
     for (const [identity, editor] of this.editors) {

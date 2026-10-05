@@ -1,6 +1,7 @@
 import { adjustDimsForRotation, drawTextField, reduceRotation, rgb, rotateInPlace, setFillingRgbColor, setFontAndSize, TextAlignment } from 'pdf-lib';
 import type { AppearanceProviderFor, PDFTextField } from 'pdf-lib';
 import { wrapText } from './wrap-text.ts';
+import { defaultColor } from './text-format.ts';
 
 /** Owned multiline boxes use the editor's 1.2em leading and browser font baseline. */
 export const multilineAppearance: AppearanceProviderFor<PDFTextField> = (field, widget, font) => {
@@ -20,9 +21,10 @@ export const multilineAppearance: AppearanceProviderFor<PDFTextField> = (field, 
     return { text, encoded: font.encodeText(text), width: textWidth, height: font.heightAtSize(size),
       x: border + padding + offset, y: height - border - padding - baseline - index * leading };
   });
-  const appearance = `${setFillingRgbColor(0.05, 0.05, 0.05)}\n${setFontAndSize(font.name, size)}`;
+  const color = rgb(...defaultColor(field.acroField.getDefaultAppearance() ?? ''));
+  const appearance = `${setFillingRgbColor(color.red, color.green, color.blue)}\n${setFontAndSize(font.name, size)}`;
   field.acroField.setDefaultAppearance(appearance); widget.setDefaultAppearance(appearance);
   return [...rotateInPlace({ ...rectangle, rotation }), ...drawTextField({ x: border / 2, y: border / 2,
     width: width - border, height: height - border, borderWidth: border, borderColor: undefined, color: undefined,
-    textLines, textColor: rgb(0.05, 0.05, 0.05), font: font.name, fontSize: size, padding })];
+    textLines, textColor: color, font: font.name, fontSize: size, padding })];
 };

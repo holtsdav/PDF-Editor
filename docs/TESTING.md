@@ -1,5 +1,29 @@
 # App test record
 
+## Version 0.5.0 persistent tools, formatting and stable drawing
+
+Checked on 2026-10-05 through Computer Use in an isolated vault and **Obsidian 1.13.7 desktop on macOS**. Anonymous two-page fixtures contained authored fields, added boxes and saved marks. The build was installed only in the development vault; test PDFs, answers and screenshots remain outside Git.
+
+| Scenario | Observed result |
+| --- | --- |
+| Persistent tools | Select was the opening tool. Text stayed active after placing/typing two lines, Save and Escape. Re-tapping Pen or Marker opened its color/width menu and retained the active tool |
+| Drawing without per-stroke reload | Two blue pen strokes remained visible across idle checkpoints without a white page flash. The source PDF hash stayed unchanged while Pen was active; the hidden verified draft contained both new strokes. Choosing Select committed them |
+| Blank clicks / direct typing | Select clicks on blank space did not add a field. A direct click on an existing field or box allowed typing |
+| Eraser and undo | An eraser drag removed one complete pen stroke and kept the other marks. Undo restored that gesture. Eraser remained active; choosing Select committed the result |
+| Select movement / deletion | Dragging a saved blue pen stroke moved it; saving retained the same annotation ID/reference. Selecting and deleting it removed it from the saved PDF |
+| Contextual text controls | Selecting text showed family, color and size controls; clearing selection hid them. An added multiline box changed to red Serif at 16pt; saved values, styling and appearance retained the change |
+| Reading view | Direct authored-field typing and Cmd+S persisted from the main note preview. Saved text and ink rendered there |
+| Live Preview | Direct authored-field typing, Mono formatting and Cmd+S persisted. The annotation row fit a 700px embed without shifting the page when text controls appeared |
+| PDF tab / pop-out | Direct field edits saved from the main PDF tab. The successful canvas drawing, erasing, moving, deleting and undo pass was in a note-preview pop-out |
+| Recovery migration / preview | The visible legacy folder disappeared. All 15 older recovery PDFs retained their byte hashes in hidden storage. Original preview rendered embedded text in a pop-out; its read-only pagination reached page 2 |
+| Independent output | PDF parsing verified editable values, Serif/Mono font metadata, color/size and remaining ink. Poppler rendered the saved file; the embedding note stayed byte-for-byte unchanged |
+
+The gesture pass found and fixed two backdrop issues: native resets removed the plugin canvas while retaining the page element, and a native wrapper class caused canvas ownership collisions. The final backdrop uses its own class, recreates detached canvases and strips only owned ink from a display copy, avoiding duplicate/ghost marks after movement or deletion. Passing PDF.js `ownerDocument` fixed custom-font glyphs in pop-out recovery previews. A fixed-height annotation row stopped context controls changing PDF page geometry mid-gesture.
+
+A main-window marker gesture did not produce a new stroke through coordinate automation; no error appeared. Canvas gesture support in main Reading/Live Preview embeds therefore remains provisional. Rendering and direct typing in those embeds passed. All palette colors/widths, Shift-marker locking, rapid strokes, cancellation/zoom during gestures, every resize handle and rotated/cropped edge combinations still need broader final-build app testing. Closing and reopening existing pop-outs is recommended after a development reload, since independently running windows can retain an earlier plugin build.
+
+`npm run check` passes **47 tests**, lint, TypeScript, build and plugin validation. Seven new regressions cover verified draft checkpoints without source writes and recovery after a crash; stale recovered drafts; stable references and gesture-level move/erase undo; continuous eraser crossings/taps; whole-field fonts/colors/sizes with independently parsed appearance operators; interrupted hidden-folder migration; and display copies preserving foreign annotations and form content. The previous 40 tests remain green. Erasing removes a whole owned stroke; formatting affects a whole field, and no Wacom or pressure support is claimed.
+
 ## Version 0.4.0 direct editing, marker and scribble
 
 Checked on 2026-10-05 through Computer Use in an isolated vault and **Obsidian 1.13.7 desktop on macOS**. Anonymous two-page fixtures contained one authored field and one existing plugin-created box. The final build was installed and reloaded; fixtures and answers remain outside Git.

@@ -49,10 +49,21 @@ The placement work was developed as 0.2.2, then included in 0.3.0 rather than re
 - [x] Contextual icon controls and always-available text overlays; native saved ink avoids double-painted transparency.
 - [x] 40 automated tests; see the app test record for exact manual coverage.
 
+### 0.5.0 persistent tools, text formatting and ink editing — implemented
+
+- [x] Select is the default; Text, Pen, Marker and Eraser stay active until another tool is chosen.
+- [x] Repeat-tap Pen/Marker palette with color and width choices.
+- [x] Whole-field font/color/size controls appear only with selected text; bundled Sans, Serif and Mono fonts match saved appearances.
+- [x] Select moves/deletes owned ink; constant-radius whole-stroke erasing and gesture-level undo retain stable IDs.
+- [x] Verified durable drawing drafts; source PDF writes wait until drawing mode ends or an explicit save/close.
+- [x] Public PDF.js backdrop excludes owned ink for display, preserving foreign annotations and preventing duplicate/ghost marks.
+- [x] Hidden recovery storage, crash-resumable migration of all old copies, and read-only original preview.
+- [x] Stable annotation toolbar height; 47 automated tests and actual macOS app checks described in TESTING.md.
+
 ### Further development
 
 1. Broader PDFs, Windows/Linux, app versions and third-party plugin compatibility; benchmark large documents.
-2. Full edit undo/redo, durable pending-text recovery and text formatting.
+2. Full edit undo/redo, rich substring formatting and stronger recovery across multiple app processes.
 3. Checkbox/radio/select fields, validation flags and richer form semantics.
 4. Font fallback, complex scripts and further appearance/layout fidelity.
 5. More independent viewers, rotation combinations, malformed form trees and file-integrity testing.
@@ -61,7 +72,7 @@ Acceptance remains: values and appearances agree after reopening; no flattening/
 
 ## Later: Wacom input and richer ink
 
-Build on the basic constant-width ink tools with pressure width, smoothing, erasing, stroke transforms and full undo/redo. Test actual hardware, OS and app build for pressure, dots/fast strokes, cancellation, buttons/eraser and zoom changes. Independently reopen/print output. Handwriting recognition is separate.
+Build on the basic constant-width ink tools with pressure width, smoothing, partial-stroke erasing, rotation/scaling transforms and redo. Test actual hardware, OS and app build for pressure, dots/fast strokes, cancellation, buttons/eraser and zoom changes. Independently reopen/print output. Handwriting recognition is separate.
 
 ## Community submission
 

@@ -1,35 +1,47 @@
-import { FIELD_PREFIX, readTextPdf, writeTextPdf } from './text-engine.ts';
+import { FIELD_PREFIX, readTextPdf, renderTextPdf, writeTextPdf } from './text-engine.ts';
 import type { AddedField, BoxUpdate, Rect, TextChanges, TextField, TextSnapshot } from './text-engine.ts';
+import { hash } from './recovery.ts';
+import { validColor } from './text-format.ts';
+import type { PdfColor, PdfFonts, TextFormat } from './text-format.ts';
 import type { BackupPurpose } from './recovery.ts';
 import { InteractionGate } from './interaction-gate.ts';
 import { INK_PREFIX, strokeBounds, validateStroke } from './ink-engine.ts';
 import type { InkKind, InkStroke, Point } from './ink-engine.ts';
 
 export interface PdfStore {
+  draft?: { read(): Promise<PdfDraft | null>; write(draft: PdfDraft): Promise<void>; clear(): Promise<void> };
   read(): Promise<Uint8Array>;
   write(bytes: Uint8Array): Promise<void>;
   backup(bytes: Uint8Array, purpose?: BackupPurpose): Promise<string>;
 }
+export interface PdfDraft { baselineHash: string; bytes: Uint8Array }
 export type SaveStatus = 'saved' | 'unsaved' | 'saving' | 'error' | 'conflict';
 export function equalBytes(a: Uint8Array, b: Uint8Array): boolean {
   return a.length === b.length && a.every((value, index) => value === b[index]);
 }
-const emptyChanges = (): TextChanges => ({ values: new Map(), added: new Map(), boxes: new Map(), deleted: new Set(), strokes: new Map(), deletedStrokes: new Set() });
+const emptyChanges = (): TextChanges => ({ values: new Map(), added: new Map(), boxes: new Map(), deleted: new Set(), strokes: new Map(), deletedStrokes: new Set(), formats: new Map() });
 
 /** One session per vault PDF; every view shares its model and serialized writer. */
 export class TextSession {
   snapshot: TextSnapshot;
+  renderEpoch = 0;
+  renderBytes(): Promise<Uint8Array> { return renderTextPdf(this.seed.slice()); }
   status: SaveStatus = 'saved';
   error = '';
   backupPath = '';
   private seed: Uint8Array;
   private baseline: Uint8Array;
   private store: PdfStore;
-  private font: Uint8Array;
+  private font: PdfFonts;
   private changes: TextChanges = emptyChanges();
-  private strokeHistory: string[] = [];
+  private strokeHistory: InkStroke[][] = [];
+  private inkAction?: InkStroke[];
+  private seedStrokeIds = new Set<string>();
+  private draftQueue: Promise<void> = Promise.resolve();
   private revision = 0;
   private savedRevision = 0;
+  private draftRevision = -1;
+  get drafted(): boolean { return this.dirty && this.draftRevision === this.revision; }
   private queue: Promise<void> = Promise.resolve();
   private listeners = new Set<() => void>();
   private writing = false;
@@ -37,13 +49,20 @@ export class TextSession {
   private editEpoch = 0;
   private waitingForInteraction = false;
 
-  private constructor(store: PdfStore, font: Uint8Array, seed: Uint8Array, snapshot: TextSnapshot) {
-    this.store = store; this.font = font; this.seed = seed; this.baseline = seed; this.snapshot = snapshot;
+  private constructor(store: PdfStore, font: PdfFonts, seed: Uint8Array, snapshot: TextSnapshot) {
+    this.store = store; this.font = font; this.seed = seed; this.baseline = seed; this.snapshot = snapshot; this.seedStrokeIds = new Set(snapshot.strokes.map(stroke => stroke.id));
   }
 
-  static async open(store: PdfStore, font: Uint8Array): Promise<TextSession> {
+  static async open(store: PdfStore, font: PdfFonts): Promise<TextSession> {
     const bytes = await store.read();
-    return new TextSession(store, font, bytes.slice(), await readTextPdf(bytes));
+    const draft = await store.draft?.read();
+    const session = new TextSession(store, font, draft?.bytes.slice() ?? bytes.slice(), await readTextPdf(draft?.bytes ?? bytes));
+    session.baseline = bytes.slice();
+    if (draft) {
+      session.revision = 1; session.draftRevision = 1; session.status = await hash(bytes) === draft.baselineHash ? 'unsaved' : 'conflict';
+      if (session.status === 'conflict') session.error = 'A recovered draft belongs to an older PDF. Pending edits are preserved. Reload to discard them and use the current file.';
+    }
+    return session;
   }
 
   subscribe(callback: () => void): () => void { this.listeners.add(callback); return () => this.listeners.delete(callback); }
@@ -64,7 +83,7 @@ export class TextSession {
     if (this.status === 'conflict') throw new Error('Reload the PDF before adding text after an external change.');
     const name = FIELD_PREFIX + globalThis.crypto.randomUUID();
     const added: AddedField = { name, page, rect, fontSize, multiline, rotation };
-    const field: TextField = { name, value: '', fontSize, multiline, readOnly: false, owned: true, widgets: [{ page, rect, rotation }] };
+    const field: TextField = { name, value: '', fontSize, fontFamily: 'sans', color: [0.05, 0.05, 0.05], multiline, readOnly: false, owned: true, widgets: [{ page, rect, rotation }] };
     this.changes.added.set(name, added); this.changes.values.set(name, '');
     this.snapshot.fields.push(field); this.changed(); return field;
   }
@@ -76,7 +95,7 @@ export class TextSession {
     if (this.changes.added.has(name)) this.changes.added.delete(name);
     else this.changes.deleted.add(name);
     this.changes.values.delete(name);
-    this.changes.boxes.delete(name);
+    this.changes.boxes.delete(name); this.changes.formats.delete(name);
     this.snapshot.fields = this.snapshot.fields.filter(field => field.name !== name); this.changed();
   }
 
@@ -95,37 +114,94 @@ export class TextSession {
     if (widget.rect.every((value, index) => Math.abs(value - rect[index]!) < 0.001) && fontSize === field.fontSize && multiline === field.multiline) return;
     widget.rect = [...rect]; field.fontSize = fontSize; field.multiline = multiline;
     this.changes.boxes.set(name, { rect: [...rect], fontSize, multiline });
-    this.changes.values.set(name, field.value); this.changed();
+    this.changes.values.set(name, field.value);
+    if (this.changes.formats.has(name)) this.changes.formats.set(name, { fontFamily: field.fontFamily, fontSize, color: [...field.color] });
+    this.changed();
   }
 
-  addStroke(page: number, kind: InkKind, points: Point[], width = kind === 'marker' ? 14 : 2): InkStroke {
+  formatField(name: string, format: Partial<TextFormat>): void {
+    const field = this.snapshot.fields.find(field => field.name === name);
+    if (!field || field.readOnly || this.conflicted) throw new Error('This text cannot be formatted.');
+    const next = { fontFamily: field.fontFamily, fontSize: field.fontSize, color: [...field.color] as PdfColor, ...format };
+    if (!['sans', 'serif', 'mono'].includes(next.fontFamily) || !Number.isFinite(next.fontSize) || next.fontSize < 1 || next.fontSize > 200 || !validColor(next.color)) throw new Error('Invalid text formatting.');
+    Object.assign(field, next); this.changes.formats.set(name, next); this.changes.values.set(name, field.value); this.changed();
+  }
+
+  private rememberInk(): void {
+    if (!this.inkAction) { this.strokeHistory.push(structuredClone(this.snapshot.strokes)); if (this.strokeHistory.length > 50) this.strokeHistory.shift(); }
+  }
+  beginInkAction(): void { if (!this.inkAction) this.inkAction = structuredClone(this.snapshot.strokes); }
+  finishInkAction(cancel = false): void {
+    const before = this.inkAction; this.inkAction = undefined;
+    if (!before || JSON.stringify(before) === JSON.stringify(this.snapshot.strokes)) return;
+    if (cancel) this.restoreInk(before);
+    else { this.strokeHistory.push(before); if (this.strokeHistory.length > 50) this.strokeHistory.shift(); this.notify(); }
+  }
+  private restoreInk(strokes: InkStroke[]): void {
+    this.snapshot.strokes = structuredClone(strokes);
+    this.changes.strokes = new Map(strokes.filter(stroke => !stroke.readOnly).map(stroke => [stroke.id, stroke]));
+    const ids = new Set(strokes.map(stroke => stroke.id));
+    this.changes.deletedStrokes = new Set([...this.seedStrokeIds].filter(id => !ids.has(id))); this.changed();
+  }
+  moveStroke(id: string, delta: Point): void {
+    if (this.conflicted) throw new Error('Reload the PDF before moving marks.');
+    const index = this.snapshot.strokes.findIndex(stroke => stroke.id === id); const stroke = this.snapshot.strokes[index];
+    if (!stroke || stroke.readOnly || !delta.every(Number.isFinite)) throw new Error('This mark cannot be moved.');
+    const b = this.snapshot.pages[stroke.page - 1]!;
+    const dx = Math.max(b[0] - stroke.rect[0], Math.min(b[2] - stroke.rect[2], delta[0]));
+    const dy = Math.max(b[1] - stroke.rect[1], Math.min(b[3] - stroke.rect[3], delta[1]));
+    if (Math.abs(dx) + Math.abs(dy) < 0.001) return;
+    this.rememberInk();
+    const points = stroke.points.map(([x, y]) => [x + dx, y + dy] as Point);
+    const next = { ...stroke, points, rect: strokeBounds(points, stroke.width, b) };
+    this.snapshot.strokes[index] = next; this.changes.strokes.set(id, next); this.changed();
+  }
+
+  addStroke(page: number, kind: InkKind, points: Point[], width = kind === 'marker' ? 14 : 2, color?: PdfColor): InkStroke {
     if (this.conflicted) throw new Error('Reload the PDF before drawing after an external change.');
     const bounds = this.snapshot.pages[page - 1];
     if (!bounds || !Number.isInteger(page)) throw new Error('The drawing page does not exist.');
     const stroke: InkStroke = { id: INK_PREFIX + globalThis.crypto.randomUUID(), page, kind,
-      points: points.map(point => [...point]), width, color: kind === 'marker' ? [1, 0.84, 0] : [0.085, 0.085, 0.085],
+      points: points.map(point => [...point]), width, color: color ? [...color] : kind === 'marker' ? [1, 0.84, 0] : [0.085, 0.085, 0.085],
       opacity: kind === 'marker' ? 0.4 : 1, rect: strokeBounds(points, width, bounds), readOnly: false };
     validateStroke(stroke, bounds);
-    this.changes.strokes.set(stroke.id, stroke); this.snapshot.strokes.push(stroke);
-    this.strokeHistory.push(stroke.id); this.changed(); return stroke;
+    this.rememberInk(); this.changes.strokes.set(stroke.id, stroke); this.snapshot.strokes.push(stroke);
+    this.changed(); return stroke;
   }
 
   deleteStroke(id: string): void {
     if (this.conflicted) throw new Error('Reload the PDF before removing a drawing.');
     const stroke = this.snapshot.strokes.find(stroke => stroke.id === id);
     if (!stroke || stroke.readOnly) throw new Error('This drawing cannot be removed.');
-    if (this.changes.strokes.has(id)) this.changes.strokes.delete(id);
-    else this.changes.deletedStrokes.add(id);
+    this.rememberInk(); this.changes.strokes.delete(id);
+    if (this.seedStrokeIds.has(id)) this.changes.deletedStrokes.add(id);
     this.snapshot.strokes = this.snapshot.strokes.filter(stroke => stroke.id !== id); this.changed();
   }
 
-  get canUndoStroke(): boolean { return this.strokeHistory.some(id => this.snapshot.strokes.some(stroke => stroke.id === id)); }
+  get canUndoStroke(): boolean { return this.strokeHistory.length > 0; }
   undoStroke(): void {
-    if (this.conflicted) throw new Error('Reload the PDF before undoing a drawing.');
-    let id: string | undefined;
-    while ((id = this.strokeHistory.pop())) {
-      if (this.snapshot.strokes.some(stroke => stroke.id === id)) { this.deleteStroke(id); return; }
-    }
+    if (this.conflicted) throw new Error('Reload the PDF before undoing a mark.');
+    const before = this.strokeHistory.pop(); if (before) this.restoreInk(before);
+  }
+
+  private cloneChanges(): TextChanges {
+    return structuredClone(this.changes);
+  }
+  /** Verified pending PDF in hidden storage; does not reload the displayed PDF. */
+  checkpoint(): Promise<void> {
+    const epoch = this.editEpoch;
+    const result = this.draftQueue.catch(() => {}).then(async () => {
+      if (!this.store.draft || epoch !== this.editEpoch || !this.dirty || this.conflicted) return;
+      let revision: number, baseline: Uint8Array, bytes: Uint8Array;
+      do {
+        revision = this.revision; baseline = this.baseline;
+        bytes = await writeTextPdf(this.seed, this.cloneChanges(), this.font);
+        if (epoch !== this.editEpoch || !this.dirty || this.conflicted) return;
+      } while (revision !== this.revision || baseline !== this.baseline);
+      await this.store.draft.write({ baselineHash: await hash(baseline), bytes });
+      if (baseline === this.baseline) this.draftRevision = revision; this.notify();
+    });
+    this.draftQueue = result; return result;
   }
 
   save(): Promise<void> {
@@ -167,8 +243,9 @@ export class TextSession {
         if (!equalBytes(await this.store.read(), this.baseline)) return this.conflict();
         await this.store.write(bytes);
         if (!equalBytes(await this.store.read(), bytes)) return this.conflict();
-        this.seed = bytes.slice(); this.baseline = bytes.slice(); this.snapshot = snapshot;
-        this.changes = emptyChanges(); this.strokeHistory = [];
+        this.seed = bytes.slice(); this.baseline = bytes.slice(); this.snapshot = snapshot; this.renderEpoch++;
+        this.changes = emptyChanges(); this.strokeHistory = []; this.seedStrokeIds = new Set(this.snapshot.strokes.map(stroke => stroke.id));
+        await this.draftQueue.catch(() => {}); await this.store.draft?.clear();
         this.revision = 0; this.savedRevision = 0; this.backupPath = recovery;
         this.status = 'saved'; this.error = ''; this.notify();
       } catch (error) {
@@ -198,10 +275,7 @@ export class TextSession {
         if (generation !== undefined) await this.waitForInteraction(generation);
         if (epoch !== undefined && epoch !== this.editEpoch) return;
         revision = this.revision;
-        const changes: TextChanges = {
-          values: new Map(this.changes.values), added: new Map(this.changes.added), boxes: new Map(this.changes.boxes), deleted: new Set(this.changes.deleted),
-          strokes: new Map(this.changes.strokes), deletedStrokes: new Set(this.changes.deletedStrokes)
-        };
+        const changes = this.cloneChanges();
         if (!equalBytes(await this.store.read(), this.baseline)) return this.conflict();
         output = await writeTextPdf(this.seed, changes, this.font);
         this.backupPath = await this.store.backup(this.baseline);
@@ -222,6 +296,8 @@ export class TextSession {
         for (const stroke of this.snapshot.strokes) stroke.annotationId = saved.get(stroke.id);
       }
       this.savedRevision = revision;
+      await this.draftQueue.catch(() => {});
+      if (!this.dirty) await this.store.draft?.clear(); else await this.checkpoint();
       this.status = this.dirty ? 'unsaved' : 'saved'; this.notify();
     } catch (error) {
       if (!this.conflicted) this.status = 'error';
@@ -250,8 +326,9 @@ export class TextSession {
     await this.queue.catch(() => {});
     const bytes = await this.store.read();
     const snapshot = await readTextPdf(bytes);
-    this.seed = bytes.slice(); this.baseline = bytes; this.snapshot = snapshot;
-    this.changes = emptyChanges(); this.strokeHistory = [];
+    this.seed = bytes.slice(); this.baseline = bytes; this.snapshot = snapshot; this.renderEpoch++;
+    this.changes = emptyChanges(); this.strokeHistory = []; this.seedStrokeIds = new Set(snapshot.strokes.map(stroke => stroke.id));
+    await this.draftQueue.catch(() => {}); await this.store.draft?.clear();
     this.revision = 0; this.savedRevision = 0; this.status = 'saved'; this.error = ''; this.notify();
   }
 }

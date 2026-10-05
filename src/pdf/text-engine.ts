@@ -1,8 +1,11 @@
-import { PDFDocument, PDFDict, PDFName, PDFStream, PDFTextField, rgb } from 'pdf-lib';
+import { PDFDocument, PDFHexString, PDFString, PDFDict, PDFName, PDFStream, PDFTextField, rgb, setFontAndSize, setFillingRgbColor } from 'pdf-lib';
+import type { PDFFont } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import { multilineAppearance } from './text-appearance.ts';
 import { readInk, verifyInk, writeInk } from './ink-engine.ts';
 import type { InkStroke } from './ink-engine.ts';
+import { defaultColor, validColor } from './text-format.ts';
+import type { FontFamily, PdfColor, PdfFonts, TextFormat } from './text-format.ts';
 
 export const FIELD_PREFIX = 'pdf-form-studio-';
 export type Rect = [number, number, number, number];
@@ -11,6 +14,8 @@ export interface TextField {
   name: string;
   value: string;
   fontSize: number;
+  fontFamily: FontFamily;
+  color: PdfColor;
   multiline: boolean;
   readOnly: boolean;
   owned: boolean;
@@ -23,6 +28,7 @@ export interface BoxUpdate { rect: Rect; fontSize: number; multiline: boolean }
 export interface TextChanges {
   values: Map<string, string>; added: Map<string, AddedField>; boxes: Map<string, BoxUpdate>; deleted: Set<string>;
   strokes: Map<string, InkStroke>; deletedStrokes: Set<string>;
+  formats: Map<string, TextFormat>;
 }
 
 async function loadWritable(bytes: Uint8Array): Promise<PDFDocument> {
@@ -58,6 +64,8 @@ export async function readTextPdf(bytes: Uint8Array): Promise<TextSnapshot> {
     const size = /([\d.]+)\s+Tf/.exec(da)?.[1];
     fields.push({
       name: field.getName(), value: field.getText() ?? '', fontSize: Number(size) || 14,
+      fontFamily: field.acroField.dict.get(PDFName.of('PFSFont'))?.toString() === '/serif' ? 'serif'
+        : field.acroField.dict.get(PDFName.of('PFSFont'))?.toString() === '/mono' ? 'mono' : 'sans', color: defaultColor(da),
       multiline: field.isMultiline(), readOnly: field.isReadOnly() || field.isPassword() || field.isRichFormatted(),
       owned: field.getName().startsWith(FIELD_PREFIX), maxLength: field.getMaxLength(), widgets
     });
@@ -71,12 +79,17 @@ export async function readTextPdf(bytes: Uint8Array): Promise<TextSnapshot> {
 }
 
 /** Always serializes the session seed plus its complete change set, preventing repeated font/field accumulation. */
-export async function writeTextPdf(seed: Uint8Array, changes: TextChanges, fontBytes: Uint8Array): Promise<Uint8Array> {
+export async function writeTextPdf(seed: Uint8Array, changes: TextChanges, fontBytes: PdfFonts): Promise<Uint8Array> {
   const pdf = await loadWritable(seed);
   pdf.registerFontkit(fontkit);
   const form = pdf.getForm();
-  const font = await pdf.embedFont(fontBytes, { subset: true });
-  const supported = new Set(font.getCharacterSet());
+  const embedded = new Map<FontFamily, PDFFont>();
+  const getFont = async (family: FontFamily): Promise<PDFFont> => {
+    let font = embedded.get(family);
+    if (!font) { font = await pdf.embedFont(fontBytes instanceof Uint8Array ? fontBytes : fontBytes[family], { subset: true }); embedded.set(family, font); }
+    return font;
+  };
+  const font = await getFont('sans');
   for (const name of changes.deleted) {
     if (!name.startsWith(FIELD_PREFIX)) throw new Error('Only text boxes created by this plugin can be deleted.');
     const field = form.getFieldMaybe(name);
@@ -107,21 +120,30 @@ export async function writeTextPdf(seed: Uint8Array, changes: TextChanges, fontB
     widgets[0]!.setRectangle({ x: x1, y: y1, width: x2 - x1, height: y2 - y1 });
     field.setFontSize(box.fontSize);
     if (box.multiline) field.enableMultiline(); else field.disableMultiline();
-    field.updateAppearances(font, box.multiline ? multilineAppearance : undefined);
   }
   for (const [name, value] of changes.values) {
     if (changes.deleted.has(name)) continue;
+    const field = form.getTextField(name);
+    const family = changes.formats.get(name)?.fontFamily ?? (field.acroField.dict.get(PDFName.of('PFSFont'))?.toString() === '/serif' ? 'serif'
+      : field.acroField.dict.get(PDFName.of('PFSFont'))?.toString() === '/mono' ? 'mono' : 'sans');
+    const font = await getFont(family); const supported = new Set(font.getCharacterSet());
     for (const character of value) {
       const code = character.codePointAt(0)!;
       if (code !== 10 && code !== 13 && code !== 9 && !supported.has(code)) {
         throw new Error(`The PDF font cannot render U+${code.toString(16).toUpperCase()}. Your text is kept here; replace the unsupported character before saving.`);
       }
     }
-    const field = form.getTextField(name);
     if (field.isReadOnly() || field.isPassword() || field.isRichFormatted()) throw new Error(`Field ${name} is read only or unsupported.`);
     const maximum = field.getMaxLength();
     if (maximum !== undefined && value.length > maximum) throw new Error(`Field ${name} allows at most ${maximum} characters.`);
     field.setText(value);
+    const format = changes.formats.get(name);
+    const color = format?.color ?? defaultColor(field.acroField.getDefaultAppearance() ?? '');
+    const size = format?.fontSize ?? changes.boxes.get(name)?.fontSize ?? (Number(/([\d.]+)\s+Tf/.exec(field.acroField.getDefaultAppearance() ?? '')?.[1]) || 14);
+    if (!Number.isFinite(size) || size < 1 || size > 200 || !validColor(color)) throw new Error('Invalid text formatting.');
+    const da = `${setFillingRgbColor(...color)}\n${setFontAndSize(font.name, size)}`;
+    field.acroField.setDefaultAppearance(da); field.acroField.dict.set(PDFName.of('PFSFont'), PDFName.of(family));
+    for (const widget of field.acroField.getWidgets()) widget.setDefaultAppearance(da);
     field.updateAppearances(font, field.getName().startsWith(FIELD_PREFIX) && field.isMultiline() ? multilineAppearance : undefined);
   }
   writeInk(pdf, changes.strokes, changes.deletedStrokes);
@@ -138,6 +160,14 @@ export async function writeTextPdf(seed: Uint8Array, changes: TextChanges, fontB
       if (!(widget.getAppearances()?.normal instanceof PDFStream)) throw new Error(`PDF appearance verification failed for ${name}.`);
     }
   }
+  for (const [name, format] of changes.formats) {
+    if (changes.deleted.has(name)) continue;
+    const field = verified.getForm().getTextField(name);
+    const da = field.acroField.getDefaultAppearance() ?? '';
+    if (field.acroField.dict.get(PDFName.of('PFSFont'))?.toString() !== '/' + format.fontFamily
+      || Math.abs(Number(/([\d.]+)\s+Tf/.exec(da)?.[1]) - format.fontSize) > 0.001
+      || defaultColor(da).some((value, i) => Math.abs(value - format.color[i]!) > 0.001)) throw new Error('PDF text formatting verification failed.');
+  }
   for (const name of changes.deleted) {
     if (verified.getForm().getFieldMaybe(name)) throw new Error(`PDF deletion verification failed for ${name}.`);
   }
@@ -152,4 +182,23 @@ export async function writeTextPdf(seed: Uint8Array, changes: TextChanges, fontB
     }
   }
   return bytes;
+}
+
+/** Display copy only: keep foreign annotations and editable widgets; own ink is painted live. */
+export async function renderTextPdf(seed: Uint8Array): Promise<Uint8Array> {
+  const pdf = await loadWritable(seed);
+  for (const page of pdf.getPages()) {
+    const annotations = page.node.Annots(); if (!annotations) continue;
+    for (let i = annotations.size() - 1; i >= 0; i--) {
+      const dict = annotations.lookup(i);
+      if (dict instanceof PDFDict && ['/Marker', '/Scribble'].includes(dict.get(PDFName.of('PFSKind'))?.toString() ?? '')
+        && dict.get(PDFName.of('Subtype'))?.toString() === '/Ink'
+        && readInkId(dict)?.startsWith('pdf-form-studio-ink-')) annotations.remove(i);
+    }
+  }
+  return pdf.save({ updateFieldAppearances: false });
+}
+function readInkId(dict: PDFDict): string | undefined {
+  const value = dict.lookup(PDFName.of('NM'));
+  return value instanceof PDFString || value instanceof PDFHexString ? value.decodeText() : undefined;
 }

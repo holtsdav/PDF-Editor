@@ -1,8 +1,8 @@
 {
   "name": "pdf-form-studio",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
-  "description": "Edit PDF text fields, add text boxes, highlight and scribble inside Obsidian note previews.",
+  "description": "Edit PDF text, highlight, draw, move and erase marks in Obsidian note previews with local recovery drafts.",
   "type": "module",
   "main": "main.js",
   "license": "MIT",

@@ -150,7 +150,11 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 
-Noto Sans Regular — https://github.com/notofonts/noto-fonts/blob/main/hinted/ttf/NotoSans/NotoSans-Regular.ttf
+Noto Sans, Noto Serif and Noto Sans Mono Regular — SIL Open Font License 1.1
+Embedded font copyright: Copyright 2015-2021 Google LLC. All Rights Reserved.
+Noto Serif — https://github.com/notofonts/noto-fonts/blob/main/hinted/ttf/NotoSerif/NotoSerif-Regular.ttf
+Noto Sans Mono — https://github.com/notofonts/noto-fonts/blob/main/hinted/ttf/NotoSansMono/NotoSansMono-Regular.ttf
+Noto Sans — https://github.com/notofonts/noto-fonts/blob/main/hinted/ttf/NotoSans/NotoSans-Regular.ttf
 ==============================================================================================================
 Copyright 2018 The Noto Project Authors (github.com/googlei18n/noto-fonts)
 
