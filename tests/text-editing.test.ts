@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { PDFDocument, PDFDict, PDFName, PDFString, degrees } from 'pdf-lib';
-import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
+import { AnnotationMode, OPS, getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { TextSession } from '../src/pdf/text-session.ts';
 import { readTextPdf } from '../src/pdf/text-engine.ts';
 import type { PdfStore } from '../src/pdf/text-session.ts';
@@ -83,6 +83,26 @@ test('external edits prevent overwriting and keep pending text for recovery', as
   assert.deepEqual(file.bytes(), changed); assert.equal(file.writes(), 0); assert.equal(session.status, 'conflict');
   assert.equal(session.snapshot.fields.find(field => field.name === 'Name')?.value, 'My pending answer');
   await session.reload(); assert.equal(session.status, 'saved'); assert.equal(session.dirty, false);
+});
+
+test('three multiline answers fit in the same space in the editor and saved appearance', async () => {
+  const file = memory(await fixture()); const session = await TextSession.open(file.store, font);
+  const box = session.add(1, [50, 350, 350, 410], 14, true);
+  session.setValue(box.name, 'First line\nSecond line\nThird line'); await session.save();
+  const task = getDocument({ data: file.bytes().slice(), standardFontDataUrl });
+  try {
+    const document = await task.promise;
+    const page = await document.getPage(1);
+    const operators = await page.getOperatorList({ annotationMode: AnnotationMode.ENABLE });
+    const baselines = operators.fnArray.flatMap((op, index) => op === OPS.setTextMatrix ? [Number(operators.argsArray[index][0][5])] : []).slice(-3);
+    assert.equal(baselines.length, 3);
+    // Inspect the independently parsed drawing operations: all three baselines
+    // lie inside the 60pt box, spaced at 1.2em rather than the font's full bbox.
+    assert(baselines.every(y => y > 1 && y < 59), `Drawing baselines: ${JSON.stringify(baselines)}`);
+    assert(Math.abs(baselines[0]! - baselines[1]! - 16.8) < 0.001);
+    assert(Math.abs(baselines[1]! - baselines[2]! - 16.8) < 0.001);
+    assert.equal((await readTextPdf(file.bytes())).fields.find(field => field.name === box.name)?.value, 'First line\nSecond line\nThird line');
+  } finally { await task.destroy(); }
 });
 
 test('changes during a write are queued and the final value wins without parallel writes', async () => {

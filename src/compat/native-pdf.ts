@@ -17,6 +17,7 @@ export interface NativePdf {
   file: TFile;
   pages(): NativePage[];
   textInputs(): (HTMLInputElement | HTMLTextAreaElement)[];
+  toolbarHost(): HTMLElement | null;
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -43,6 +44,7 @@ export function findNativePdfs(app: App): NativePdf[] {
       found.push({
         identity: anchor ?? object, source: object, element: container, file: object.file,
         textInputs: () => [...container.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('.annotationLayer input[type="text"], .annotationLayer textarea')],
+        toolbarHost: () => container.querySelector<HTMLElement>('.pdf-toolbar:not(.pdf-findbar) .pdf-toolbar-right'),
         pages: () => {
           const pages: NativePage[] = [];
           for (const div of container.querySelectorAll<HTMLElement>('.page[data-page-number]')) {

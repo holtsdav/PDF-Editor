@@ -2,23 +2,29 @@
 
 Fill PDF text fields and type answers directly on printed worksheets embedded in Obsidian notes. Answers are saved into the vault PDF as editable AcroForm fields, with embedded fonts and appearance streams for other viewers and printing.
 
-**Version 0.2.0: first text editing development beta.** Tested through the actual Obsidian 1.13.7 desktop UI on macOS in an isolated vault. Development is private in [holtsdav/BetterPDF](https://github.com/holtsdav/BetterPDF). This is not yet a published Community plugin.
+**Version 0.2.1: text editing development beta.** Compact native PDF toolbar, transparent on-page text and recovery copies that persist across reloads. Tested through the actual Obsidian 1.13.7 desktop UI on macOS in an isolated vault. Development is private in [holtsdav/BetterPDF](https://github.com/holtsdav/BetterPDF). This is not yet a published Community plugin.
 
 ## Use
 
 1. Embed a PDF normally, for example `![[worksheet.pdf]]`, or open its PDF tab.
-2. Click **Edit text** above the PDF.
-3. Fill an existing text field, click a printed answer line to add text, or drag an area for a multiline answer. Choose **Size** before creating a box.
-4. Changes save after a short pause, on leaving a field, with **Save PDF**, or with Cmd/Ctrl+S inside a field. Wait for **Saved** before closing Obsidian.
-5. Click **Done editing** to return to the normal PDF view. To remove a created box, select it and click **Remove text box**.
+2. Click the **T** icon (**Edit text**) in the PDF's existing toolbar. Hover over icons for their labels.
+3. Fill an existing text field, click a printed answer line to add text, or drag an area for a multiline answer. The drag shows the area being created. Choose the point size before creating a box.
+4. Changes save after a short pause, on leaving a field, with the **Save PDF** disk icon, or with Cmd/Ctrl+S inside a field. Wait for the status check (**Saved to PDF**) before closing Obsidian.
+5. Click the editing checkmark (**Done editing**) to return to normal viewing. Select a created box to reveal its **Remove text box** trash icon.
+
+Text stays transparent, including while focused. A thin outline appears on hover or focus; the preview uses the same Noto Sans font embedded in saved text. The **PDF text options** ellipsis contains reload and recovery actions. A separate compact toolbar is used only when the native toolbar host is unavailable.
 
 Editing works in Reading view, Live Preview, PDF tabs and pop-out windows in the tested app version. Views of the same PDF share one document session and serialized writer. Overlays follow zoom, scrolling and cropped, rotated pages. New boxes retain the orientation in which they were created.
 
 ## Recovery
 
-Before the first write in each document session, a verified copy is created under **PDF Form Studio Backups** in the vault. **Open backup** opens the latest recovery copy. **Restore backup** asks before replacing the PDF and backs up its current contents first, so the restore can be reversed. Older copies remain in the backup folder.
+Before the first edit, one verified **original.pdf** is created under **PDF Form Studio Backups** in a folder named after the PDF. Further saves and app reloads reuse it. Its checksum is checked before writes. If that copy is removed, it is recreated from the current saved PDF before the next edit is written.
 
-External changes stop stale saves. Pending answers remain in the open session; copy them before using **Reload PDF**, which asks before discarding pending text. The plugin uploads nothing. PDFs/backups follow your normal vault sync settings.
+The options menu offers **Open original backup**, **Restore original backup…** and **Undo last restore…**. Restoring asks before replacing the PDF and discarding pending text. It verifies a copy of the current saved PDF in a reusable **before-restore.pdf** slot first. That gives each newly tracked PDF at most two retained recovery files during successful use. The original stays intact when restoring or reversing a restore. Recovery PDFs use the normal viewer without the plugin's editing controls, preventing backups of backups.
+
+Version 0.2.0 created a new backup for every document session and restore. Upgrading reuses its indexed recovery copy as the retained original; older copies remain available and are not automatically deleted.
+
+External changes stop stale saves. Pending answers remain in the open session; copy them before using **Reload PDF** in the options menu, which asks before discarding pending text. The plugin uploads nothing. PDFs/backups follow your normal vault sync settings.
 
 ## Current limits
 

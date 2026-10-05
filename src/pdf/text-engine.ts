@@ -1,5 +1,6 @@
 import { PDFDocument, PDFDict, PDFName, PDFStream, PDFTextField, rgb } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
+import { multilineAppearance } from './text-appearance.ts';
 
 export const FIELD_PREFIX = 'pdf-form-studio-';
 export type Rect = [number, number, number, number];
@@ -102,7 +103,7 @@ export async function writeTextPdf(seed: Uint8Array, changes: TextChanges, fontB
     const maximum = field.getMaxLength();
     if (maximum !== undefined && value.length > maximum) throw new Error(`Field ${name} allows at most ${maximum} characters.`);
     field.setText(value);
-    field.updateAppearances(font);
+    field.updateAppearances(font, field.getName().startsWith(FIELD_PREFIX) && field.isMultiline() ? multilineAppearance : undefined);
   }
   const bytes = await pdf.save({ updateFieldAppearances: false });
   // Reopen and verify logical values, widget appearances, and page count before any vault write.

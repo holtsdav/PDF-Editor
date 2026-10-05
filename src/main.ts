@@ -3,6 +3,8 @@ import { PdfInspectionModal } from './ui/pdf-inspection-modal';
 import { findNativePdfs } from './compat/native-pdf';
 import { TextEditor } from './ui/text-editor';
 import { VaultSessions } from './pdf/vault-sessions';
+import { isRecoveryPath, loadBackups } from './pdf/recovery';
+import type { BackupRecord } from './pdf/recovery';
 import fontBytes from '../assets/fonts/NotoSans-Regular.ttf';
 
 class PdfPicker extends FuzzySuggestModal<TFile> {
@@ -24,16 +26,16 @@ export default class PdfFormStudio extends Plugin {
   private editors = new Map<object, TextEditor>();
   private recentEditors = new Map<object, { file: TFile; state: ReturnType<TextEditor['captureState']>; until: number }>();
   private sessions!: VaultSessions;
-  private backups: Record<string, string> = {};
+  private backups: Record<string, BackupRecord> = {};
   private persistence: Promise<void> = Promise.resolve();
 
   async onload(): Promise<void> {
     const saved: unknown = await this.loadData();
     if (saved && typeof saved === 'object' && 'backups' in saved && saved.backups && typeof saved.backups === 'object') {
-      this.backups = Object.fromEntries(Object.entries(saved.backups).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
+      this.backups = loadBackups(saved.backups);
     }
     this.sessions = new VaultSessions(this.app, fontBytes, this.backups, () => {
-      const snapshot = { backups: { ...this.backups } };
+      const snapshot = { backups: Object.fromEntries(Object.entries(this.backups).map(([source, record]) => [source, { ...record }])) };
       this.persistence = this.persistence.catch(() => {}).then(() => this.saveData(snapshot));
       return this.persistence;
     });
@@ -61,7 +63,7 @@ export default class PdfFormStudio extends Plugin {
   }
 
   private scanEditors(): void {
-    const viewers = findNativePdfs(this.app);
+    const viewers = findNativePdfs(this.app).filter(viewer => !isRecoveryPath(viewer.file.path));
     const alive = new Set(viewers.map(viewer => viewer.identity));
     for (const [identity, recent] of this.recentEditors) if (recent.until < Date.now()) this.recentEditors.delete(identity);
     for (const [identity, editor] of this.editors) {

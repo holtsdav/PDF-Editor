@@ -1,10 +1,11 @@
 import { FIELD_PREFIX, readTextPdf, writeTextPdf } from './text-engine.ts';
 import type { AddedField, Rect, TextChanges, TextField, TextSnapshot } from './text-engine.ts';
+import type { BackupPurpose } from './recovery.ts';
 
 export interface PdfStore {
   read(): Promise<Uint8Array>;
   write(bytes: Uint8Array): Promise<void>;
-  backup(bytes: Uint8Array): Promise<string>;
+  backup(bytes: Uint8Array, purpose?: BackupPurpose): Promise<string>;
 }
 export type SaveStatus = 'saved' | 'unsaved' | 'saving' | 'error' | 'conflict';
 export function equalBytes(a: Uint8Array, b: Uint8Array): boolean {
@@ -82,7 +83,7 @@ export class TextSession {
       if (!equalBytes(await this.store.read(), this.baseline)) return this.conflict();
       this.writing = true; this.status = 'saving'; this.notify();
       try {
-        const recovery = await this.store.backup(this.baseline);
+        const recovery = await this.store.backup(this.baseline, 'restore');
         if (!equalBytes(await this.store.read(), this.baseline)) return this.conflict();
         await this.store.write(bytes);
         if (!equalBytes(await this.store.read(), bytes)) return this.conflict();
@@ -111,7 +112,7 @@ export class TextSession {
     try {
       if (!equalBytes(await this.store.read(), this.baseline)) return this.conflict();
       const output = await writeTextPdf(this.seed, changes, this.font);
-      if (!this.backupPath) this.backupPath = await this.store.backup(this.baseline);
+      this.backupPath = await this.store.backup(this.baseline);
       // Recheck after serialization/backup: sync or another editor may have written meanwhile.
       if (!equalBytes(await this.store.read(), this.baseline)) return this.conflict();
       await this.store.write(output);

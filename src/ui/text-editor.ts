@@ -1,8 +1,10 @@
-import { Component, Modal, Notice } from 'obsidian';
+import { Component, Menu, Modal, Notice, setIcon, setTooltip } from 'obsidian';
 import type { App } from 'obsidian';
 import type { NativePage, NativePdf } from '../compat/native-pdf';
 import { pdfRectangle, screenRectangle } from '../compat/native-pdf';
 import type { Rect, TextField } from '../pdf/text-engine';
+import type { BackupKind } from '../pdf/recovery';
+import { usePdfFont } from './pdf-font';
 import type { TextSession } from '../pdf/text-session';
 import type { VaultSessions } from '../pdf/vault-sessions';
 
@@ -22,9 +24,9 @@ export class TextEditor extends Component {
   private status: HTMLElement;
   private message: HTMLElement;
   private saveButton: HTMLButtonElement;
-  private backupButton: HTMLButtonElement;
-  private restoreButton: HTMLButtonElement;
   private removeButton: HTMLButtonElement;
+  private editControls: HTMLElement;
+  private menu?: Menu;
   private layers = new Map<HTMLElement, PageLayer>();
   private nativeInputs = new Map<HTMLInputElement | HTMLTextAreaElement, boolean>();
   private editing = false;
@@ -39,39 +41,35 @@ export class TextEditor extends Component {
     super(); this.app = app; this.native = native; this.sessions = sessions;
     if (state) { this.editing = state.editing; this.fontSize = state.fontSize; this.selected = state.selected; this.focused = state.focused; }
     const doc = native.element.ownerDocument;
+    this.register(usePdfFont(doc));
+    native.element.classList.add('pdf-form-studio-view');
     this.toolbar = doc.createElement('div'); this.toolbar.className = 'pdf-form-studio-toolbar';
     this.toolbar.setAttribute('role', 'toolbar'); this.toolbar.setAttribute('aria-label', 'PDF text editor');
-    const button = (label: string, callback: () => void): HTMLButtonElement => {
-      const element = doc.createElement('button'); element.textContent = label; element.type = 'button';
-      element.addEventListener('click', callback); this.toolbar.append(element); return element;
+    const button = (parent: HTMLElement, label: string, icon: string, callback: () => void): HTMLButtonElement => {
+      const element = doc.createElement('button'); element.type = 'button'; element.className = 'clickable-icon pdf-form-studio-icon';
+      setIcon(element, icon); setTooltip(element, label);
+      this.registerDomEvent(element, 'click', callback); parent.append(element); return element;
     };
-    this.toggle = button('Edit text', () => { void this.toggleEditing(); });
-    const label = doc.createElement('label'); label.textContent = 'Size ';
+    this.toggle = button(this.toolbar, 'Edit text', 'type', () => { void this.toggleEditing(); });
+    this.editControls = doc.createElement('div'); this.editControls.className = 'pdf-form-studio-edit-controls'; this.toolbar.append(this.editControls);
     const size = doc.createElement('select'); size.setAttribute('aria-label', 'New text size');
+    size.className = 'pdf-form-studio-size'; setTooltip(size, 'Size for new text');
     for (const number of [10, 12, 14, 16, 18, 24]) {
-      const option = doc.createElement('option'); option.value = String(number); option.textContent = String(number); size.append(option);
+      const option = doc.createElement('option'); option.value = String(number); option.textContent = `${number} pt`; size.append(option);
     }
-    size.value = String(this.fontSize); size.addEventListener('change', () => { this.fontSize = Number(size.value); });
-    label.append(size); this.toolbar.append(label);
-    this.saveButton = button('Save PDF', () => { void this.save(); });
-    this.removeButton = button('Remove text box', () => { if (this.selected) { this.session?.delete(this.selected); this.selected = undefined; this.scheduleSave(); } });
-    button('Reload PDF', () => this.requestReload());
-    this.backupButton = button('Open backup', () => {
-      const backup = this.sessions.backupFor(this.native.file);
-      if (backup) void this.app.workspace.getLeaf('tab').openFile(backup);
-    });
-    this.restoreButton = button('Restore backup', () => {
-      const modal = new Modal(this.app); this.register(() => modal.close());
-      modal.setTitle('Restore the PDF backup?');
-      modal.contentEl.createEl('p', { text: 'This replaces the current PDF and discards pending text. A verified recovery copy of the current PDF is saved first, so you can reverse the restore.' });
-      const confirm = modal.contentEl.createEl('button', { text: 'Restore backup', cls: 'mod-warning' });
-      confirm.addEventListener('click', () => { modal.close(); this.focused = undefined; void this.sessions.restore(this.native.file).catch(error => this.showError(error)); });
-      modal.open();
+    size.value = String(this.fontSize); this.registerDomEvent(size, 'change', () => { this.fontSize = Number(size.value); });
+    this.editControls.append(size);
+    this.saveButton = button(this.editControls, 'Save PDF', 'save', () => { void this.save(); });
+    this.removeButton = button(this.editControls, 'Remove text box', 'trash-2', () => {
+      if (this.selected) { this.focused = undefined; this.session?.delete(this.selected); this.selected = undefined; this.scheduleSave(); }
     });
     this.status = doc.createElement('span'); this.status.className = 'pdf-form-studio-status'; this.status.setAttribute('role', 'status');
-    this.toolbar.append(this.status);
+    this.editControls.append(this.status);
+    const more = button(this.toolbar, 'PDF text options', 'ellipsis', () => this.openMenu(more));
     this.message = doc.createElement('div'); this.message.className = 'pdf-form-studio-message';
-    this.native.element.prepend(this.message); this.native.element.prepend(this.toolbar);
+    this.message.setAttribute('role', 'status');
+    this.mountToolbar();
+    this.register(() => this.menu?.hide());
     const observe = () => observer.observe(native.element, { childList: true, subtree: true });
     const observer = new doc.defaultView!.MutationObserver(() => {
       // Never observe our own layer rebuild: detached pages can otherwise cause
@@ -122,15 +120,58 @@ export class TextEditor extends Component {
 
   private updateStatus(): void {
     const session = this.session;
-    this.toggle.textContent = this.editing ? 'Done editing' : 'Edit text';
+    this.toggle.replaceChildren();
+    setIcon(this.toggle, this.editing ? 'check' : 'type');
+    setTooltip(this.toggle, this.editing ? 'Done editing' : 'Edit text — click or drag on the PDF to add text');
     this.toggle.setAttribute('aria-pressed', String(this.editing));
+    this.editControls.hidden = !this.editing;
+    this.native.element.classList.toggle('pdf-form-studio-editing', this.editing);
     this.saveButton.disabled = !session?.dirty || session.status === 'conflict' || session.status === 'saving';
     this.removeButton.disabled = !this.editing || !session?.snapshot.fields.find(field => field.name === this.selected)?.owned || session.status === 'conflict';
-    this.backupButton.disabled = !this.sessions.backupFor(this.native.file);
-    this.restoreButton.disabled = this.backupButton.disabled || session?.status === 'conflict' || session?.status === 'saving';
-    this.status.textContent = session ? ({ saved: 'Saved', saving: 'Saving…', unsaved: 'Unsaved', error: 'Save failed', conflict: 'File changed' }[session.status]) : '';
-    this.message.textContent = session?.error || (this.editing ? 'Click to add text, or drag a box for a longer answer. Changes save automatically.' : '');
+    this.removeButton.hidden = !this.selected;
+    const status = session ? ({ saved: 'Saved to PDF', saving: 'Saving…', unsaved: 'Waiting to save', error: 'Save failed', conflict: 'File changed' }[session.status]) : 'Loading…';
+    this.status.replaceChildren();
+    setIcon(this.status, session?.status === 'saved' ? 'check' : session?.status === 'error' || session?.status === 'conflict' ? 'triangle-alert' : 'loader-circle');
+    setTooltip(this.status, status); this.status.dataset.state = session?.status;
+    const accessible = this.status.ownerDocument.createElement('span'); accessible.className = 'pdf-form-studio-sr-only'; accessible.textContent = status;
+    this.status.append(accessible);
+    this.message.textContent = session?.error || '';
     this.message.classList.toggle('is-error', session?.status === 'error' || session?.status === 'conflict');
+  }
+
+  private mountToolbar(): void {
+    const host = this.native.toolbarHost();
+    this.toolbar.classList.toggle('is-fallback', !host);
+    if (host) host.append(this.toolbar);
+    else this.native.element.prepend(this.toolbar);
+    this.native.element.prepend(this.message);
+  }
+
+  private openMenu(anchor: HTMLElement): void {
+    this.menu?.hide();
+    const menu = this.menu = new Menu();
+    const file = this.native.file;
+    const original = this.sessions.backupFor(file); const recovery = this.sessions.backupFor(file, 'recovery');
+    const blocked = this.session?.status === 'conflict' || this.session?.status === 'saving';
+    menu.addItem(item => item.setTitle('Reload PDF').setIcon('refresh-cw').setDisabled(!this.session).onClick(() => this.requestReload()));
+    menu.addSeparator();
+    menu.addItem(item => item.setTitle('Open original backup').setIcon('folder-open').setDisabled(!original).onClick(() => {
+      if (original) void this.app.workspace.getLeaf('tab').openFile(original);
+    }));
+    menu.addItem(item => item.setTitle('Restore original backup…').setIcon('history').setDisabled(!original || blocked).onClick(() => this.requestRestore('original')));
+    menu.addItem(item => item.setTitle('Undo last restore…').setIcon('undo-2').setDisabled(!recovery || blocked).onClick(() => this.requestRestore('recovery')));
+    const bounds = anchor.getBoundingClientRect();
+    menu.showAtPosition({ x: bounds.left, y: bounds.bottom }, anchor.ownerDocument);
+  }
+
+  private requestRestore(kind: BackupKind): void {
+    const modal = new Modal(this.app); this.register(() => modal.close());
+    const action = kind === 'original' ? 'Restore original backup' : 'Undo last restore';
+    modal.setTitle(action + '?');
+    modal.contentEl.createEl('p', { text: 'This replaces the PDF and discards pending text. The current saved PDF is kept in the restore recovery slot first, so this action can be reversed.' });
+    const confirm = modal.contentEl.createEl('button', { text: action, cls: 'mod-warning' });
+    confirm.addEventListener('click', () => { modal.close(); this.focused = undefined; void this.sessions.restore(this.native.file, kind).catch(error => this.showError(error)); });
+    modal.open();
   }
 
   private scheduleSave(): void {
@@ -165,7 +206,7 @@ export class TextEditor extends Component {
     }
     for (const input of this.nativeInputs.keys()) if (!input.isConnected) this.nativeInputs.delete(input);
     // Obsidian may replace toolbar content while refreshing a file.
-    if (!this.toolbar.isConnected && this.native.element.isConnected) { this.native.element.prepend(this.message); this.native.element.prepend(this.toolbar); }
+    if (this.native.element.isConnected && (!this.toolbar.isConnected || this.toolbar.parentElement !== (this.native.toolbarHost() ?? this.native.element))) this.mountToolbar();
     const pages = this.native.pages();
     const resume = this.focused && !this.focused.input.isConnected ? this.focused : undefined;
     const alive = new Set(pages.map(page => page.div));
@@ -216,6 +257,7 @@ export class TextEditor extends Component {
     if (input instanceof doc.defaultView!.HTMLInputElement) input.type = 'text';
     input.className = 'pdf-form-studio-field'; input.dataset.pdfField = field.name;
     input.value = field.value; input.setAttribute('aria-label', field.owned ? 'PDF answer' : field.name);
+    if (field.owned) input.placeholder = ' ';
     input.spellcheck = false;
     if (field.maxLength !== undefined) input.maxLength = field.maxLength;
     const [left, top, right, bottom] = screenRectangle(entry.page.viewport, rect);
@@ -227,6 +269,7 @@ export class TextEditor extends Component {
     input.style.height = `${angle === 90 || angle === 270 ? right - left : bottom - top}px`;
     input.style.transformOrigin = 'top left'; input.style.transform = `rotate(${angle}deg)`;
     input.style.fontSize = `${field.fontSize * entry.page.viewport.scale}px`;
+    input.style.padding = `${entry.page.viewport.scale}px`;
     input.addEventListener('focus', () => {
       this.focused = { input, page: entry.page.number, name: field.name };
       this.selected = field.name; this.updateStatus();
@@ -258,6 +301,7 @@ export class TextEditor extends Component {
   private bindPlacement(entry: PageLayer): void {
     let start: [number, number] | undefined;
     let pointer: number | undefined;
+    let preview: HTMLElement | undefined;
     const point = (event: PointerEvent): [number, number] => {
       const box = entry.layer.getBoundingClientRect();
       return [Math.max(0, Math.min(entry.page.viewport.width, (event.clientX - box.left) * entry.page.viewport.width / box.width)),
@@ -267,6 +311,14 @@ export class TextEditor extends Component {
       if (event.target !== entry.layer || event.button !== 0 || !this.editing || this.session?.status === 'conflict') return;
       event.preventDefault(); event.stopPropagation(); start = point(event); pointer = event.pointerId;
       entry.layer.setPointerCapture(event.pointerId);
+    });
+    entry.layer.addEventListener('pointermove', event => {
+      if (!start || pointer !== event.pointerId) return;
+      const end = point(event);
+      if (Math.abs(end[0] - start[0]) < 12 && Math.abs(end[1] - start[1]) < 12) return;
+      if (!preview) { preview = entry.layer.ownerDocument.createElement('div'); preview.className = 'pdf-form-studio-placement'; entry.layer.append(preview); }
+      Object.assign(preview.style, { left: `${Math.min(start[0], end[0])}px`, top: `${Math.min(start[1], end[1])}px`,
+        width: `${Math.abs(end[0] - start[0])}px`, height: `${Math.abs(end[1] - start[1])}px` });
     });
     entry.layer.addEventListener('pointerup', event => {
       if (pointer !== event.pointerId || !start || !this.session) return;
@@ -283,12 +335,13 @@ export class TextEditor extends Component {
       const rect = pdfRectangle(entry.page.viewport, screenStart, screenEnd);
       const multiline = dragged && Math.abs(screenEnd[1] - screenStart[1]) > this.fontSize * scale * 2;
       start = undefined; pointer = undefined;
+      preview?.remove(); preview = undefined;
       if (entry.layer.hasPointerCapture(event.pointerId)) entry.layer.releasePointerCapture(event.pointerId);
       if (rect[2] - rect[0] < 8 || rect[3] - rect[1] < 8) return;
       const field = this.session.add(entry.page.number, rect, this.fontSize, multiline, entry.page.viewport.rotation);
       this.selected = field.name; this.refresh(); entry.controls.get(field.name)?.focus(); this.scheduleSave();
     });
-    const cancel = () => { start = undefined; pointer = undefined; };
+    const cancel = () => { start = undefined; pointer = undefined; preview?.remove(); preview = undefined; };
     entry.layer.addEventListener('pointercancel', cancel); entry.layer.addEventListener('lostpointercapture', cancel);
   }
 
@@ -300,6 +353,7 @@ export class TextEditor extends Component {
     if (this.session?.dirty) void this.session.save().catch(() => {});
     for (const entry of this.layers.values()) entry.layer.remove();
     this.layers.clear(); this.toolbar.remove(); this.message.remove();
+    this.native.element.classList.remove('pdf-form-studio-view', 'pdf-form-studio-editing');
     for (const [input, readOnly] of this.nativeInputs) input.readOnly = readOnly;
     this.nativeInputs.clear();
   }

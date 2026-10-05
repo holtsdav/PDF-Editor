@@ -15,6 +15,17 @@ See [TESTING.md](TESTING.md) for exact coverage and [README.md](../README.md#cur
 
 ## Next text milestones
 
+### 0.2.1 refinement — implemented
+
+- [x] Icon tools inside the native PDF bar; recovery/reload actions in an overflow menu.
+- [x] Transparent text in all input states, matching the embedded font, with hover/focus outlines and drag feedback.
+- [x] Owned multiline appearance spacing matches the editor and is independently checked through PDF.js and Poppler.
+- [x] One original per PDF across reloads, one reusable restore slot, checksum checks and migration of the existing index.
+- [x] Recovery PDFs excluded from editing to prevent recursive copies.
+- [x] New recovery-policy tests and actual app verification in Reading view, Live Preview, PDF tabs and pop-outs.
+
+### Further development
+
 1. Broader PDFs, Windows/Linux, app versions and third-party plugin compatibility; benchmark large documents.
 2. Move/resize existing boxes, change their font size, full edit undo/redo and durable pending-text recovery.
 3. Checkbox/radio/select fields, validation flags and richer form semantics.

@@ -1,6 +1,6 @@
 {
   "name": "pdf-form-studio",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Fill PDF text fields and add editable text boxes inside Obsidian note previews.",
   "type": "module",

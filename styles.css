@@ -12,20 +12,41 @@
 .pdf-form-studio-toolbar {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 6px 8px;
-  background: var(--background-secondary);
-  border-bottom: 1px solid var(--background-modifier-border);
+  gap: 4px;
   font-size: var(--font-ui-small);
 }
-.pdf-form-studio-toolbar button { height: 28px; padding: 0 8px; }
-.pdf-form-studio-toolbar button[aria-pressed="true"] { background: var(--interactive-accent); color: var(--text-on-accent); }
-.pdf-form-studio-toolbar label { display: flex; align-items: center; gap: 4px; }
-.pdf-form-studio-status { margin-left: auto; color: var(--text-muted); }
-.pdf-form-studio-message { padding: 4px 8px; font-size: var(--font-ui-small); color: var(--text-muted); }
+.pdf-form-studio-toolbar.is-fallback {
+  justify-content: flex-end;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.pdf-form-studio-edit-controls { display: flex; align-items: center; gap: 4px; }
+.pdf-form-studio-toolbar .pdf-form-studio-icon {
+  display: flex;
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  padding: 5px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--icon-color);
+  cursor: pointer;
+}
+.pdf-form-studio-toolbar .pdf-form-studio-icon svg { width: 18px; height: 18px; }
+.pdf-form-studio-toolbar .pdf-form-studio-icon:hover { background: var(--background-modifier-hover); color: var(--icon-color-hover); }
+.pdf-form-studio-toolbar .pdf-form-studio-icon[aria-pressed="true"] { background: var(--background-modifier-hover); color: var(--text-accent); }
+.pdf-form-studio-toolbar .pdf-form-studio-icon:disabled { opacity: 0.35; cursor: default; }
+.pdf-form-studio-toolbar .pdf-form-studio-icon:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 1px; }
+.pdf-form-studio-toolbar [hidden], .pdf-form-studio-toolbar .pdf-form-studio-icon[hidden] { display: none; }
+.pdf-form-studio-toolbar .pdf-form-studio-size { width: 64px; height: 28px; padding: 0 6px; font-size: var(--font-ui-small); }
+.pdf-form-studio-status { display: inline-flex; align-items: center; color: var(--text-muted); }
+.pdf-form-studio-status svg { width: 14px; height: 14px; }
+.pdf-form-studio-status[data-state="error"], .pdf-form-studio-status[data-state="conflict"] { color: var(--text-error); }
+.pdf-form-studio-message { padding: 6px 10px; font-size: var(--font-ui-small); color: var(--text-muted); }
 .pdf-form-studio-message:empty { display: none; }
 .pdf-form-studio-message.is-error { color: var(--text-error); }
+.pdf-form-studio-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .pdf-form-studio-layer {
   position: absolute;
   inset: 0;
@@ -34,20 +55,36 @@
   touch-action: none;
 }
 .pdf-form-studio-layer[hidden] { display: none; }
-.pdf-form-studio-field {
+.pdf-form-studio-view .pdf-form-studio-layer > input.pdf-form-studio-field,
+.pdf-form-studio-view .pdf-form-studio-layer > textarea.pdf-form-studio-field {
   position: absolute;
   box-sizing: border-box;
-  padding: 2px;
   margin: 0;
   min-width: 0;
-  border: 1px dashed var(--interactive-accent);
-  border-radius: 2px;
-  background: var(--background-primary);
-  color: var(--text-normal);
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent !important;
+  color: #161616;
   box-shadow: none;
-  font-family: sans-serif;
+  outline: 1px solid transparent;
+  outline-offset: 1px;
+  font-family: 'PDF Form Studio Text', sans-serif;
   line-height: 1.2;
+  font-weight: 400;
+  caret-color: #161616;
+  appearance: none;
   resize: none;
 }
-.pdf-form-studio-field:focus { border-style: solid; box-shadow: 0 0 0 1px var(--interactive-accent); }
-.pdf-form-studio-field:disabled { border-color: var(--background-modifier-border); opacity: 0.65; }
+.pdf-form-studio-view .pdf-form-studio-layer > .pdf-form-studio-field:hover { outline-color: #8b8b8b; }
+.pdf-form-studio-view .pdf-form-studio-layer > input.pdf-form-studio-field:focus,
+.pdf-form-studio-view .pdf-form-studio-layer > textarea.pdf-form-studio-field:focus { outline: 1px solid var(--interactive-accent); box-shadow: none; }
+.pdf-form-studio-view .pdf-form-studio-layer > .pdf-form-studio-field:disabled { outline: none; opacity: 0.65; }
+.pdf-form-studio-view .pdf-form-studio-layer > .pdf-form-studio-field::selection { background: #cbd9f5; color: #161616; }
+.pdf-form-studio-placement { position: absolute; pointer-events: none; outline: 1px solid var(--interactive-accent); background: rgb(110 130 180 / 6%); }
+
+/* PDF.js widgets remain available for normal viewing; the editing overlay owns input. */
+.pdf-form-studio-view .annotationLayer input[type="text"],
+.pdf-form-studio-view .annotationLayer textarea { background: transparent !important; border-radius: 0 !important; box-shadow: none !important; }
+.pdf-form-studio-editing .annotationLayer input[type="text"],
+.pdf-form-studio-editing .annotationLayer textarea { opacity: 0; }
