@@ -1,0 +1,22 @@
+.pdf-form-studio-file {
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.pdf-form-studio-fields {
+  max-height: 18rem;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+
+.pdf-form-studio-pen-pad {
+  display: block;
+  width: 100%;
+  aspect-ratio: 2 / 1;
+  background: #fff;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  touch-action: none;
+  user-select: none;
+  cursor: crosshair;
+}

@@ -1,0 +1,22 @@
+name: Bug report
+description: Report a reproducible plugin problem.
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Include reproduction steps and the expected result. Use an anonymous sample PDF if useful.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Obsidian version, installer version, OS, plugin version; for pen issues, tablet model and driver version.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostic results
+      description: Discovered field types or pen input type and pressure range. Avoid including private document content.

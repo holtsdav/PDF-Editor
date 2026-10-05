@@ -1,0 +1,12 @@
+node_modules/
+main.js
+main.js.map
+dist/
+coverage/
+tmp/
+output/
+.DS_Store
+.env
+.env.*
+.obsidian/
+*.log

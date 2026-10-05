@@ -1,0 +1,10 @@
+{
+  "id": "pdf-form-studio",
+  "name": "PDF Form Studio",
+  "version": "0.1.0",
+  "minAppVersion": "1.13.7",
+  "description": "Inspect PDF form fields and test pen input in preparation for editing PDFs inside notes.",
+  "author": "holtsdav",
+  "authorUrl": "https://github.com/holtsdav",
+  "isDesktopOnly": true
+}

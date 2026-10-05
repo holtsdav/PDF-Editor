@@ -1,0 +1,39 @@
+{
+  "name": "pdf-form-studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Development foundation for editing PDF forms and handwriting in Obsidian note previews.",
+  "type": "module",
+  "main": "main.js",
+  "license": "MIT",
+  "author": "holtsdav",
+  "repository": { "type": "git", "url": "git+https://github.com/holtsdav/BetterPDF.git" },
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "npm run typecheck && node esbuild.config.mjs production && node scripts/validate-plugin.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src tests",
+    "test": "node --test tests/*.test.ts",
+    "check": "npm run lint && npm test && npm run build",
+    "install:dev": "node scripts/install-dev.mjs",
+    "version": "node scripts/version-bump.mjs && git add manifest.json versions.json",
+    "validate": "node scripts/validate-plugin.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.5",
+    "@types/node": "24.19.1",
+    "esbuild": "0.28.2",
+    "eslint": "10.12.0",
+    "eslint-plugin-obsidianmd": "0.4.2",
+    "globals": "17.13.0",
+    "obsidian": "1.13.1",
+    "pdf-lib": "1.17.1",
+    "pdfjs-dist": "5.3.31",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.71.0"
+  },
+  "overrides": {
+    "moment": "2.31.0"
+  }
+}
