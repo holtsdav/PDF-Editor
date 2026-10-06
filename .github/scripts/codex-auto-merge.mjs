@@ -62,9 +62,12 @@ async function processPr(pr) {
     ? request && `/repos/${owner}/${repo}/issues/comments/${request.id}/reactions`
     : `${issuePath}/reactions`;
   const reactions = reactionPath ? await allPages(reactionPath) : [];
+  const reviewStarted = Date.parse(review?.manual ? request?.created_at : pr.created_at);
   const hasFindings = reviews.some((entry) =>
     entry.user?.login === bot && entry.commit_id === sha &&
-    entry.state === 'COMMENTED');
+    entry.state === 'COMMENTED' &&
+    Date.parse(entry.submitted_at) >= reviewStarted &&
+    Date.parse(entry.submitted_at) <= review?.completed);
   const clean = !hasFindings && Number.isFinite(review?.completed) && reactions.some((reaction) =>
     reaction.user?.login === bot && reaction.content === '+1' &&
     Date.parse(reaction.created_at) >= review.completed);
