@@ -28,19 +28,22 @@ export class PdfSettingsTab extends PluginSettingTab {
         catch (error) { new Notice(`Could not save settings: ${String(error)}`); }
       }));
     this.toggle('flowAnswerLines', 'Wrap across consecutive answer lines', 'Treat closely spaced, aligned blank lines as one answer block. Text wraps along the printed rules. Applies to new answers; existing answers stay as they are.');
-    new Setting(containerEl).setName('PDF backups and recovery').setHeading();
-    const usage = new Setting(containerEl).setName('Backup copies')
-      .setDesc('When you first save edits to a PDF, PDF Editor keeps its untouched original here. It also keeps a temporary draft while edits are unsaved. Drafts go away after saving. Originals stay until you delete them, so this folder can grow.');
+    new Setting(containerEl).setName('PDF safety copies').setHeading();
+    containerEl.createEl('p', { text: 'Your saved text and drawings live inside your normal PDF. They stay editable if you delete safety copies. These copies are only for restoring an earlier whole PDF or recovering unsaved work. Regular Undo is separate and lasts only for the current editing session.' });
+    const usage = new Setting(containerEl).setName('Copy of the original PDF')
+      .setDesc('Before your first save, PDF Editor stores one copy of the entire PDF as it was before you edited it. You can restore that starting version later. It does not make a new copy for every line or character.');
+    new Setting(containerEl).setName('Temporary recovery draft')
+      .setDesc('While you have unsaved changes, PDF Editor may keep a temporary draft to help recover them after a crash. A successful save removes the draft.');
     const usageText = containerEl.createEl('p', { text: 'Calculating recovery storage…' });
     void this.sessions.recoveryUsage().then(value => {
-      if (usageText.isConnected) usageText.textContent = `Using ${this.formatBytes(value.bytes)} in ${value.files} ${value.files === 1 ? 'file' : 'files'} for ${value.indexedPdfs} ${value.indexedPdfs === 1 ? 'PDF' : 'PDFs'} with backups.`;
+      if (usageText.isConnected) usageText.textContent = `Safety copies use ${this.formatBytes(value.bytes)} in ${value.files} ${value.files === 1 ? 'file' : 'files'}. ${value.indexedPdfs} ${value.indexedPdfs === 1 ? 'PDF has' : 'PDFs have'} an original copy.`;
     }).catch(error => { if (usageText.isConnected) usageText.textContent = `Could not read recovery storage: ${String(error)}`; });
     usage.addButton(button => button.setButtonText('Open folder').onClick(() => {
       void this.openRecoveryFolder().catch(error => new Notice(`Could not open recovery folder: ${String(error)}`));
     }));
-    new Setting(containerEl).setName('Delete backup copies')
-      .setDesc('Free this space without deleting your PDFs. Close PDF Editor views and save or resolve unsaved edits first. After deletion, you cannot restore earlier originals. The next save makes a new backup from the PDF as it is then.')
-      .addButton(button => button.setButtonText('Delete backups…').setWarning().onClick(() => this.confirmClearRecovery()));
+    new Setting(containerEl).setName('Delete safety copies')
+      .setDesc('Free this space without changing your PDFs, saved text, or drawings. You will lose the option to restore their earlier starting versions. Close PDF Editor views and save or resolve unsaved edits first. The next save makes a new original copy from the PDF as it is then.')
+      .addButton(button => button.setButtonText('Delete copies…').setWarning().onClick(() => this.confirmClearRecovery()));
   }
 
   private formatBytes(bytes: number): string {
@@ -58,12 +61,12 @@ export class PdfSettingsTab extends PluginSettingTab {
 
   private confirmClearRecovery(): void {
     const modal = new Modal(this.app);
-    modal.setTitle('Delete all PDF backup copies?');
-    modal.contentEl.createEl('p', { text: 'Your PDFs will stay in your vault. This permanently deletes the copies PDF Editor kept so you could restore their earlier versions. You cannot undo this. Close every PDF Editor view and save or resolve pending edits first.' });
+    modal.setTitle('Delete all PDF safety copies?');
+    modal.contentEl.createEl('p', { text: 'Your current PDFs, saved text, and drawings will stay exactly as they are and remain editable. This permanently removes the copies used to restore earlier whole-PDF versions. You cannot undo this deletion. Close every PDF Editor view and save or resolve unsaved edits first.' });
     modal.contentEl.createEl('button', { text: 'Cancel' }).addEventListener('click', () => modal.close());
-    modal.contentEl.createEl('button', { text: 'Delete backup copies', cls: 'mod-warning' }).addEventListener('click', () => {
-      void this.sessions.clearRecoveryStorage().then(() => { modal.close(); new Notice('PDF backup copies deleted.'); this.display(); })
-        .catch(error => new Notice(`Could not delete backup copies: ${String(error)}`));
+    modal.contentEl.createEl('button', { text: 'Delete safety copies', cls: 'mod-warning' }).addEventListener('click', () => {
+      void this.sessions.clearRecoveryStorage().then(() => { modal.close(); new Notice('PDF safety copies deleted. Your PDFs are unchanged.'); this.display(); })
+        .catch(error => new Notice(`Could not delete safety copies: ${String(error)}`));
     });
     modal.open();
   }

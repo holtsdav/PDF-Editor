@@ -9,11 +9,12 @@ export class RecoveryInfo extends Modal {
   private previews = new Set<RecoveryPreview>();
   constructor(app: App, private sessions: VaultSessions, private file: TFile) { super(app); }
   onOpen(): void {
-    this.setTitle('Recovery copies');
-    this.contentEl.createEl('p', { text: `Recovery for ${this.file.name}. Your working PDF stays in its normal vault location.` });
-    this.contentEl.createEl('p', { text: 'One original is kept from before the first edit. It does not expire. Restoring keeps a “before restore” copy so you can reverse that restore, plus a fallback if the next recovery write is interrupted.' });
-    this.contentEl.createEl('p', { text: 'Pending drafts protect edits during a save or crash. The current and previous draft are removed automatically after the PDF is fully saved, or when you choose to discard edits.' });
-    this.contentEl.createEl('p', { text: 'Older migrated backups are retained. Recovery storage may not follow your vault sync settings. Keep a separate copy before removing the plugin.' });
+    this.setTitle('PDF safety copies');
+    this.contentEl.createEl('p', { text: `Your current PDF, ${this.file.name}, contains your saved text and drawings. These safety copies are separate; your saved edits do not depend on them.` });
+    this.contentEl.createEl('p', { text: 'Original PDF: one full copy is kept from before your first save. Use Restore original to return the entire PDF to that starting version. It does not expire, and there is no new copy for every edit.' });
+    this.contentEl.createEl('p', { text: 'Before restore: if you restore the original, PDF Editor first keeps a copy of your current PDF so you can reverse that restore.' });
+    this.contentEl.createEl('p', { text: 'Temporary draft: unsaved changes may be kept here so they can be recovered after a crash. Drafts are removed after a successful save or when you choose to discard edits.' });
+    this.contentEl.createEl('p', { text: 'Older copies from previous versions are also kept. Safety copies may not follow your vault sync settings, so copy this folder separately before removing the plugin.' });
     const location = this.contentEl.createEl('p', { cls: 'pdf-form-studio-file' }); location.createEl('strong', { text: 'Storage: ' }); location.createSpan({ text: this.sessions.root });
     const copies = this.contentEl.createDiv();
     void this.sessions.recoveryDetails(this.file).then(items => {
