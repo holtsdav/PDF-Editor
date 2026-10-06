@@ -30,8 +30,8 @@ export class PdfSettingsTab extends PluginSettingTab {
     this.toggle('flowAnswerLines', 'Wrap across consecutive answer lines', 'Treat closely spaced, aligned blank lines as one answer block. Text wraps along the printed rules. Applies to new answers; existing answers stay as they are.');
     new Setting(containerEl).setName('PDF safety copies').setHeading();
     containerEl.createEl('p', { text: 'Your saved text and drawings live inside your normal PDF. They stay editable if you delete safety copies. These copies are only for restoring an earlier whole PDF or recovering unsaved work. Regular Undo is separate and lasts only for the current editing session.' });
-    const usage = new Setting(containerEl).setName('Copy of the original PDF')
-      .setDesc('Before your first save, PDF Editor stores one copy of the entire PDF as it was before you edited it. You can restore that starting version later. It does not make a new copy for every line or character.');
+    const usage = new Setting(containerEl).setName('Original PDF backup (one per PDF)')
+      .setDesc('Before your first save, PDF Editor keeps the whole PDF as it was before editing. This is a safety net if a save damages the file or you want to start over. Deleting an added text box cannot repair a damaged PDF. There is no new backup for each save, line, or character.');
     new Setting(containerEl).setName('Temporary recovery draft')
       .setDesc('While you have unsaved changes, PDF Editor may keep a temporary draft to help recover them after a crash. A successful save removes the draft.');
     const usageText = containerEl.createEl('p', { text: 'Calculating recovery storage…' });
