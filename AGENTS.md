@@ -1,4 +1,4 @@
-# BetterPDF / PDF Form Studio
+# PDF_Editor / PDF Form Studio
 
 This repository contains research and a first text editing development beta for Obsidian. Read `README.md`, `docs/RESEARCH.md`, `docs/ROADMAP.md`, and `docs/TESTING.md` before extending editing features. Keep implementation status accurate in the README and manifest description.
 
@@ -16,4 +16,4 @@ This repository contains research and a first text editing development beta for 
 - Commit source and metadata; generated `main.js` belongs in workflow artifacts/releases.
 - Use exact `x.y.z` plugin release tags with no `v` prefix. The release workflow creates drafts.
 
-The plugin ID is `pdf-form-studio`; BetterPDF is the folder/repository name. The minimum app version and desktop scope are provisional until real app/hardware tests establish compatibility.
+The plugin ID is `pdf-form-studio`; PDF_Editor is the folder/repository name. The minimum app version and desktop scope are provisional until real app/hardware tests establish compatibility.

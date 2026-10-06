@@ -62,31 +62,40 @@ async function processPr(pr) {
   const clean = Number.isFinite(review?.completed) && reactions.some((reaction) =>
     reaction.user?.login === bot && reaction.content === '+1' &&
     Date.parse(reaction.created_at) >= review.completed);
-  const state = clean ? 'success' : 'pending';
-  const description = clean
-    ? 'Codex completed this commit review with no findings'
-    : 'Waiting for a clean native Codex review of this commit';
-
   const statuses = await api(`/repos/${owner}/${repo}/commits/${sha}/status`);
   const previous = statuses.statuses.find((status) => status.context === context);
-  if (previous?.state !== state || previous?.description !== description) {
+  let currentState = previous?.state;
+  let currentDescription = previous?.description;
+  async function setStatus(state, description) {
+    if (currentState === state && currentDescription === description) return;
     await api(`/repos/${owner}/${repo}/statuses/${sha}`, {
       method: 'POST',
       body: JSON.stringify({ state, context, description, target_url: pr.html_url }),
     });
+    currentState = state;
+    currentDescription = description;
   }
-  console.log(`#${number} ${sha.slice(0, 7)}: ${description}`);
-  if (!clean || pr.auto_merge) return;
+  if (!clean) {
+    await setStatus('pending', 'Waiting for a clean native Codex review of this commit');
+    console.log(`#${number} ${sha.slice(0, 7)}: waiting for Codex`);
+    return;
+  }
 
-  const result = await api('/graphql', {
-    method: 'POST',
-    body: JSON.stringify({
-      query: 'mutation($id: ID!) { enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: SQUASH}) { pullRequest { number } } }',
-      variables: { id: pr.node_id },
-    }),
-  });
-  if (result.errors?.length) throw new Error(JSON.stringify(result.errors));
-  console.log(`#${number}: GitHub auto-merge enabled`);
+  if (!pr.auto_merge) {
+    // Keep the required gate pending until GitHub has scheduled auto-merge.
+    await setStatus('pending', 'Clean Codex review; scheduling auto-merge');
+    const result = await api('/graphql', {
+      method: 'POST',
+      body: JSON.stringify({
+        query: 'mutation($id: ID!) { enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: SQUASH}) { pullRequest { number } } }',
+        variables: { id: pr.node_id },
+      }),
+    });
+    if (result.errors?.length) throw new Error(JSON.stringify(result.errors));
+    console.log(`#${number}: GitHub auto-merge enabled`);
+  }
+  await setStatus('success', 'Codex completed this commit review with no findings');
+  console.log(`#${number} ${sha.slice(0, 7)}: clean Codex review`);
 }
 
 const event = JSON.parse(await (await import('node:fs/promises')).readFile(process.env.EVENT_PATH, 'utf8'));
