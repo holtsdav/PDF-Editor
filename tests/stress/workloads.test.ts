@@ -105,7 +105,8 @@ test('24 MiB of image data survives five full-file rewrites', { timeout: 120000 
     const field = pdf.getForm().createTextField(`Answer-${i}`); field.addToPage(page, { x: 50, y: 100, width: 400, height: 30 });
   }
   const seed = await pdf.save(), file = memory(seed), start = performance.now();
-  let lastTick = performance.now(), maxEventLoopDelay = 0, saveMilliseconds = 0, savePeakRssMiB = 0;
+  let lastTick = performance.now(), maxEventLoopDelay = 0;
+  let saveMilliseconds: number | undefined, savePeakRssMiB: number | undefined;
   const timer = setInterval(() => { const now = performance.now(); maxEventLoopDelay = Math.max(maxEventLoopDelay, now - lastTick - 10); lastTick = now; }, 10);
   try {
     const session = await TextSession.open(file.store, font);
