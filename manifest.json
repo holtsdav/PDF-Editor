@@ -1,9 +1,9 @@
 {
   "id": "pdf-form-studio",
   "name": "PDF Editor",
-  "version": "0.7.6",
+  "version": "0.7.10",
   "minAppVersion": "1.13.7",
-  "description": "Integrated PDF editing beta with answer-line detection inside frames, direct filling, held shapes, automatic saving and recovery.",
+  "description": "Integrated PDF editing beta with immediate editor loading, growing ruled answers, optional detection on PDF open, automatic saving and recovery.",
   "author": "holtsdav",
   "authorUrl": "https://github.com/holtsdav",
   "isDesktopOnly": true

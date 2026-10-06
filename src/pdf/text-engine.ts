@@ -7,6 +7,8 @@ import type { InkStroke } from './ink-engine.ts';
 import { defaultColor, validColor } from './text-format.ts';
 import type { FontFamily, PdfColor, PdfFonts, TextFormat } from './text-format.ts';
 import { referencedObjects, pruneReplacedObjects } from './object-references.ts';
+import { validRuledLayout } from './ruled-text.ts';
+import type { RuledLayout } from './ruled-text';
 
 export const FIELD_PREFIX = 'pdf-form-studio-';
 export type Rect = [number, number, number, number];
@@ -22,10 +24,11 @@ export interface TextField {
   owned: boolean;
   maxLength?: number;
   widgets: TextWidget[];
+  ruled?: RuledLayout;
 }
 export interface TextSnapshot { pages: Rect[]; fields: TextField[]; strokes: InkStroke[] }
-export interface AddedField { name: string; page: number; rect: Rect; fontSize: number; multiline: boolean; rotation: number }
-export interface BoxUpdate { rect: Rect; fontSize: number; multiline: boolean }
+export interface AddedField { name: string; page: number; rect: Rect; fontSize: number; multiline: boolean; rotation: number; ruled?: RuledLayout }
+export interface BoxUpdate { rect: Rect; fontSize: number; multiline: boolean; ruled?: RuledLayout }
 export interface TextChanges {
   values: Map<string, string>; added: Map<string, AddedField>; boxes: Map<string, BoxUpdate>; deleted: Set<string>;
   strokes: Map<string, InkStroke>; deletedStrokes: Set<string>;
@@ -106,12 +109,16 @@ export async function readTextPdf(bytes: Uint8Array): Promise<TextSnapshot> {
     }
     const da = field.acroField.getDefaultAppearance() ?? '';
     const size = /([\d.]+)\s+Tf/.exec(da)?.[1];
+    const stored = field.acroField.dict.lookupMaybe(PDFName.of('PFSRuled'), PDFArray);
+    const spacing = stored?.lookupMaybe(0, PDFNumber)?.asNumber(), rows = stored?.lookupMaybe(1, PDFNumber)?.asNumber();
+    const ruled = spacing !== undefined && rows !== undefined && field.getName().startsWith(FIELD_PREFIX)
+      && field.isMultiline() && widgets.length === 1 && widgets[0]!.rotation === 0 && validRuledLayout({ spacing, rows }, widgets[0]!.rect) ? { spacing, rows } : undefined;
     fields.push({
       name: field.getName(), value: field.getText() ?? '', fontSize: Number(size) || 14,
       fontFamily: field.acroField.dict.get(PDFName.of('PFSFont'))?.toString() === '/serif' ? 'serif'
         : field.acroField.dict.get(PDFName.of('PFSFont'))?.toString() === '/mono' ? 'mono' : 'sans', color: defaultColor(da),
       multiline: field.isMultiline(), readOnly: !editableText(field),
-      owned: field.getName().startsWith(FIELD_PREFIX), maxLength: field.getMaxLength(), widgets
+      owned: field.getName().startsWith(FIELD_PREFIX), maxLength: field.getMaxLength(), widgets, ...(ruled ? { ruled } : {})
     });
   }
   return {
@@ -162,6 +169,10 @@ export async function writeTextPdf(seed: Uint8Array, changes: TextChanges, fontB
     field.addToPage(page, { x: x1, y: y1, width: x2 - x1, height: y2 - y1, borderWidth: 0,
       backgroundColor: undefined, borderColor: undefined, textColor: rgb(0.05, 0.05, 0.05), font: await getFont('sans') });
     field.setFontSize(added.fontSize);
+    if (added.ruled) {
+      if (!added.multiline || added.rotation || !validRuledLayout(added.ruled, added.rect)) throw new Error('Invalid ruled answer layout.');
+      field.acroField.dict.set(PDFName.of('PFSRuled'), pdf.context.obj([added.ruled.spacing, added.ruled.rows]));
+    }
     // Rotate the widget appearance to follow the user's current viewport orientation.
     if (added.rotation) field.acroField.getWidgets()[0]?.getOrCreateAppearanceCharacteristics().setRotation(added.rotation);
   }
@@ -176,6 +187,10 @@ export async function writeTextPdf(seed: Uint8Array, changes: TextChanges, fontB
     widgets[0]!.setRectangle({ x: x1, y: y1, width: x2 - x1, height: y2 - y1 });
     field.setFontSize(box.fontSize);
     if (box.multiline) field.enableMultiline(); else field.disableMultiline();
+    if (box.ruled) {
+      if (!box.multiline || !validRuledLayout(box.ruled, box.rect)) throw new Error('Invalid ruled answer layout.');
+      field.acroField.dict.set(PDFName.of('PFSRuled'), pdf.context.obj([box.ruled.spacing, box.ruled.rows]));
+    } else field.acroField.dict.delete(PDFName.of('PFSRuled'));
   }
   for (const [name, value] of changes.values) {
     if (changes.deleted.has(name)) continue;
@@ -240,6 +255,15 @@ export async function writeTextPdf(seed: Uint8Array, changes: TextChanges, fontB
     if ([x, y, x + width, y + height].some((value, index) => Math.abs(value - box.rect[index]!) > 0.001)
       || field.isMultiline() !== box.multiline || !(widget.getAppearances()?.normal instanceof PDFStream)) {
       throw new Error(`PDF text box verification failed for ${name}.`);
+    }
+  }
+  const layouts = new Map([...changes.added.values()].map(item => [item.name, item.ruled]));
+  for (const [name, box] of changes.boxes) layouts.set(name, box.ruled);
+  for (const [name, expected] of layouts) {
+    if (changes.deleted.has(name)) continue;
+    const layout = verified.getForm().getTextField(name).acroField.dict.lookupMaybe(PDFName.of('PFSRuled'), PDFArray);
+    if (expected ? !layout || Math.abs(layout.lookup(0, PDFNumber).asNumber() - expected.spacing) > 0.001 || layout.lookup(1, PDFNumber).asNumber() !== expected.rows : !!layout) {
+      throw new Error(`PDF ruled layout verification failed for ${name}.`);
     }
   }
   return bytes;

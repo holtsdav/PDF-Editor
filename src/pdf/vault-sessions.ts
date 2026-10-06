@@ -21,6 +21,7 @@ export class VaultSessions {
   private backups: Record<string, BackupRecord>;
   private recovery: RecoveryCopies;
   private persist: () => Promise<void>;
+  private preferenceListeners = new Set<() => void>();
   readonly root: string;
   readonly preferences: ToolPreferences;
 
@@ -36,7 +37,15 @@ export class VaultSessions {
     }, backups, persist, this.root);
   }
 
-  async updatePreferences(value: ToolPreferences): Promise<void> { Object.assign(this.preferences, structuredClone(value)); await this.persist(); }
+  async updatePreferences(value: ToolPreferences): Promise<void> {
+    Object.assign(this.preferences, loadToolPreferences(value));
+    await this.persist();
+    for (const listener of this.preferenceListeners) listener();
+  }
+  subscribePreferences(listener: () => void): () => void {
+    this.preferenceListeners.add(listener);
+    return () => this.preferenceListeners.delete(listener);
+  }
 
   async initialize(): Promise<void> {
     await this.ensureFolder(this.root);

@@ -37,6 +37,23 @@ function memory(bytes: Uint8Array) {
   return { store, backups, bytes: () => current, replace: (bytes: Uint8Array) => { current = bytes; }, writes: () => writes };
 }
 
+test('explicit field removal reports its geometry; abandoned empty fields do not', async () => {
+  const file = memory(await fixture()), session = await TextSession.open(file.store, font);
+  const removed: string[] = [];
+  const unsubscribe = session.subscribeRemovedField(field => removed.push(field.name));
+  const empty = session.add(1, [80, 600, 320, 620], 14, false);
+  session.pruneEmptyBoxes();
+  assert.deepEqual(removed, []);
+  const chosen = session.add(1, [80, 600, 320, 620], 14, false);
+  session.delete(chosen.name, true);
+  assert.deepEqual(removed, [chosen.name]);
+  const group = session.add(1, [80, 600, 320, 620], 14, false);
+  session.deleteObjects([{ kind: 'text', id: group.name }]);
+  assert.deepEqual(removed, [chosen.name, group.name]);
+  unsubscribe();
+  assert.equal(session.snapshot.fields.some(field => field.name === empty.name), false);
+});
+
 test('fills all shared widgets, preserves unrelated content, and persists Unicode appearances', async () => {
   const seed = await fixture(); const file = memory(seed); const session = await TextSession.open(file.store, font);
   session.setValue('Name', 'Grüße aus München – Ελληνικά'); await session.save();
@@ -151,6 +168,90 @@ test('three multiline answers fit in the same space in the editor and saved appe
     assert(Math.abs(baselines[1]! - baselines[2]! - 16.8) < 0.001);
     assert.equal((await readTextPdf(file.bytes())).fields.find(field => field.name === box.name)?.value, 'First line\nSecond line\nThird line');
   } finally { await task.destroy(); }
+});
+
+test('ruled answers wrap at printed pitch and preserve one editable value through save, reopen and recovery', async () => {
+  const file = memory(await fixture()), session = await TextSession.open(file.store, font);
+  const box = session.add(1, [50, 350, 230, 416], 13, true, 0, { spacing: 24, rows: 3 });
+  const value = 'A complete answer wraps naturally onto the next printed rule.';
+  session.setValue(box.name, value); await session.save();
+  const task = getDocument({ data: file.bytes().slice(), standardFontDataUrl });
+  try {
+    const operators = await (await (await task.promise).getPage(1)).getOperatorList({ annotationMode: AnnotationMode.ENABLE });
+    const baselines = operators.fnArray.flatMap((op, i) => op === OPS.setTextMatrix ? [Number(operators.argsArray[i][0][5])] : []).slice(-3);
+    assert.equal(baselines.length, 3); assert(baselines.every(y => y > 0 && y < 66));
+    assert(Math.abs(baselines[0]! - baselines[1]! - 24) < 0.001); assert(Math.abs(baselines[1]! - baselines[2]! - 24) < 0.001);
+  } finally { await task.destroy(); }
+  const reopened = await TextSession.open(file.store, font), saved = reopened.snapshot.fields.find(f => f.name === box.name)!;
+  assert.equal(saved.value, value); assert.deepEqual(saved.ruled, { spacing: 24, rows: 3 });
+  reopened.setValue(box.name, 'Edited again'); await reopened.save();
+  assert.equal((await readTextPdf(file.bytes())).fields.filter(f => f.name === box.name).length, 1);
+  const draftBytes = file.bytes().slice();
+  const recovered = await TextSession.open({ ...file.store, draft: { read: async () => ({ baselineHash: 'test', bytes: draftBytes }), write: async () => {}, clear: async () => {} } }, font);
+  assert.deepEqual(recovered.snapshot.fields.find(f => f.name === box.name)?.ruled, { spacing: 24, rows: 3 });
+});
+test('ruled answers extend by complete rows and save every line with a stable ID and top anchor', async () => {
+  const file = memory(await fixture()), session = await TextSession.open(file.store, font);
+  const box = session.add(1, [50, 350, 230, 416], 13, true, 0, { spacing: 24, rows: 3 });
+  session.setValue(box.name, 'First\nSecond\nThird'); await session.save();
+  const value = 'First\nSecond\nThird\nFourth\nFifth'; session.setValue(box.name, value);
+  assert.deepEqual(box.widgets[0]!.rect, [50, 302, 230, 416]); assert.deepEqual(box.ruled, { spacing: 24, rows: 5 });
+  await session.save(); assert.equal(session.status, 'saved');
+  const task = getDocument({ data: file.bytes().slice(), standardFontDataUrl });
+  try {
+    const operators = await (await (await task.promise).getPage(1)).getOperatorList({ annotationMode: AnnotationMode.ENABLE });
+    const baselines = operators.fnArray.flatMap((op, i) => op === OPS.setTextMatrix ? [Number(operators.argsArray[i][0][5])] : []).slice(-5);
+    assert.equal(baselines.length, 5); assert(baselines.every(y => y > 0 && y < 114));
+    for (let i = 1; i < baselines.length; i++) assert(Math.abs(baselines[i - 1]! - baselines[i]! - 24) < 0.001);
+  } finally { await task.destroy(); }
+  const reopened = await TextSession.open(file.store, font), saved = reopened.snapshot.fields.find(f => f.name === box.name)!;
+  assert.equal(saved.value, value); assert.deepEqual(saved.widgets[0]!.rect, box.widgets[0]!.rect); assert.deepEqual(saved.ruled, box.ruled);
+  reopened.setValue(box.name, value + '\nSixth'); await reopened.save(); await reopened.save();
+  const fields = (await readTextPdf(file.bytes())).fields.filter(f => f.name === box.name);
+  assert.equal(fields.length, 1); assert.equal(fields[0]!.value, value + '\nSixth'); assert.equal(fields[0]!.ruled?.rows, 6);
+});
+test('wrapped pasted text grows in the model and a verified draft recovers its complete geometry', async () => {
+  const file = memory(await fixture()); let draft: { baselineHash: string; bytes: Uint8Array } | null = null;
+  const store = { ...file.store, draft: { read: async () => draft, write: async (value: NonNullable<typeof draft>) => { draft = value; }, clear: async () => { draft = null; } } };
+  const session = await TextSession.open(store, font), box = session.add(1, [50, 600, 230, 666], 13, true, 0, { spacing: 24, rows: 3 });
+  const value = 'Grüße aus München, this long answer continues onto extra rows without printed rules. '.repeat(3);
+  session.setValue(box.name, value); assert(box.ruled!.rows > 3); await session.checkpoint();
+  assert.equal(file.writes(), 0); assert(session.drafted);
+  const recovered = await TextSession.open(store, font), field = recovered.snapshot.fields.find(f => f.name === box.name)!;
+  assert.equal(field.value, value); assert.deepEqual(field.ruled, box.ruled); assert.deepEqual(field.widgets[0]!.rect, box.widgets[0]!.rect);
+  await recovered.save(); assert.equal((await readTextPdf(file.bytes())).fields.find(f => f.name === box.name)?.value, value);
+});
+test('larger fonts fit the first ruled row and page-edge answers retain their full editable value', async () => {
+  const file = memory(await fixture()), session = await TextSession.open(file.store, font);
+  const box = session.add(1, [50, 350, 230, 416], 13, true, 0, { spacing: 24, rows: 3 });
+  session.setValue(box.name, 'One\nTwo\nThree'); session.formatField(box.name, { fontSize: 20 }); await session.save();
+  assert.equal(box.widgets[0]!.rect[3], 416); assert(box.ruled!.spacing >= 25);
+  assert(box.widgets[0]!.rect[3] - box.widgets[0]!.rect[1] - (box.ruled!.rows - 1) * box.ruled!.spacing >= 26 - 0.001);
+  const edge = session.add(1, [50, 4, 230, 70], 13, true, 0, { spacing: 24, rows: 3 });
+  const value = 'First\nSecond\nThird\nFourth'; session.setValue(edge.name, value); await session.save();
+  assert(edge.widgets[0]!.rect[1] >= 0); assert.equal((await readTextPdf(file.bytes())).fields.find(f => f.name === edge.name)?.value, value);
+  session.formatField(box.name, { fontSize: 60 }); await session.save(); assert.equal(box.ruled, undefined);
+});
+test('undo and redo restore grown row geometry together with the text after reopening', async () => {
+  const file = memory(await fixture()), initial = await TextSession.open(file.store, font);
+  const box = initial.add(1, [50, 350, 230, 416], 13, true, 0, { spacing: 24, rows: 3 });
+  initial.setValue(box.name, 'First'); await initial.save();
+  const session = await TextSession.open(file.store, font);
+  session.setValue(box.name, 'First\nSecond\nThird\nFourth');
+  session.undoStroke(); let restored = session.snapshot.fields.find(f => f.name === box.name)!;
+  assert.equal(restored.value, 'First'); assert.deepEqual(restored.widgets[0]!.rect, [50, 350, 230, 416]);
+  session.redoStroke(); restored = session.snapshot.fields.find(f => f.name === box.name)!;
+  assert.equal(restored.ruled?.rows, 4); assert.deepEqual(restored.widgets[0]!.rect, [50, 326, 230, 416]);
+  await session.save(); assert.equal((await readTextPdf(file.bytes())).fields.find(f => f.name === box.name)?.value, restored.value);
+});
+test('ruled layout follows moves and undo while deliberate resizing returns the field to ordinary wrapping', async () => {
+  const file = memory(await fixture()), session = await TextSession.open(file.store, font);
+  const box = session.add(1, [50, 350, 230, 416], 13, true, 0, { spacing: 24, rows: 3 }); session.setValue(box.name, 'First\nSecond');
+  session.moveObjects([{ kind: 'text', id: box.name }], [10, 20]); await session.save();
+  assert.deepEqual((await readTextPdf(file.bytes())).fields.find(f => f.name === box.name)?.ruled, { spacing: 24, rows: 3 });
+  session.updateBox(box.name, [60, 370, 270, 436]); await session.save(); assert.equal((await readTextPdf(file.bytes())).fields.find(f => f.name === box.name)?.ruled, undefined);
+  session.undoStroke(); await session.save(); assert.deepEqual((await readTextPdf(file.bytes())).fields.find(f => f.name === box.name)?.ruled, { spacing: 24, rows: 3 });
+  session.delete(box.name); await session.save(); assert.equal((await readTextPdf(file.bytes())).fields.some(f => f.name === box.name), false);
 });
 
 test('changes during a write are queued and the final value wins without parallel writes', async () => {

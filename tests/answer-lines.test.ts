@@ -99,3 +99,51 @@ test('border trimming cannot remove wide vertical bars or an occupied heading', 
   pixels.ink(80, 240, 1, 70); pixels.ink(83, 270, 294, 1); pixels.ink(100, 255, 180, 10);
   assert.deepEqual(detectAnswerLines(pixels, 600, 800), []);
 });
+
+test('regular compact dotted answer lines are detected once at both raster resolutions, including near the bottom', () => {
+  for (const scale of [1, 2]) {
+    const pixels = image(scale), rows = [150, 220, 300, 400, 500, 600, 775];
+    for (const y of rows) for (let x = 70; x < 500; x += 6) pixels.ink(x, y, 2, 2);
+    const lines = detectAnswerLines(pixels, 600, 800);
+    assert.equal(lines.length, 7); assert.deepEqual(lines.map(line => line.rect[3]), rows);
+    assert.equal(lines.at(-1)!.rect[3], 775, 'a legitimate bottom dotted line remains available');
+  }
+});
+test('dotted patterns do not admit irregular punctuation, short ellipses, tall letter stems or occupied dot leaders', () => {
+  const pixels = image();
+  for (let x = 70, i = 0; x < 400; i++) { pixels.ink(x, 150, [1, 3, 2, 1][i % 4]!, 2); x += [6, 10, 4, 8][i % 4]!; }
+  for (let x = 70; x < 90; x += 6) pixels.ink(x, 220, 2, 2);
+  for (let x = 70; x < 400; x += 6) pixels.ink(x, 300, 2, 10);
+  for (let x = 70; x < 400; x += 6) pixels.ink(x, 400, 2, 2); pixels.ink(90, 383, 180, 12);
+  assert.deepEqual(detectAnswerLines(pixels, 600, 800), []);
+});
+test('gray dots and mixed solid/dashed/dotted rules retain their individual typing areas', () => {
+  const pixels = image(); pixels.ink(70, 150, 350, 1);
+  for (let x = 70; x < 420; x += 10) pixels.ink(x, 220, 7, 1);
+  for (let x = 70; x < 420; x += 8) pixels.ink(x, 300, 2, 2);
+  for (let y = 300; y < 302; y++) for (let x = 70; x < 420; x++) { const i = (y * pixels.width + x) * 4; if (pixels.data[i] === 0) pixels.data[i] = pixels.data[i + 1] = pixels.data[i + 2] = 165; }
+  assert.deepEqual(detectAnswerLines(pixels, 600, 800).map(line => line.rect[3]), [150, 220, 300]);
+});
+
+test('solid and dotted raster edges of one rule produce one target without merging adjacent answers', () => {
+  for (const scale of [1, 2]) {
+    const pixels = image(scale); pixels.ink(70, 150, 280, 1);
+    for (let x = 76; x < 350; x += 6) pixels.ink(x, 151, 2, 1);
+    pixels.ink(400, 150, 150, 1);
+    assert.deepEqual(detectAnswerLines(pixels, 600, 800).map(line => line.rect), [[70, 132, 350, 150], [400, 132, 550, 150]]);
+  }
+});
+
+test('printed word baselines and a sloping diagram edge are not blank answers', () => {
+  for (const scale of [1, 2]) {
+    const pixels = image(scale);
+    pixels.ink(80, 150, 280, 1);
+    for (let x = 90; x < 350; x += 12) pixels.ink(x, 154, 4, 6);
+    pixels.ink(80, 300, 320, 1);
+    for (let y = 288; y <= 300; y++) {
+      pixels.ink(80 + Math.floor((300 - y) / 2), y, 1, 1);
+      pixels.ink(399 - Math.floor((300 - y) / 2), y, 1, 1);
+    }
+    assert.deepEqual(detectAnswerLines(pixels, 600, 800), [], `scale ${scale}`);
+  }
+});

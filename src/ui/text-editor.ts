@@ -17,6 +17,7 @@ import type { FontFamily, PdfColor, TextFormat } from '../pdf/text-format';
 import { RecoveryInfo } from './recovery-info';
 import { RecoveryPreview } from './recovery-preview';
 import { ToolPopover } from './tool-popover';
+import { ruledAnswerBlock } from '../pdf/ruled-text';
 
 
 interface AnswerLine { page: number; rect: Rect }
@@ -242,7 +243,7 @@ export class TextEditor extends Component {
   private navigateAnswerLine(name: string, direction: number): boolean {
     if (!this.session || this.session.replacing || this.session.status === 'conflict') return false;
     const field = this.session.snapshot.fields.find(field => field.name === name);
-    if (!field || !this.answerFields.has(name)) return false;
+    if (!field || (!this.answerFields.has(name) && !field.ruled)) return false;
     const index = this.answerLines.findIndex(line => this.answerWidget(field, line) >= 0);
     if (index < 0) return false;
     for (let next = index + direction; next >= 0 && next < this.answerLines.length; next += direction) {
@@ -264,8 +265,12 @@ export class TextEditor extends Component {
       if (field?.readOnly) return;
       this.setTool('select'); this.endTextEditing(field?.name);
       if (!field) {
-        const size = Math.min(this.fontSize, Math.max(6, (rect[3] - rect[1] - 2) / 1.2));
-        field = this.session.add(page, rect, size, false, 0);
+        const block = this.sessions.preferences.flowAnswerLines ? ruledAnswerBlock(this.answerLines, line,
+          candidate => this.session!.snapshot.fields.some(existing => this.answerWidget(existing, candidate) >= 0)) : undefined;
+        const area = block?.rect ?? rect;
+        const firstHeight = area[3] - area[1] - (block ? (block.layout.rows - 1) * block.layout.spacing : 0);
+        const size = Math.min(this.fontSize, Math.max(6, (firstHeight - 2) / 1.2));
+        field = this.session.add(page, area, size, !!block, 0, block?.layout);
         this.session.formatField(field.name, { fontFamily: this.textFamily, color: this.textColor });
       }
       this.answerFields.add(field.name); this.selected = field.name; this.selectedStroke = undefined; this.updateStatus(); this.refresh();
@@ -284,7 +289,7 @@ export class TextEditor extends Component {
     } catch (error) { this.showError(error); }
   }
   private rememberPreferences(): void {
-    void this.sessions.updatePreferences({ fontSize: this.fontSize, textFamily: this.textFamily, textColor: this.textColor, penColor: this.penColor, markerColor: this.markerColor, penWidth: this.penWidth, markerWidth: this.markerWidth, smoothPen: this.smoothPen, holdShapes: this.holdShapes, holdHighlighter: this.holdHighlighter }).catch(error => this.showError(error));
+    void this.sessions.updatePreferences({ ...this.sessions.preferences, fontSize: this.fontSize, textFamily: this.textFamily, textColor: this.textColor, penColor: this.penColor, markerColor: this.markerColor, penWidth: this.penWidth, markerWidth: this.markerWidth, smoothPen: this.smoothPen, holdShapes: this.holdShapes, holdHighlighter: this.holdHighlighter }).catch(error => this.showError(error));
   }
   private closePopover(): void { if (this.popover) { this.removeChild(this.popover); this.popover = undefined; } this.propertiesButton.setAttribute('aria-expanded', 'false'); }
   private openProperties(): void {
@@ -317,7 +322,7 @@ export class TextEditor extends Component {
     try {
       if (this.selection?.objects.length) { this.selection.remove(); return; }
       if (this.selectedStroke) { this.session?.deleteStroke(this.selectedStroke); this.selectedStroke = undefined; this.scheduleSave(); }
-      else if (this.selected) { this.focused = undefined; this.session?.delete(this.selected); this.selected = undefined; this.scheduleSave(); }
+      else if (this.selected) { this.focused = undefined; this.session?.delete(this.selected, true); this.selected = undefined; this.scheduleSave(); }
       this.updateStatus(); this.refresh();
     } catch (error) { this.showError(error); }
   }
@@ -491,8 +496,8 @@ export class TextEditor extends Component {
         const drawing = this.tool === 'marker' || this.tool === 'scribble' || this.tool === 'eraser';
         control.input.tabIndex = !drawing && this.editing === field.name ? 0 : -1;
         control.frame.tabIndex = drawing ? -1 : 0;
-        control.frame.classList.toggle('is-answer-field', this.answerFields.has(field.name));
-        if (this.answerFields.has(field.name)) control.frame.setAttribute('aria-label', 'Detected answer. Click to edit; Tab or Shift+Tab to change answer lines.');
+        control.frame.classList.toggle('is-answer-field', this.answerFields.has(field.name) || !!field.ruled);
+        if (this.answerFields.has(field.name) || field.ruled) control.frame.setAttribute('aria-label', field.ruled ? 'Ruled answer block. Click to edit; text wraps along the printed lines.' : 'Detected answer. Click to edit; Tab or Shift+Tab to change answer lines.');
         control.frame.classList.toggle('is-editing', this.editing === field.name);
         control.frame.classList.toggle('is-selected', field.name === this.selected);
         control.frame.classList.toggle('is-locked', (this.session.status === 'conflict' || this.session.replacing) || field.readOnly || (field.owned && field.widgets.length !== 1));
@@ -526,6 +531,12 @@ export class TextEditor extends Component {
     input.style.color = cssColor(field.color); input.style.caretColor = cssColor(field.color);
     input.style.fontSize = `${field.fontSize * entry.page.viewport.scale}px`;
     input.style.padding = `${entry.page.viewport.scale}px`;
+    const offset = field.ruled ? Math.max(0, (field.ruled.spacing - field.fontSize * 1.2) / 2) * entry.page.viewport.scale : 0;
+    input.style.lineHeight = field.ruled ? `${field.ruled.spacing * entry.page.viewport.scale}px` : '1.2';
+    input.style.position = field.ruled ? 'relative' : '';
+    input.style.top = field.ruled ? `${-offset}px` : '';
+    input.style.height = field.ruled ? `calc(100% + ${offset * 2}px)` : '';
+    input.style.clipPath = field.ruled ? `inset(${offset}px 0 ${offset}px 0)` : '';
   }
 
   private mountField(entry: PageLayer, field: TextField, key: string): void {
@@ -600,9 +611,15 @@ export class TextEditor extends Component {
     measure.remove();
     const viewport = entry.page.viewport;
     const angle = ((viewport.rotation - widget.rotation) % 360 + 360) % 360;
-    const screen = growBox(screenRectangle(viewport, widget.rect), [0, 0, viewport.width, viewport.height], height, angle);
-    this.session!.updateBox(field.name, pdfRectangle(viewport, [screen[0], screen[1]], [screen[2], screen[3]]), { multiline: true });
-    const overflow = height > control.input.clientHeight + 1;
+    // scrollHeight is rounded to screen pixels; count whole rows before
+    // comparing so fractional zoom cannot create a spare row/false warning.
+    const measuredRows = field.ruled ? Math.max(1, Math.round((height / viewport.scale - 2) / field.ruled.spacing)) : 0;
+    if (field.ruled) this.session!.fitRuledField(field.name, measuredRows);
+    if (!field.ruled) {
+      const screen = growBox(screenRectangle(viewport, widget.rect), [0, 0, viewport.width, viewport.height], height, angle);
+      this.session!.updateBox(field.name, pdfRectangle(viewport, [screen[0], screen[1]], [screen[2], screen[3]]), { multiline: true });
+    }
+    const overflow = field.ruled ? measuredRows > field.ruled.rows : height / viewport.scale > widget.rect[3] - widget.rect[1] + 1;
     control.frame.classList.toggle('is-overflow', overflow);
     control.frame.title = overflow ? 'Text reaches the page edge. Widen the box or reduce the text size.' : '';
   }
@@ -668,7 +685,7 @@ export class TextEditor extends Component {
       if (event.target === input && this.editing === name) return;
       const field = this.session?.snapshot.fields.find(field => field.name === name);
       if (!field || field.readOnly) return;
-      if (this.answerFields.has(name) && !event.shiftKey && !(event.target as HTMLElement).closest('[data-resize], [data-edge]')) {
+      if ((this.answerFields.has(name) || this.session?.snapshot.fields.find(field => field.name === name)?.ruled) && !event.shiftKey && !(event.target as HTMLElement).closest('[data-resize], [data-edge]')) {
         event.preventDefault(); event.stopPropagation(); this.selection?.clear(); input.focus({ preventScroll: true }); return;
       }
       event.preventDefault(); event.stopPropagation(); select(); frame.focus({ preventScroll: true });
@@ -716,7 +733,7 @@ export class TextEditor extends Component {
       const field = this.session?.snapshot.fields.find(field => field.name === name);
       if (!field?.owned || field.readOnly || field.widgets.length !== 1 || (this.session?.status === 'conflict' || this.session?.replacing)) return;
       if (event.key === 'Delete' || event.key === 'Backspace') {
-        event.preventDefault(); this.session?.delete(name); this.selected = undefined; this.scheduleSave(); return;
+        event.preventDefault(); this.session?.delete(name, true); this.selected = undefined; this.scheduleSave(); return;
       }
       const direction: Record<string, [number, number]> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
       const delta = direction[event.key];
@@ -777,6 +794,7 @@ export class TextEditor extends Component {
         if (rect[2] - rect[0] < 8 || rect[3] - rect[1] < 8) return;
         const field = this.session.add(entry.page.number, rect, this.fontSize, true, entry.page.viewport.rotation);
         this.session.formatField(field.name, { fontFamily: this.textFamily, color: this.textColor });
+        this.setTool('select');
         this.selected = field.name; this.selectedStroke = undefined; this.updateStatus(); this.refresh();
         entry.controls.get(`${field.name}:0`)?.input.focus({ preventScroll: true });
         // A blank box stays in the shared model while focused. Its eventual
