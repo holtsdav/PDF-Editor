@@ -74,17 +74,20 @@ async function processPr(pr) {
     hasOpenCodexThread(pr),
   ]);
   const review = completedReview(comments, sha);
-  const request = review?.manual && comments
-    .filter((comment) => /^@codex review(?:\s|$)/i.test(comment.body?.trim() ?? '') &&
-      Date.parse(comment.created_at) <= review.completed)
+  const latestRequest = comments
+    .filter((comment) => /^@codex review(?:\s|$)/i.test(comment.body?.trim() ?? ''))
     .at(-1);
+  const newerRequestPending = latestRequest &&
+    Date.parse(latestRequest.created_at) > review?.completed;
+  const request = review?.manual && !newerRequestPending ? latestRequest : null;
   const reactionPath = review?.manual
     ? request && `/repos/${owner}/${repo}/issues/comments/${request.id}/reactions`
     : `${issuePath}/reactions`;
   const reactions = reactionPath ? await allPages(reactionPath) : [];
-  const clean = !hasFindings && Number.isFinite(review?.completed) && reactions.some((reaction) =>
-    reaction.user?.login === bot && reaction.content === '+1' &&
-    Date.parse(reaction.created_at) >= review.completed);
+  const clean = !newerRequestPending && !hasFindings &&
+    Number.isFinite(review?.completed) && reactions.some((reaction) =>
+      reaction.user?.login === bot && reaction.content === '+1' &&
+      Date.parse(reaction.created_at) >= review.completed);
   const statuses = await api(`/repos/${owner}/${repo}/commits/${sha}/status`);
   const previous = statuses.statuses.find((status) => status.context === context);
   let currentState = previous?.state;
