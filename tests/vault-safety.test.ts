@@ -127,6 +127,29 @@ test('clearing recovery storage requires closed clean sessions and resets the ba
   assert(v.sessions.backupFor(v.file), 'The next save must establish a new original copy');
 });
 
+test('turning original copies off skips new PDFs without removing existing copies', async () => {
+  const v = await vault();
+  await v.sessions.updatePreferences({ ...v.sessions.preferences, keepOriginalBackups: false });
+  const session = await v.sessions.get(v.file);
+  session.setValue('Answer', 'Saved without an original'); await session.save();
+  assert.equal(v.sessions.backupFor(v.file), undefined);
+  assert.equal((await readTextPdf(v.files.get(v.file.path)!)).fields[0]!.value, 'Saved without an original');
+  const beforeTurningOn = v.files.get(v.file.path)!.slice();
+  await v.sessions.updatePreferences({ ...v.sessions.preferences, keepOriginalBackups: true });
+  session.setValue('Answer', 'Saved after turning copies on'); await session.save();
+  const original = v.sessions.backupFor(v.file);
+  assert(original);
+  assert.deepEqual(v.files.get(original), beforeTurningOn, 'The later copy is the PDF as it existed when backup creation resumed');
+  await v.sessions.updatePreferences({ ...v.sessions.preferences, keepOriginalBackups: false });
+  session.setValue('Answer', 'Saved while copies are off again'); await session.save();
+  assert.equal(v.sessions.backupFor(v.file), original);
+  assert.deepEqual(v.files.get(original), beforeTurningOn, 'Turning the switch off must not delete or replace an existing copy');
+  await v.sessions.clearRecoveryStorage();
+  assert.equal(v.sessions.backupFor(v.file), undefined);
+  session.setValue('Answer', 'Saved after clearing while copies are off'); await session.save();
+  assert.equal(v.sessions.backupFor(v.file), undefined, 'Clear deletes old copies; the off switch prevents replacing them');
+});
+
 test('pending edits prevent recovery cleanup even after their last view closes', async () => {
   const v = await vault(), session = await v.sessions.get(v.file);
   session.setValue('Answer', 'Pending answer'); await session.checkpoint();

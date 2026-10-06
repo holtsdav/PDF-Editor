@@ -79,7 +79,12 @@ export class VaultSessions {
     const promise = TextSession.open({
       read: async () => { requireCurrent(); return new Uint8Array(await this.app.vault.readBinary(file)); },
       write: bytes => { requireCurrent(); return this.app.vault.modifyBinary(file, arrayBuffer(bytes)); },
-      backup: (bytes, purpose) => { requireCurrent(); const path = file.path, name = file.name; return this.storage(() => this.recovery.protect(path, name, bytes, purpose)); },
+      backup: (bytes, purpose) => { requireCurrent(); const path = file.path, name = file.name; return this.storage(() => {
+        // The opt-out applies only to PDFs without an existing original. Keep
+        // checking retained originals, and always protect a restore operation.
+        if (purpose !== 'restore' && !this.preferences.keepOriginalBackups && !this.backups[path]) return Promise.resolve('');
+        return this.recovery.protect(path, name, bytes, purpose);
+      }); },
       draft: {
         read: () => { const path = file.path; return this.storage(async () => this.journal.read(await this.draftPath(path))); },
         write: draft => { requireCurrent(); const path = file.path; return this.storage(() => this.writeDraft(path, draft)); },

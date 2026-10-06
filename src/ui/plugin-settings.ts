@@ -29,9 +29,10 @@ export class PdfSettingsTab extends PluginSettingTab {
       }));
     this.toggle('flowAnswerLines', 'Wrap across consecutive answer lines', 'Treat closely spaced, aligned blank lines as one answer block. Text wraps along the printed rules. Applies to new answers; existing answers stay as they are.');
     new Setting(containerEl).setName('PDF safety copies').setHeading();
-    containerEl.createEl('p', { text: 'Your saved text and drawings live inside your normal PDF. They stay editable if you delete safety copies. These copies are only for restoring an earlier whole PDF or recovering unsaved work. Regular Undo is separate and lasts only for the current editing session.' });
+    containerEl.createEl('p', { text: 'Because PDF Editor is in beta, it can keep a copy of a PDF before its first edit. This lets you return to that whole earlier PDF if needed. Saved text and drawings stay editable in your normal PDF even if you turn copies off or delete them.' });
+    this.toggle('keepOriginalBackups', 'Keep original copies for new PDFs', 'On by default during the beta. Turn off to stop making original copies for PDFs that do not already have one. Existing copies stay until you delete them below. Turning this on later cannot recover an older original: the next save copies the PDF as it exists then. Temporary drafts for unsaved work still operate.');
     const usage = new Setting(containerEl).setName('Original PDF backup (one per PDF)')
-      .setDesc('Before your first save, PDF Editor keeps one copy of the whole PDF. Use it if you later want to return to the version from before you started editing. Regular Undo only lasts for the current editing session. There is no new backup for each save, line, or character.');
+      .setDesc('When enabled, PDF Editor keeps one copy of the whole PDF before its first save. There is no new backup for each save, line, or character. Regular Undo is separate and lasts only for the current editing session.');
     new Setting(containerEl).setName('Temporary recovery draft')
       .setDesc('While you have unsaved changes, PDF Editor may keep a temporary draft to help recover them after a crash. A successful save removes the draft.');
     const usageText = containerEl.createEl('p', { text: 'Calculating recovery storage…' });
@@ -71,7 +72,7 @@ export class PdfSettingsTab extends PluginSettingTab {
     modal.open();
   }
 
-  private toggle(key: 'autoDetectLines' | 'flowAnswerLines', name: string, description: string): void {
+  private toggle(key: 'autoDetectLines' | 'flowAnswerLines' | 'keepOriginalBackups', name: string, description: string): void {
     new Setting(this.containerEl).setName(name).setDesc(description).addToggle(toggle => toggle.setValue(this.sessions.preferences[key]).onChange(async value => {
       try { await this.sessions.updatePreferences({ ...this.sessions.preferences, [key]: value }); }
       catch (error) { new Notice(`Could not save settings: ${String(error)}`); }
