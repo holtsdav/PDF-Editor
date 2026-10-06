@@ -6,8 +6,10 @@ import type { TextSession } from '../pdf/text-session';
 import type { VaultSessions } from '../pdf/vault-sessions';
 import { TextEditor } from './text-editor';
 import { renamedPdfPath } from '../pdf/file-name';
+import { decorativeFooterRules, excludeDecorativeFooters } from '../compat/pdf-artifacts';
 import { detectAnswerLines } from '../pdf/answer-lines';
 import type { Rect } from '../pdf/text-engine';
+import type { TextField } from '../pdf/text-engine';
 
 interface PageEntry { native: NativePage; page: PDFPageProxy; canvas: HTMLCanvasElement; text: HTMLElement; links: HTMLElement; version: number; painted: number; queued?: number; rendering?: RenderTask; textTask?: TextLayer; suggestions?: HTMLElement; candidates?: Rect[] }
 interface LineScan { generation: number; task?: RenderTask }
@@ -29,6 +31,7 @@ export class PdfSurface extends Component {
   private zoomButton: HTMLButtonElement;
   private lineButton: HTMLButtonElement;
   private lineScan?: LineScan;
+  private dismissedLines = new Set<string>();
   private previous: HTMLButtonElement;
   private next: HTMLButtonElement;
   private editor?: TextEditor;
@@ -57,11 +60,17 @@ export class PdfSurface extends Component {
   private titleInput: HTMLInputElement;
   private renaming = false;
 
-  constructor(app: App, native: NativePdf, sessions: VaultSessions, state?: ReturnType<TextEditor['captureState']>) {
+  constructor(app: App, native: NativePdf, sessions: VaultSessions, state?: ReturnType<TextEditor['captureState']>, private autoDetectOnOpen = true) {
     super(); this.app = app; this.native = native; this.sessions = sessions; this.state = state;
     const releaseSession = sessions.retain(native.file); this.register(() => { void releaseSession(); });
     const doc = native.element.ownerDocument;
     this.root = doc.createElement('div'); this.root.className = 'pfs-surface';
+    const applyToolbarOffset = () => {
+      this.root.style.setProperty('--pfs-toolbar-top-offset', `${this.sessions.preferences.toolbarTopOffset}px`);
+      this.layout();
+    };
+    applyToolbarOffset();
+    this.register(sessions.subscribePreferences(applyToolbarOffset));
     if (native.embedHeight && native.embedHeight > 0) native.element.style.setProperty('--pfs-embed-height', `${Math.max(240, native.embedHeight)}px`);
     this.root.setAttribute('aria-label', `Edit ${native.file.name}`);
     this.navigation = this.root.createDiv({ cls: 'pfs-navigation' });
@@ -105,6 +114,8 @@ export class PdfSurface extends Component {
     this.scroller = this.root.createDiv({ cls: 'pfs-pages', attr: { tabindex: '0', 'aria-label': 'PDF pages' } });
     this.stack = this.scroller.createDiv({ cls: 'pfs-page-stack' });
     native.element.append(this.root);
+    // Hide native chrome synchronously, before session/PDF.js loading yields.
+    native.element.classList.add('pfs-integrated');
     this.registerDomEvent(this.scroller, 'scroll', () => this.requestVisible(), { passive: true });
     this.registerDomEvent(this.root, 'keydown', event => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f') { event.preventDefault(); event.stopPropagation(); this.showSearch(); }
@@ -139,19 +150,20 @@ export class PdfSurface extends Component {
     this.message.textContent = error instanceof Error ? error.message : String(error);
     this.message.classList.add('is-error');
     // Unsupported documents retain the native viewer, with a useful reason.
-    if (!this.editor) { this.scroller.hidden = true; this.navigation.hidden = true; this.native.element.classList.remove('pfs-integrated'); }
+    if (!this.editor) { this.scroller.hidden = true; this.navigation.hidden = true; this.root.classList.add('pfs-fallback'); this.native.element.classList.remove('pfs-integrated'); }
   }
   private async open(): Promise<void> {
     const [session, raw] = await Promise.all([this.sessions.get(this.file), loadPdfJs()]);
     if (this.closed) return;
     this.session = session; this.library = raw as Library;
     await this.loadDocument(); if (this.closed) return;
-    this.native.element.classList.add('pfs-integrated');
     const surface: EditorSurface = { identity: this.native.identity, element: this.root, file: this.file,
       pages: () => this.entries.map(entry => entry.native), toolbarHost: () => this.tools };
     this.editor = this.addChild(new TextEditor(this.app, surface, this.sessions, this.state));
+    this.register(session.subscribeRemovedField(field => this.dismissRemovedAnswer(field)));
     this.register(session.subscribe(() => { this.refreshSuggestions(); if (this.epoch !== session.renderEpoch) void this.loadDocument().catch(error => this.fail(error)); }));
     this.layout(); this.go(this.native.initialPage ?? 1);
+    if (this.autoDetectOnOpen && this.sessions.preferences.autoDetectLines) await this.detectLines();
   }
   private async loadDocument(): Promise<void> {
     this.cancelLineScan(); this.clearSuggestions();
@@ -285,13 +297,22 @@ export class PdfSurface extends Component {
     return !!this.session?.snapshot.fields.some(field => field.widgets.some(widget => widget.page === page
       && rect[0] < widget.rect[2] && rect[2] > widget.rect[0] && rect[1] < widget.rect[3] && rect[3] > widget.rect[1]));
   }
+  private lineKey(page: number, rect: Rect): string { return `${page}:${JSON.stringify(rect)}`; }
+  private dismissRemovedAnswer(field: TextField): void {
+    for (const entry of this.entries) for (const rect of entry.candidates ?? []) {
+      if (field.widgets.some(widget => widget.page === entry.native.number && rect[0] < widget.rect[2] && rect[2] > widget.rect[0]
+        && rect[1] < widget.rect[3] && rect[3] > widget.rect[1])) this.dismissedLines.add(this.lineKey(entry.native.number, rect));
+    }
+  }
   private refreshSuggestions(page?: PageEntry): void {
-    this.editor?.setAnswerLines(this.entries.flatMap(entry => (entry.candidates ?? []).map(rect => ({ page: entry.native.number, rect }))));
+    this.editor?.setAnswerLines(this.entries.flatMap(entry => (entry.candidates ?? [])
+      .filter(rect => !this.dismissedLines.has(this.lineKey(entry.native.number, rect)))
+      .map(rect => ({ page: entry.native.number, rect }))));
     for (const entry of page ? [page] : this.entries) {
       if (!entry.suggestions || !entry.candidates) continue;
       const buttons = new Map([...entry.suggestions.querySelectorAll<HTMLButtonElement>('button')].map(button => [button.dataset.rect!, button]));
       for (const rect of entry.candidates) {
-        if (this.overlapsField(entry.native.number, rect)) continue;
+        if (this.overlapsField(entry.native.number, rect) || this.dismissedLines.has(this.lineKey(entry.native.number, rect))) continue;
         const p = entry.native.viewport.convertToViewportRectangle(rect), v = entry.native.viewport;
         const key = JSON.stringify(rect);
         const button = buttons.get(key) ?? entry.suggestions.createEl('button', { cls: 'pfs-answer-suggestion', attr: { 'aria-label': 'Fill detected answer line', title: 'Click to add an editable answer field' } });
@@ -324,17 +345,29 @@ export class PdfSurface extends Component {
       if (!context) throw new Error('Cannot render the PDF for answer-line detection.');
       const task = scan.task = entry.page.render({ canvasContext: context, viewport, annotationMode: 0 });
       await task.promise; if (!this.scanCurrent(scan)) return [];
-      return detectAnswerLines(context.getImageData(0, 0, canvas.width, canvas.height), base.width, base.height)
-        .map(({ rect }) => { const a = base.convertToPdfPoint(rect[0], rect[1]), b = base.convertToPdfPoint(rect[2], rect[3]);
+      let lines = detectAnswerLines(context.getImageData(0, 0, canvas.width, canvas.height), base.width, base.height);
+      if (this.library && entry.page.getOperatorList) {
+        try {
+          const operators = await entry.page.getOperatorList({ annotationMode: 0 });
+          if (!this.scanCurrent(scan)) return [];
+          lines = excludeDecorativeFooters(lines, decorativeFooterRules(operators, this.library.OPS, base));
+        } catch {
+          // Decorative metadata is optional. Never sacrifice line recognition
+          // when a viewer version or damaged operator list cannot provide it.
+          if (!this.scanCurrent(scan)) return [];
+        }
+      }
+      return lines.map(({ rect }) => { const a = base.convertToPdfPoint(rect[0], rect[1]), b = base.convertToPdfPoint(rect[2], rect[3]);
           return [Math.min(a[0]!, b[0]!), Math.min(a[1]!, b[1]!), Math.max(a[0]!, b[0]!), Math.max(a[1]!, b[1]!)] as Rect; });
     } finally { scan.task = undefined; canvas.width = 0; canvas.height = 0; }
   }
   private async detectLines(): Promise<void> {
     if (this.lineScan) {
-      this.cancelLineScan(); this.clearSuggestions(); this.message.textContent = 'Answer-line detection cancelled.'; return;
+      this.cancelLineScan(); this.clearSuggestions(); this.message.textContent = ''; return;
     }
     if (!this.pdf || !this.editor || !this.entries.length || this.closed) return;
     if (this.entries.some(entry => entry.candidates)) { this.clearSuggestions(); this.message.textContent = ''; return; }
+    this.dismissedLines.clear();
     const scan = this.lineScan = { generation: this.generation };
     const entries = [...this.entries];
     this.lineButton.setAttribute('aria-busy', 'true'); this.lineButton.setAttribute('aria-pressed', 'true');
@@ -352,10 +385,7 @@ export class PdfSurface extends Component {
         // Yield between pages so navigation and the cancel button remain usable.
         if (i + 1 < entries.length) await new Promise<void>(resolve => this.root.ownerDocument.defaultView!.setTimeout(resolve, 0));
       }
-      const counts = entries.map(entry => entry.candidates!.filter(rect => !this.overlapsField(entry.native.number, rect)).length);
-      const count = counts.reduce((sum, count) => sum + count, 0), pagesWithLines = counts.filter(count => count > 0).length;
-      this.message.textContent = count ? `${count} suggested answer line${count === 1 ? '' : 's'} on ${pagesWithLines} of ${entries.length} PDF page${entries.length === 1 ? '' : 's'}. Click a blue outline to fill it; click Detect answer lines again to hide suggestions.`
-        : `No clear blank answer lines found in this PDF (${entries.length} page${entries.length === 1 ? '' : 's'} scanned). Use Text to place a box manually.`;
+      this.message.textContent = '';
     } catch (error) {
       if (this.scanCurrent(scan)) { this.clearSuggestions(); throw error; }
     } finally {

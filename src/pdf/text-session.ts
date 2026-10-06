@@ -7,6 +7,12 @@ import type { BackupPurpose } from './recovery.ts';
 import { InteractionGate } from './interaction-gate.ts';
 import { INK_PREFIX, strokeBounds, validateStroke } from './ink-engine.ts';
 import type { InkKind, InkStroke, Point } from './ink-engine.ts';
+import { growRuledBlock, validRuledLayout } from './ruled-text.ts';
+import type { RuledLayout } from './ruled-text';
+import fontkit from '@pdf-lib/fontkit';
+import type { Font } from '@pdf-lib/fontkit';
+import type { FontFamily } from './text-format.ts';
+import { wrapText } from './wrap-text.ts';
 
 export interface PdfStore {
   draft?: { read(): Promise<PdfDraft | null>; write(draft: PdfDraft): Promise<void>; clear(): Promise<void> };
@@ -37,6 +43,7 @@ export class TextSession {
   private baseline: Uint8Array;
   private store: PdfStore;
   private font: PdfFonts;
+  private metrics = new Map<FontFamily, Font>();
   private changes: TextChanges = emptyChanges();
   private strokeHistory: UndoEntry[] = [];
   private inkAction?: InkStroke[];
@@ -94,6 +101,11 @@ export class TextSession {
   }
 
   subscribe(callback: () => void): () => void { this.listeners.add(callback); return () => this.listeners.delete(callback); }
+  private removedFieldListeners = new Set<(field: TextField) => void>();
+  subscribeRemovedField(callback: (field: TextField) => void): () => void {
+    this.removedFieldListeners.add(callback); return () => this.removedFieldListeners.delete(callback);
+  }
+  private removedField(field: TextField): void { for (const listener of this.removedFieldListeners) listener(field); }
   private notify(): void { for (const listener of this.listeners) listener(); }
   private changed(): void { this.revision++; if (this.status !== 'conflict') this.status = this.writing && !this.waitingForInteraction ? 'saving' : 'unsaved'; this.error = ''; this.notify(); }
   get dirty(): boolean { return this.revision !== this.savedRevision; }
@@ -106,25 +118,45 @@ export class TextSession {
     if (!field || field.readOnly) throw new Error('This text field is not editable.');
     if (field.value === value) return;
     this.rememberText(name);
-    field.value = value; this.changes.values.set(name, value); this.changed();
+    field.value = value; this.changes.values.set(name, value); this.fitRuledField(name); this.changed();
   }
 
-  add(page: number, rect: Rect, fontSize: number, multiline: boolean, rotation = 0): TextField {
+  /** Use the same glyph advances as the PDF writer, including offscreen/draft edits. */
+  fitRuledField(name: string, minimumRows = 1): void {
+    this.assertAvailable();
+    if (this.conflicted) return;
+    const field = this.snapshot.fields.find(field => field.name === name);
+    if (!field?.ruled || !field.owned || field.readOnly || field.widgets.length !== 1) return;
+    let font = this.metrics.get(field.fontFamily);
+    if (!font) { font = fontkit.create(this.font instanceof Uint8Array ? this.font : this.font[field.fontFamily]) as Font; this.metrics.set(field.fontFamily, font); }
+    const widget = field.widgets[0]!;
+    const rows = Math.max(minimumRows, wrapText(field.value, widget.rect[2] - widget.rect[0] - 2,
+      text => font!.layout(text).glyphs.reduce((sum, glyph) => sum + glyph.advanceWidth, 0) * field.fontSize / font!.unitsPerEm).length);
+    const next = growRuledBlock(widget.rect, field.ruled, rows, field.fontSize, this.snapshot.pages[widget.page - 1]!);
+    if (widget.rect.every((n, i) => Math.abs(n - next.rect[i]!) < 0.001) && next.layout?.spacing === field.ruled.spacing && next.layout?.rows === field.ruled.rows) return;
+    this.rememberText(name);
+    widget.rect = next.rect; field.ruled = next.layout;
+    this.changes.boxes.set(name, { rect: [...next.rect], fontSize: field.fontSize, multiline: true, ...(next.layout ? { ruled: { ...next.layout } } : {}) });
+    this.changes.values.set(name, field.value); this.changed();
+  }
+
+  add(page: number, rect: Rect, fontSize: number, multiline: boolean, rotation = 0, ruled?: RuledLayout): TextField {
     this.assertAvailable();
     if (this.status === 'conflict') throw new Error('Reload the PDF before adding text after an external change.');
     const bounds = this.snapshot.pages[page - 1];
     if (!Number.isInteger(page) || !bounds || ![...rect, fontSize, rotation].every(Number.isFinite)
       || rect[2] <= rect[0] || rect[3] <= rect[1] || fontSize < 1 || fontSize > 200 || rotation % 90 !== 0
-      || rect[0] < bounds[0] || rect[1] < bounds[1] || rect[2] > bounds[2] || rect[3] > bounds[3]) throw new Error('Invalid text box geometry. Keep the box inside its PDF page.');
+      || rect[0] < bounds[0] || rect[1] < bounds[1] || rect[2] > bounds[2] || rect[3] > bounds[3]
+      || (ruled && (!multiline || rotation !== 0 || !validRuledLayout(ruled, rect)))) throw new Error('Invalid text box geometry. Keep the box inside its PDF page.');
     const name = FIELD_PREFIX + globalThis.crypto.randomUUID();
-    const added: AddedField = { name, page, rect, fontSize, multiline, rotation };
-    const field: TextField = { name, value: '', fontSize, fontFamily: 'sans', color: [0.05, 0.05, 0.05], multiline, readOnly: false, owned: true, widgets: [{ page, rect, rotation }] };
+    const added: AddedField = { name, page, rect: [...rect], fontSize, multiline, rotation, ...(ruled ? { ruled: { ...ruled } } : {}) };
+    const field: TextField = { name, value: '', fontSize, fontFamily: 'sans', color: [0.05, 0.05, 0.05], multiline, readOnly: false, owned: true, widgets: [{ page, rect: [...rect], rotation }], ...(ruled ? { ruled: { ...ruled } } : {}) };
     this.rememberText(name);
     this.changes.added.set(name, added); this.changes.values.set(name, '');
     this.snapshot.fields.push(field); this.changed(); return field;
   }
 
-  delete(name: string): void {
+  delete(name: string, explicit = false): void {
     this.assertAvailable();
     const field = this.snapshot.fields.find(field => field.name === name);
     if (!field?.owned) throw new Error('Only text boxes created here can be removed.');
@@ -134,7 +166,9 @@ export class TextSession {
     else this.changes.deleted.add(name);
     this.changes.values.delete(name);
     this.changes.boxes.delete(name); this.changes.formats.delete(name);
-    this.snapshot.fields = this.snapshot.fields.filter(field => field.name !== name); this.changed();
+    this.snapshot.fields = this.snapshot.fields.filter(field => field.name !== name);
+    if (explicit) this.removedField(field);
+    this.changed();
   }
 
   updateBox(name: string, rect: Rect, options: Partial<Omit<BoxUpdate, 'rect'>> = {}): void {
@@ -152,8 +186,10 @@ export class TextSession {
     }
     if (widget.rect.every((value, index) => Math.abs(value - rect[index]!) < 0.001) && fontSize === field.fontSize && multiline === field.multiline) return;
     this.rememberText(name);
+    if (Math.abs((widget.rect[2] - widget.rect[0]) - (rect[2] - rect[0])) > 0.001
+      || Math.abs((widget.rect[3] - widget.rect[1]) - (rect[3] - rect[1])) > 0.001 || !multiline) delete field.ruled;
     widget.rect = [...rect]; field.fontSize = fontSize; field.multiline = multiline;
-    this.changes.boxes.set(name, { rect: [...rect], fontSize, multiline });
+    this.changes.boxes.set(name, { rect: [...rect], fontSize, multiline, ...(field.ruled ? { ruled: { ...field.ruled } } : {}) });
     this.changes.values.set(name, field.value);
     if (this.changes.formats.has(name)) this.changes.formats.set(name, { fontFamily: field.fontFamily, fontSize, color: [...field.color] });
     this.changed();
@@ -167,7 +203,7 @@ export class TextSession {
     if (!['sans', 'serif', 'mono'].includes(next.fontFamily) || !Number.isFinite(next.fontSize) || next.fontSize < 1 || next.fontSize > 200 || !validColor(next.color)) throw new Error('Invalid text formatting.');
     if (next.fontFamily === field.fontFamily && next.fontSize === field.fontSize && next.color.every((v, i) => v === field.color[i])) return;
     this.rememberText(name);
-    Object.assign(field, next); this.changes.formats.set(name, next); this.changes.values.set(name, field.value); this.changed();
+    Object.assign(field, next); this.changes.formats.set(name, next); this.changes.values.set(name, field.value); this.fitRuledField(name); this.changed();
   }
 
   private textState(): TextState {
@@ -272,7 +308,7 @@ export class TextSession {
         const field = this.snapshot.fields.find(field => field.name === object.id)!;
         const next: Rect = [rect[0] + dx, rect[1] + dy, rect[2] + dx, rect[3] + dy];
         field.widgets[0]!.rect = next;
-        this.changes.boxes.set(object.id, { rect: next, fontSize: field.fontSize, multiline: field.multiline });
+        this.changes.boxes.set(object.id, { rect: next, fontSize: field.fontSize, multiline: field.multiline, ...(field.ruled ? { ruled: { ...field.ruled } } : {}) });
         this.changes.values.set(object.id, field.value);
       } else {
         const index = this.snapshot.strokes.findIndex(stroke => stroke.id === object.id), stroke = this.snapshot.strokes[index]!;
@@ -288,9 +324,11 @@ export class TextSession {
     this.rememberObjects();
     for (const { object } of items) {
       if (object.kind === 'text') {
+        const field = this.snapshot.fields.find(field => field.name === object.id)!;
         if (!this.changes.added.delete(object.id)) this.changes.deleted.add(object.id);
         this.changes.values.delete(object.id); this.changes.boxes.delete(object.id); this.changes.formats.delete(object.id);
         this.snapshot.fields = this.snapshot.fields.filter(field => field.name !== object.id);
+        this.removedField(field);
       } else {
         this.changes.strokes.delete(object.id); if (this.seedStrokeIds.has(object.id)) this.changes.deletedStrokes.add(object.id);
         this.snapshot.strokes = this.snapshot.strokes.filter(stroke => stroke.id !== object.id);

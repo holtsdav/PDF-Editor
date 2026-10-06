@@ -1,10 +1,11 @@
 import { FuzzySuggestModal, Modal, Notice, Plugin, TFile } from 'obsidian';
 import { PdfInspectionModal } from './ui/pdf-inspection-modal';
-import { findNativePdfs } from './compat/native-pdf';
+import { findNativePdfs, watchNativePdfs } from './compat/native-pdf';
 import { PdfSurface } from './ui/pdf-surface';
 import { VaultSessions } from './pdf/vault-sessions';
 import { isRecoveryPath, loadBackups } from './pdf/recovery';
 import { loadToolPreferences } from './pdf/tool-preferences';
+import { PdfSettingsTab } from './ui/plugin-settings';
 import type { BackupRecord } from './pdf/recovery';
 import fontBytes from '../assets/fonts/NotoSans-Regular.ttf';
 import serifBytes from '../assets/fonts/NotoSerif-Regular.ttf';
@@ -24,7 +25,7 @@ class PdfPicker extends FuzzySuggestModal<TFile> {
   onChooseItem(file: TFile): void { this.choose(file); }
 }
 
-export default class PdfFormStudio extends Plugin {
+export default class PdfEditor extends Plugin {
   private modals = new Set<Modal>();
   private editors = new Map<object, PdfSurface>();
   private recentEditors = new Map<object, { file: TFile; state: ReturnType<PdfSurface['captureState']>; until: number }>();
@@ -45,6 +46,7 @@ export default class PdfFormStudio extends Plugin {
       return this.persistence;
     }, this.preferences);
     await this.sessions.initialize();
+    this.addSettingTab(new PdfSettingsTab(this.app, this, this.sessions));
     this.addCommand({
       id: 'inspect-pdf-form-fields',
       name: 'Inspect PDF form fields',
@@ -55,9 +57,11 @@ export default class PdfFormStudio extends Plugin {
       }
     });
     const scan = () => this.scanEditors();
+    this.register(watchNativePdfs(this.app, scan));
     this.app.workspace.onLayoutReady(scan);
     this.registerInterval(window.setInterval(scan, 500));
     this.registerEvent(this.app.workspace.on('layout-change', scan));
+    this.registerEvent(this.app.workspace.on('file-open', scan));
     this.registerEvent(this.app.vault.on('modify', file => {
       if (file instanceof TFile && file.extension.toLowerCase() === 'pdf') void this.sessions.modified(file).catch(error => new Notice(String(error)));
     }));
@@ -81,14 +85,18 @@ export default class PdfFormStudio extends Plugin {
     for (const viewer of viewers) {
       let editor = this.editors.get(viewer.identity);
       let state;
+      let replacingSameFile = false;
       const recent = this.recentEditors.get(viewer.identity);
-      if (recent?.file === viewer.file) state = recent.state;
+      if (recent?.file === viewer.file) { state = recent.state; replacingSameFile = true; }
       this.recentEditors.delete(viewer.identity);
       if (editor && !editor.matches(viewer)) {
+        replacingSameFile = editor.file === viewer.file;
         state = editor.captureState(viewer); this.removeChild(editor); editor = undefined;
       }
       if (!editor) {
-        editor = this.addChild(new PdfSurface(this.app, viewer, this.sessions, state));
+        // A native host may be rebuilt after a save. Its replacement is still
+        // the same PDF opening, so do not launch another automatic scan.
+        editor = this.addChild(new PdfSurface(this.app, viewer, this.sessions, state, !replacingSameFile));
         this.editors.set(viewer.identity, editor);
       }
       editor.refresh();

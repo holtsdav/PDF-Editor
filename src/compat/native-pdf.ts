@@ -43,13 +43,14 @@ export function findNativePdfs(app: App): NativePdf[] {
     // write. Its owner still identifies the document during that interval.
     const file = object.file instanceof TFile ? object.file : record(anchor)?.file;
     if (file instanceof TFile && file.extension.toLowerCase() === 'pdf' && element(object.containerEl)
-      && object.containerEl.isConnected && typeof object.getPage === 'function' && record(object.pdfViewer)) {
+      && object.containerEl.isConnected && (typeof object.getPage === 'function' || object.containerEl.matches('.pdf-embed'))) {
       const container = object.containerEl;
       const subpath = record(anchor)?.subpath;
       const params = typeof subpath === 'string' ? new URLSearchParams(subpath.replace(/^#/, '')) : undefined;
       const initialPage = Number(params?.get('page')) || 1;
       const embedHeight = Number(params?.get('height')) || undefined;
-      found.push({ identity: anchor ?? object, element: container, file, initialPage, embedHeight });
+      const identity = anchor ?? object;
+      if (!found.some(viewer => viewer.identity === identity || viewer.element === container)) found.push({ identity, element: container, file, initialPage, embedHeight });
     }
     if (Array.isArray(object._children)) for (const child of object._children) visit(child, depth + 1, anchor);
     // Reading mode owns embed components separately from the view's _children.
@@ -57,6 +58,31 @@ export function findNativePdfs(app: App): NativePdf[] {
   };
   app.workspace.iterateAllLeaves(leaf => visit(leaf.view, 0));
   return found;
+}
+
+/** Discover inserted/replaced hosts before the next paint, including pop-outs. */
+export function watchNativePdfs(app: App, changed: () => void): () => void {
+  const observers = new Map<Document, MutationObserver>();
+  const observe = (doc: Document): void => {
+    if (observers.has(doc) || !doc.body || !doc.defaultView) return;
+    const observer = new doc.defaultView.MutationObserver(records => {
+      // Editor rendering/typing cannot cause discovery to observe itself.
+      if (records.some(mutation => !(mutation.target.nodeType === 1 ? mutation.target as Element : mutation.target.parentElement)?.closest('.pfs-surface')
+        && [...mutation.addedNodes, ...mutation.removedNodes].some(node => node.nodeType !== 1 || !(node as Element).matches('.pfs-surface')))) changed();
+    });
+    observer.observe(doc.body, { childList: true, subtree: true }); observers.set(doc, observer);
+  };
+  const refresh = (): void => {
+    observe(app.workspace.rootSplit.doc);
+    app.workspace.iterateAllLeaves(leaf => observe(leaf.view.containerEl.ownerDocument));
+  };
+  const events = [
+    app.workspace.on('layout-change', refresh),
+    app.workspace.on('window-open', (_win, window) => { observe(window.document); changed(); }),
+    app.workspace.on('window-close', (_win, window) => { observers.get(window.document)?.disconnect(); observers.delete(window.document); })
+  ];
+  refresh();
+  return () => { for (const event of events) app.workspace.offref(event); for (const observer of observers.values()) observer.disconnect(); observers.clear(); };
 }
 
 export function screenRectangle(viewport: PageViewport, rect: Rect): Rect {

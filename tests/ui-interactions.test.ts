@@ -79,7 +79,7 @@ async function fixture(pageCount = 1) {
     pointer(button, 'pointerdown'); button.focus(); button.click();
   };
   const dispose = () => { (editor as Editor & { unload(): void }).unload(); dom.window.close(); };
-  return { doc, session, editor, pointer, tool, dispose, bytes: () => bytes };
+  return { doc, session, editor, sessions, pointer, tool, dispose, bytes: () => bytes };
 }
 
 test('a newly placed empty box can move, resize and switch to Select before typing; leaving it deletes it', async () => {
@@ -103,6 +103,27 @@ test('a newly placed empty box can move, resize and switch to Select before typi
     assert.equal(f.session.pruneEmptyBoxes(), 0);
     const outside = f.doc.querySelector<HTMLButtonElement>('#outside')!; f.pointer(outside, 'pointerdown'); outside.focus(); await pause(0);
     assert.equal(f.session.snapshot.fields.length, 0);
+  } finally { f.dispose(); }
+});
+test('click and drag Text placement each return to Select after one box', async () => {
+  const f = await fixture();
+  try {
+    const layer = f.doc.querySelector('.pdf-form-studio-layer')!;
+    for (const drag of [false, true]) {
+      f.tool('Add text box');
+      f.pointer(layer, 'pointerdown', drag ? 340 : 80, drag ? 250 : 180);
+      if (drag) f.pointer(layer, 'pointermove', 500, 300);
+      f.pointer(layer, 'pointerup', drag ? 500 : 80, drag ? 300 : 180);
+      assert.equal(f.doc.querySelector<HTMLButtonElement>('button[aria-label^="Select"]')!.getAttribute('aria-pressed'), 'true');
+      assert.equal(f.doc.querySelector<HTMLButtonElement>('button[aria-label^="Add text box"]')!.getAttribute('aria-pressed'), 'false');
+      const input = f.doc.activeElement as HTMLTextAreaElement;
+      assert.equal(input.tagName, 'TEXTAREA');
+      input.value = drag ? 'Dragged' : 'Clicked'; input.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true }));
+      const count = f.session.snapshot.fields.length;
+      f.pointer(layer, 'pointerdown', 550, 450); f.pointer(layer, 'pointerup', 550, 450);
+      assert.equal(f.session.snapshot.fields.length, count);
+    }
+    assert.deepEqual(f.session.snapshot.fields.map(field => field.value), ['Clicked', 'Dragged']);
   } finally { f.dispose(); }
 });
 test('keyboard unfocus removes an empty box, while typed text survives leaving and reopening', async () => {
@@ -258,5 +279,54 @@ test('answer navigation skips locked fields and cannot mutate a replacing or con
     assert.equal(tab().defaultPrevented, true); assert.equal(f.session.snapshot.fields.length, 2); assert.deepEqual(f.session.snapshot.fields[1]!.widgets[0]!.rect, lines[2]!.rect); assert.equal(locked.value, '');
     f.session.status = 'conflict'; f.editor.addSuggestedField(1, lines[0]!.rect); assert.equal(f.session.snapshot.fields.length, 2); assert.equal(tab().defaultPrevented, false);
     f.session.status = 'unsaved';
+  } finally { f.dispose(); }
+});
+
+test('consecutive detected lines create one persistent ruled answer with normal typing and additional rows', async () => {
+  const f = await fixture();
+  try {
+    const lines = [620, 596, 572, 480].map(y => ({ page: 1, rect: [80, y, 340, y + 18] as [number, number, number, number] }));
+    f.editor.setAnswerLines(lines); f.editor.addSuggestedField(1, lines[1]!.rect);
+    const field = f.session.snapshot.fields[0]!, input = f.doc.activeElement as HTMLTextAreaElement, rect = [...field.widgets[0]!.rect];
+    assert.equal(f.session.snapshot.fields.length, 1); assert.deepEqual(field.ruled, { spacing: 24, rows: 3 });
+    assert.equal(input.style.lineHeight, '24px'); assert.equal(field.multiline, true);
+    input.value = 'First ruled answer\nSecond line\nThird line'; input.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true }));
+    assert.deepEqual(field.widgets[0]!.rect, rect, 'the original rows are retained while they fit');
+    f.editor.addSuggestedField(1, lines[2]!.rect); assert.equal(f.session.snapshot.fields.length, 1); assert.equal(f.doc.activeElement, input);
+    const enter = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }); input.dispatchEvent(enter); assert.equal(enter.defaultPrevented, false);
+    await f.session.save(); const saved = (await readTextPdf(f.bytes())).fields[0]!;
+    assert.equal(saved.value, input.value); assert.deepEqual(saved.ruled, field.ruled); assert.deepEqual(saved.widgets[0]!.rect, rect);
+    input.value += '\nFourth line without a printed rule'; input.selectionStart = input.selectionEnd = input.value.length;
+    input.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true }));
+    assert.equal(f.doc.activeElement, input); assert.equal(input.selectionStart, input.value.length);
+    assert.equal(field.ruled?.rows, 4); assert.deepEqual(field.widgets[0]!.rect, [80, 548, 340, 638]);
+    await f.session.save(); assert.equal((await readTextPdf(f.bytes())).fields[0]!.value, input.value);
+    input.dispatchEvent(new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+    assert.equal(f.session.snapshot.fields.length, 2); assert.equal((f.doc.activeElement as HTMLElement).dataset.pdfField, f.session.snapshot.fields[1]!.name);
+    f.doc.activeElement!.dispatchEvent(new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true }));
+    assert.equal(f.doc.activeElement, input);
+  } finally { f.dispose(); }
+});
+test('rounded browser scroll measurements do not append an unnecessary ruled row', async () => {
+  const f = await fixture();
+  try {
+    const lines = [620, 596, 572].map(y => ({ page: 1, rect: [80, y, 340, y + 18] as [number, number, number, number] }));
+    f.editor.setAnswerLines(lines); f.editor.addSuggestedField(1, lines[0]!.rect);
+    Object.defineProperty(f.doc.defaultView!.HTMLTextAreaElement.prototype, 'scrollHeight', { configurable: true, get() { return 74; } });
+    const field = f.session.snapshot.fields[0]!, input = f.doc.activeElement as HTMLTextAreaElement;
+    input.value = 'First\nSecond\nThird'; input.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true }));
+    assert.equal(field.ruled?.rows, 3); assert.deepEqual(field.widgets[0]!.rect, [80, 572, 340, 638]);
+    assert.equal(input.parentElement!.classList.contains('is-overflow'), false);
+  } finally { f.dispose(); }
+});
+test('disabling line flow preserves separate fields and an occupied answer is never merged', async () => {
+  const f = await fixture();
+  try {
+    const lines = [620, 596, 572].map(y => ({ page: 1, rect: [80, y, 340, y + 18] as [number, number, number, number] }));
+    f.sessions.preferences.flowAnswerLines = false; f.editor.setAnswerLines(lines); f.editor.addSuggestedField(1, lines[0]!.rect);
+    const first = f.session.snapshot.fields[0]!; assert.equal(first.ruled, undefined);
+    f.session.setValue(first.name, 'Keep separate'); f.sessions.preferences.flowAnswerLines = true;
+    f.editor.addSuggestedField(1, lines[1]!.rect); assert.equal(f.session.snapshot.fields.length, 2);
+    assert.deepEqual(f.session.snapshot.fields[1]!.ruled, { spacing: 24, rows: 2 }); assert.equal(first.value, 'Keep separate');
   } finally { f.dispose(); }
 });

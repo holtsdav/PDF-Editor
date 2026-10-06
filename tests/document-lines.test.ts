@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { JSDOM } from 'jsdom';
+import { OPS } from 'pdfjs-dist/legacy/build/pdf.mjs';
+import type { OperatorList } from '../src/compat/pdf-artifacts.ts';
 import type { Rect } from '../src/pdf/text-engine.ts';
 
 // Exercise the production scan lifecycle and suggestion handlers, mocking only
@@ -19,9 +21,10 @@ const bundle = await build({ entryPoints: ['src/ui/pdf-surface.ts'], bundle: tru
 const moduleUrl = new URL('../tmp/ui-tests/document-lines.mjs', import.meta.url);
 await mkdir(new URL('../tmp/ui-tests/', import.meta.url), { recursive: true }); await writeFile(moduleUrl, bundle.outputFiles[0]!.text);
 const { PdfSurface } = await import(moduleUrl.href);
-interface Entry { native: { div: HTMLElement; number: number; viewport: object }; candidates?: Rect[]; suggestions?: HTMLElement }
+interface Entry { page: { getOperatorList?: () => Promise<OperatorList> }; native: { div: HTMLElement; number: number; viewport: object }; candidates?: Rect[]; suggestions?: HTMLElement }
 interface Harness {
   detectLines(): Promise<void>; cancelLineScan(): void; clearSuggestions(): void; refreshSuggestions(): void;
+  dismissRemovedAnswer(field: { widgets: { page: number; rect: Rect }[] }): void;
   generation: number; closed: boolean; entries: Entry[]; lineScan?: object; message: HTMLElement; lineButton: HTMLButtonElement;
 }
 function fixture(lines = [1, 2, 0, 1]) {
@@ -69,7 +72,7 @@ function fixture(lines = [1, 2, 0, 1]) {
   });
   const surface = Object.assign(Object.create(PdfSurface.prototype), { root, entries, pdf: {}, editor: { setAnswerLines() {}, addSuggestedField(page: number, rect: Rect) { chosen.push({ page, rect }); } },
     session: { snapshot: { fields } }, generation: 1, closed: false, currentPage: lines.length,
-    lineButton: doc.querySelector('#detect'), message: doc.querySelector('#message') }) as Harness;
+    lineButton: doc.querySelector('#detect'), message: doc.querySelector('#message'), dismissedLines: new Set<string>() }) as Harness;
   return { surface, fields, chosen, hold, started: (page: number) => starts[page - 1]!.promise, visited, canvases, peak: () => peak, cancellations: () => cancellations, fail: (page: number) => { failPage = page; }, dispose: () => { surface.cancelLineScan(); surface.clearSuggestions(); dom.window.close(); } };
 }
 test('one scan detects every PDF page, including offscreen pages, with bounded sequential rasters', async () => {
@@ -77,7 +80,7 @@ test('one scan detects every PDF page, including offscreen pages, with bounded s
   try {
     await f.surface.detectLines(); assert.deepEqual(f.visited, [1, 2, 3, 4]); assert.equal(f.peak(), 1);
     assert.deepEqual(f.surface.entries.map(entry => entry.candidates?.length), [1, 2, 0, 1]);
-    assert.match(f.surface.message.textContent!, /4 suggested answer lines on 3 of 4 PDF pages/);
+    assert.equal(f.surface.message.textContent, '');
     assert(f.canvases.every(canvas => canvas.width === 0 && canvas.height === 0));
     const suggestion = f.surface.entries[3]!.suggestions!.querySelector<HTMLButtonElement>('button')!; suggestion.click();
     assert.equal(f.chosen[0]!.page, 4); assert.deepEqual(f.chosen[0]!.rect, [110, 650, 350, 668]);
@@ -95,7 +98,7 @@ test('scan progress is cancellable and partial suggestions are removed', { timeo
     assert.equal(f.surface.lineButton.disabled, false); assert.equal(f.surface.entries[0]!.candidates?.length, 1);
     await f.surface.detectLines(); await scanning; release();
     assert.deepEqual(f.visited, [1, 2]); assert.equal(f.cancellations(), 1);
-    assert(f.surface.entries.every(entry => !entry.candidates)); assert.match(f.surface.message.textContent!, /cancelled/);
+    assert(f.surface.entries.every(entry => !entry.candidates)); assert.equal(f.surface.message.textContent, '');
     assert.equal(f.surface.lineButton.getAttribute('aria-busy'), null);
   } finally { releaseFirst(); release(); f.dispose(); }
 });
@@ -104,7 +107,7 @@ test('cancelled old scans cannot overwrite a restarted scan or its controls', as
   try {
     const old = f.surface.detectLines(); await f.surface.detectLines(); const next = f.surface.detectLines();
     await old; assert.equal(f.surface.lineButton.getAttribute('aria-busy'), 'true'); release(); await next;
-    assert.deepEqual(f.visited, [1, 1, 2]); assert.match(f.surface.message.textContent!, /2 suggested answer lines on 2 of 2 PDF pages/);
+    assert.deepEqual(f.visited, [1, 1, 2]); assert.equal(f.surface.message.textContent, '');
   } finally { release(); f.dispose(); }
 });
 test('document replacement invalidates an in-flight scan and prevents suggestions on detached pages', async () => {
@@ -123,9 +126,9 @@ test('a page render failure clears partial suggestions, leaves retry enabled and
     f.fail(0); await f.surface.detectLines(); assert.equal(f.surface.entries[3]!.candidates?.length, 1);
   } finally { f.dispose(); }
 });
-test('empty PDFs report full scan completion without adding fields', async () => {
+test('empty PDFs complete quietly without adding fields', async () => {
   const f = fixture([0, 0, 0]);
-  try { await f.surface.detectLines(); assert.match(f.surface.message.textContent!, /in this PDF \(3 pages scanned\)/); assert.equal(f.chosen.length, 0); }
+  try { await f.surface.detectLines(); assert.equal(f.surface.message.textContent, ''); assert.equal(f.chosen.length, 0); }
   finally { f.dispose(); }
 });
 
@@ -143,4 +146,41 @@ test('session refresh preserves other suggestion nodes through pointerdown and b
     assert.equal(next!.isConnected, true); assert.equal(entry.suggestions!.querySelectorAll('button').length, 2);
     next!.click(); assert.equal(f.chosen.length, 1); assert.deepEqual(f.chosen[0]!.rect, entry.candidates![1]);
   } finally { f.dispose(); }
+});
+
+test('deleting a detected answer dismisses its suggestion until an explicit rescan', async () => {
+  const f = fixture([2]);
+  try {
+    await f.surface.detectLines();
+    const entry = f.surface.entries[0]!, rect = entry.candidates![0]!;
+    const field = { widgets: [{ page: 1, rect }] };
+    f.fields.push(field); f.surface.refreshSuggestions();
+    assert.equal(entry.suggestions!.querySelectorAll('button').length, 1);
+    f.surface.dismissRemovedAnswer(field);
+    f.fields.splice(0); f.surface.refreshSuggestions();
+    assert.equal(entry.suggestions!.querySelectorAll('button').length, 1, 'deletion does not recreate the first suggestion');
+    await f.surface.detectLines(); await f.surface.detectLines();
+    assert.equal(f.surface.entries[0]!.suggestions!.querySelectorAll('button').length, 2, 'a fresh scan can offer it again');
+  } finally { f.dispose(); }
+});
+
+test('unavailable decorative metadata leaves all detected answers intact', async () => {
+  const f = fixture();
+  try {
+    Object.assign(f.surface, { library: { OPS } });
+    f.surface.entries[0]!.page.getOperatorList = () => Promise.reject(new Error('Unsupported operator metadata'));
+    await f.surface.detectLines(); assert.deepEqual(f.surface.entries.map(entry => entry.candidates?.length), [1, 2, 0, 1]);
+    assert.equal(f.surface.message.textContent, '');
+  } finally { f.dispose(); }
+});
+test('cancelling while decorative metadata is pending cannot publish stale results', { timeout: 5000 }, async () => {
+  const f = fixture([1]); let release!: () => void, started!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; }); const inspecting = new Promise<void>(resolve => { started = resolve; });
+  try {
+    Object.assign(f.surface, { library: { OPS } });
+    f.surface.entries[0]!.page.getOperatorList = async () => { started(); await pending; return { fnArray: [], argsArray: [] }; };
+    const scanning = f.surface.detectLines(); await inspecting; await f.surface.detectLines(); release(); await scanning;
+    assert.equal(f.surface.entries[0]!.candidates, undefined); assert.equal(f.surface.message.textContent, '');
+    assert(f.canvases.every(canvas => canvas.width === 0 && canvas.height === 0));
+  } finally { release(); f.dispose(); }
 });

@@ -134,6 +134,12 @@ Acceptance remains: values and appearances agree after reopening; no flattening/
 - [x] Preserve connected/interior table crossing, wide-bar and occupied-heading rejection.
 - [x] Regression geometry at two raster resolutions and several frame insets.
 
+### 0.7.7 dotted rules and conservative footer filtering — implemented
+
+- [x] Regular compact dots with distinct spacing/density checks; existing solid/dash recognition retained.
+- [x] Skip matching wide PDF-declared decorative footer rules; keep ordinary bottom answers and ambiguous metadata.
+- [x] Isolated PDF.js operator compatibility and cancellation/failure fallback tests.
+
 ## Later: Wacom input and richer ink
 
 Build on constant-width ink, smoothing and session undo/redo with pressure width, partial-stroke erasing and rotation/scaling transforms. Cube/multistroke recognition needs stroke grouping and a labeled corpus. Test actual hardware, OS and app build for pressure, dots/fast strokes, cancellation, buttons/eraser and zoom changes. Independently reopen/print output. Handwriting recognition is separate.
@@ -141,3 +147,26 @@ Build on constant-width ink, smoothing and session undo/redo with pressure width
 ## Community submission
 
 Broaden testing, validate ID/name/minimum version, make source and assets public when the owner chooses, publish a tested release and follow current Community submission requirements. Mobile is a separate target. XFA, signature workflows, OCR and collaborative editing remain outside this first version.
+
+### 0.7.8 ruled answer blocks and native plugin settings — implemented
+
+- [x] Consecutive aligned blank rules form one editable multiline answer with printed line spacing and fixed geometry.
+- [x] Fractional raster pitch fitting, occupied-row boundaries, normal text editing and block-level Tab navigation.
+- [x] Verified layout persistence, source-write overflow rejection, movement/resize/undo and reopen coverage.
+- [x] Native Obsidian settings for optional automatic detection on open and consecutive-line wrapping.
+
+### 0.7.9 growing ruled answers — implemented
+
+- [x] Extend ruled answers by whole rows, including below the last printed rule, with a stable top anchor and editable field ID.
+- [x] Use embedded-font metrics in the shared session to preserve grown geometry through save and draft recovery.
+- [x] Remove the completed detection summary, cancellation notice and no-result instructions; retain active progress and real errors.
+- [x] Keep page bounds and the ordinary visible overflow warning; page-edge excess remains in the logical editable value.
+
+### 0.7.10 immediate loading and PDF Editor name — implemented
+
+- [x] Discover connected PDF hosts before native rendering, with disposable observers for main and pop-out windows.
+- [x] Show the editor loading surface immediately, restore native rendering with a compact explanation on unsupported startup, and deduplicate host identities.
+- [x] Rename the visible plugin to PDF Editor while retaining settings, installed ID and recovery compatibility.
+- [x] Add a live 0–160 px PDF toolbar top offset for layouts shared with other plugins.
+
+The current safety and Community directory gates are tracked in [Release readiness](RELEASE_READINESS.md).

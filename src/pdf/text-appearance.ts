@@ -1,4 +1,4 @@
-import { adjustDimsForRotation, drawTextField, reduceRotation, rgb, rotateInPlace, setFillingRgbColor, setFontAndSize, TextAlignment } from 'pdf-lib';
+import { adjustDimsForRotation, drawTextField, PDFArray, PDFName, PDFNumber, reduceRotation, rgb, rotateInPlace, setFillingRgbColor, setFontAndSize, TextAlignment } from 'pdf-lib';
 import type { AppearanceProviderFor, PDFTextField } from 'pdf-lib';
 import { wrapText } from './wrap-text.ts';
 import { defaultColor } from './text-format.ts';
@@ -12,8 +12,11 @@ export const multilineAppearance: AppearanceProviderFor<PDFTextField> = (field, 
   const padding = 1; const border = widget.getBorderStyle()?.getWidth() ?? 0;
   const innerWidth = width - 2 * (border + padding);
   const lines = wrapText(field.getText() ?? '', innerWidth, text => font.widthOfTextAtSize(text, size));
-  const leading = size * 1.2;
-  const baseline = font.heightAtSize(size, { descender: false }) + (leading - font.heightAtSize(size)) / 2;
+  const stored = field.acroField.dict.lookupMaybe(PDFName.of('PFSRuled'), PDFArray);
+  const spacing = stored?.lookupMaybe(0, PDFNumber)?.asNumber();
+  const leading = spacing ?? size * 1.2;
+  // The first row retains its usual baseline; later rows follow the printed pitch.
+  const baseline = font.heightAtSize(size, { descender: false }) + (size * 1.2 - font.heightAtSize(size)) / 2;
   const textLines = lines.map((text, index) => {
     const textWidth = font.widthOfTextAtSize(text, size);
     const alignment = field.getAlignment();
