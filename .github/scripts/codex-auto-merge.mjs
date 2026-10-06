@@ -65,15 +65,19 @@ async function hasOpenCodexThread(pr) {
 }
 
 async function processPr(pr) {
-  if (pr.draft || pr.state !== 'open') return;
+  if (pr.draft || pr.state !== 'open' || pr.base.ref !== 'main') return;
   const number = pr.number;
   const sha = pr.head.sha;
   const issuePath = `/repos/${owner}/${repo}/issues/${number}`;
-  const [comments, hasFindings] = await Promise.all([
+  const [comments, hasFindings, timeline] = await Promise.all([
     allPages(`${issuePath}/comments`),
     hasOpenCodexThread(pr),
+    allPages(`${issuePath}/timeline`),
   ]);
   const review = completedReview(comments, sha);
+  const lastBaseChange = Math.max(0, ...timeline
+    .filter((event) => event.event === 'base_ref_changed')
+    .map((event) => Date.parse(event.created_at)));
   const latestRequest = comments
     .filter((comment) => /^@codex review(?:\s|$)/i.test(comment.body?.trim() ?? ''))
     .at(-1);
@@ -85,6 +89,7 @@ async function processPr(pr) {
     : `${issuePath}/reactions`;
   const reactions = reactionPath ? await allPages(reactionPath) : [];
   const clean = !newerRequestPending && !hasFindings &&
+    review?.completed >= lastBaseChange &&
     Number.isFinite(review?.completed) && reactions.some((reaction) =>
       reaction.user?.login === bot && reaction.content === '+1' &&
       Date.parse(reaction.created_at) >= review.completed);
