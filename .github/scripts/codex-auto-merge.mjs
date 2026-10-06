@@ -50,14 +50,14 @@ async function hasOpenCodexThread(pr) {
     const result = await api('/graphql', {
       method: 'POST',
       body: JSON.stringify({
-        query: 'query($id: ID!, $after: String) { node(id: $id) { ... on PullRequest { reviewThreads(first: 100, after: $after) { nodes { isResolved isOutdated comments(first: 1) { nodes { author { login } } } } pageInfo { hasNextPage endCursor } } } } }',
+        query: 'query($id: ID!, $after: String) { node(id: $id) { ... on PullRequest { reviewThreads(first: 100, after: $after) { nodes { isResolved comments(first: 1) { nodes { author { login } } } } pageInfo { hasNextPage endCursor } } } } }',
         variables: { id: pr.node_id, after: cursor },
       }),
     });
     if (result.errors?.length) throw new Error(JSON.stringify(result.errors));
     const threads = result.data.node.reviewThreads;
     if (threads.nodes.some((thread) =>
-      !thread.isResolved && !thread.isOutdated &&
+      !thread.isResolved &&
       thread.comments.nodes[0]?.author?.login === 'chatgpt-codex-connector')) return true;
     cursor = threads.pageInfo.hasNextPage ? threads.pageInfo.endCursor : null;
   } while (cursor);
