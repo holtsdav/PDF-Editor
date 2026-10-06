@@ -1,5 +1,5 @@
 import type { App, TAbstractFile, TFile } from 'obsidian';
-import { TextSession } from './text-session.ts';
+import { TextSession, equalBytes } from './text-session.ts';
 import { RecoveryCopies, hash, isRecoveryPath } from './recovery.ts';
 import type { BackupKind, BackupRecord } from './recovery';
 import type { PdfDraft } from './text-session';
@@ -10,6 +10,7 @@ import { migrateRecovery } from './recovery-migration.ts';
 import { DraftJournal } from './draft-journal.ts';
 
 export function arrayBuffer(bytes: Uint8Array): ArrayBuffer { return bytes.slice().buffer as ArrayBuffer; }
+export interface RecoveryUsage { files: number; bytes: number; indexedPdfs: number }
 
 export class VaultSessions {
   private app: App;
@@ -119,6 +120,63 @@ export class VaultSessions {
       return stat ? { label: item.label, size: stat.size, kind: item.kind } : null;
     }));
     return items.filter(item => item !== null);
+  }
+
+  async recoveryUsage(): Promise<RecoveryUsage> {
+    return this.storage(async () => {
+      const adapter = this.app.vault.adapter;
+      const usage: RecoveryUsage = { files: 0, bytes: 0, indexedPdfs: Object.keys(this.backups).length };
+      const pending = [this.root];
+      while (pending.length) {
+        const folder = pending.pop()!;
+        if (!await adapter.exists(folder)) continue;
+        const listing = await adapter.list(folder);
+        pending.push(...listing.folders);
+        for (const path of listing.files) {
+          const stat = await adapter.stat(path);
+          if (stat) { usage.files++; usage.bytes += stat.size; }
+        }
+      }
+      return usage;
+    });
+  }
+
+  /** Export a verified journal without requiring the source PDF to parse or be replaced. */
+  async exportPendingDraft(file: TFile): Promise<TFile> {
+    const draft = await this.storage(async () => this.journal.read(await this.draftPath(file.path)));
+    if (!draft) throw new Error('No pending recovery draft exists for this PDF.');
+    const folder = file.path.slice(0, file.path.lastIndexOf('/') + 1);
+    let path: string;
+    do { path = `${folder}${file.basename} recovered ${globalThis.crypto.randomUUID().slice(0, 8)}.pdf`; }
+    while (this.app.vault.getAbstractFileByPath(path));
+    const created = await this.app.vault.createBinary(path, arrayBuffer(draft.bytes));
+    if (!equalBytes(new Uint8Array(await this.app.vault.readBinary(created)), draft.bytes)) {
+      throw new Error(`The exported PDF could not be verified at ${path}. The recovery draft was retained.`);
+    }
+    return created;
+  }
+
+  /** Explicit reset only: preserve pending work and never silently expire originals. */
+  async clearRecoveryStorage(): Promise<void> {
+    if (this.views.size) throw new Error('Close all PDF Editor views before clearing recovery storage.');
+    const sessions = await Promise.all([...this.sessions.values()]);
+    if (sessions.some(session => session.dirty || session.status !== 'saved')) {
+      throw new Error('Save or resolve all pending PDF edits before clearing recovery storage.');
+    }
+    await this.storage(async () => {
+      if (this.views.size) throw new Error('A PDF Editor view opened. Close it before clearing recovery storage.');
+      const drafts = `${this.root}/drafts`;
+      if (await this.app.vault.adapter.exists(drafts) && (await this.app.vault.adapter.list(drafts)).files.length) {
+        throw new Error('Pending or leftover PDF drafts exist. Open or export those PDFs and reach Saved before clearing recovery storage.');
+      }
+      const previous = Object.entries(this.backups);
+      for (const key of Object.keys(this.backups)) delete this.backups[key];
+      try { await this.persist(); }
+      catch (error) { for (const [key, record] of previous) this.backups[key] = record; throw error; }
+      const adapter = this.app.vault.adapter;
+      if (await adapter.exists(this.root)) await adapter.rmdir(this.root, true);
+      await this.ensureFolder(this.root);
+    });
   }
 
   backupFor(file: TFile, kind: BackupKind = 'original'): string | undefined { return this.recovery.path(file.path, kind); }

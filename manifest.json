@@ -1,9 +1,9 @@
 {
   "id": "pdf-form-studio",
-  "name": "PDF Editor",
-  "version": "0.7.10",
+  "name": "PDF Editor (Beta)",
+  "version": "0.7.11",
   "minAppVersion": "1.13.7",
-  "description": "Integrated PDF editing beta with immediate editor loading, growing ruled answers, optional detection on PDF open, automatic saving and recovery.",
+  "description": "Edit PDF text fields and add text and ink inside Obsidian, with automatic saving and recovery copies. Desktop beta.",
   "author": "holtsdav",
   "authorUrl": "https://github.com/holtsdav",
   "isDesktopOnly": true

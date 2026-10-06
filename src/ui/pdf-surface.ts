@@ -48,6 +48,8 @@ export class PdfSurface extends Component {
   private rotation = 0;
   private frame?: number;
   private renderQueue = Promise.resolve();
+  private paintedEntries = new Set<PageEntry>();
+  private activeRender?: PageEntry;
   private currentPage = 1;
   private search: HTMLInputElement;
   private searchRow: HTMLElement;
@@ -163,7 +165,11 @@ export class PdfSurface extends Component {
     this.register(session.subscribeRemovedField(field => this.dismissRemovedAnswer(field)));
     this.register(session.subscribe(() => { this.refreshSuggestions(); if (this.epoch !== session.renderEpoch) void this.loadDocument().catch(error => this.fail(error)); }));
     this.layout(); this.go(this.native.initialPage ?? 1);
-    if (this.autoDetectOnOpen && this.sessions.preferences.autoDetectLines) await this.detectLines();
+    if (this.autoDetectOnOpen && this.sessions.preferences.autoDetectLines) {
+      const limit = this.sessions.preferences.autoDetectPageLimit;
+      if (this.entries.length > limit) this.message.textContent = `Automatic answer-line detection skipped: ${this.entries.length} pages exceeds the ${limit}-page limit. Use Detect answer lines to scan manually.`;
+      else await this.detectLines();
+    }
   }
   private async loadDocument(): Promise<void> {
     this.cancelLineScan(); this.clearSuggestions();
@@ -185,10 +191,15 @@ export class PdfSurface extends Component {
         const links = div.createDiv({ cls: 'pfs-links' });
         const viewport = page.getViewport({ scale: 1 });
         entries.push({ native: { div, viewport, number, annotationElements: () => [] }, page, canvas, text, links, version: 0, painted: -1 }); fragment.append(div);
+        if (number % 16 === 0 && number < pdf.numPages) {
+          this.message.textContent = `Preparing PDF pages ${number} of ${pdf.numPages}…`;
+          await new Promise<void>(resolve => this.root.ownerDocument.defaultView!.setTimeout(resolve, 0));
+          if (this.closed || generation !== this.generation) return;
+        }
       }
       for (const entry of this.entries) { entry.rendering?.cancel(); entry.textTask?.cancel(); }
       const oldTask = this.task; this.task = task;
-      this.pdf = pdf; this.entries = entries; this.stack.replaceChildren(fragment);
+      this.pdf = pdf; this.entries = entries; this.paintedEntries.clear(); this.stack.replaceChildren(fragment);
       if (oldTask) void oldTask.destroy().catch(() => {});
       this.count.textContent = `/ ${pdf.numPages}`; this.pageInput.max = String(pdf.numPages); this.message.textContent = '';
       this.layout();
@@ -233,17 +244,31 @@ export class PdfSurface extends Component {
     this.frame = this.root.ownerDocument.defaultView!.requestAnimationFrame(() => { this.frame = undefined; this.paintVisible(); });
   }
   private paintVisible(): void {
-    const bounds = this.scroller.getBoundingClientRect(); let visibleHeight = 0;
-    if (!bounds.width || !bounds.height) return;
-    for (const entry of this.entries) {
-      const rect = entry.native.div.getBoundingClientRect();
-      const visible = Math.max(0, Math.min(rect.bottom, bounds.bottom) - Math.max(rect.top, bounds.top));
+    const width = this.scroller.clientWidth, height = this.scroller.clientHeight;
+    if (!width || !height) return;
+    const top = this.scroller.scrollTop, bottom = top + height;
+    const outside = (entry: PageEntry): boolean => entry.native.div.offsetTop + entry.native.div.offsetHeight < top - 600
+      || entry.native.div.offsetTop > bottom + 600;
+    if (this.activeRender && outside(this.activeRender)) this.activeRender.rendering?.cancel();
+    for (const entry of this.paintedEntries) {
+      if (!outside(entry) || Math.abs(entry.native.div.offsetTop - top) <= height * 3) continue;
+      entry.textTask?.cancel(); entry.textTask = undefined;
+      entry.canvas.width = 0; entry.canvas.height = 0; entry.painted = -1;
+      entry.text.replaceChildren(); entry.links.replaceChildren(); this.paintedEntries.delete(entry);
+    }
+    // Page shells stay in document order, so only pages near the viewport need
+    // measurement or rendering on each scroll frame.
+    let low = 0, high = this.entries.length;
+    while (low < high) {
+      const mid = (low + high) >>> 1, div = this.entries[mid]!.native.div;
+      if (div.offsetTop + div.offsetHeight < top - 600) low = mid + 1; else high = mid;
+    }
+    let visibleHeight = 0;
+    for (let index = low; index < this.entries.length; index++) {
+      const entry = this.entries[index]!, div = entry.native.div;
+      if (div.offsetTop > bottom + 600) break;
+      const visible = Math.max(0, Math.min(div.offsetTop + div.offsetHeight, bottom) - Math.max(div.offsetTop, top));
       if (visible > visibleHeight || (visible > 0 && visible === visibleHeight && entry.native.number === this.currentPage)) { visibleHeight = visible; this.currentPage = entry.native.number; }
-      if (rect.bottom < bounds.top - 600 || rect.top > bounds.bottom + 600) {
-        // Release distant bitmaps, retaining page DOM and editable objects.
-        if (Math.abs(rect.top - bounds.top) > bounds.height * 3 && entry.painted >= 0) { entry.canvas.width = 0; entry.canvas.height = 0; entry.painted = -1; }
-        continue;
-      }
       if (entry.painted === entry.version || entry.queued === entry.version) continue;
       const version = entry.version; entry.queued = version;
       this.renderQueue = this.renderQueue.catch(() => {}).then(async () => {
@@ -259,8 +284,9 @@ export class PdfSurface extends Component {
     this.previous.disabled = this.currentPage === 1; this.next.disabled = this.currentPage === this.entries.length;
   }
   private nearViewport(entry: PageEntry): boolean {
-    const bounds = this.scroller.getBoundingClientRect(), page = entry.native.div.getBoundingClientRect();
-    return bounds.width > 0 && bounds.height > 0 && page.bottom >= bounds.top - 600 && page.top <= bounds.bottom + 600;
+    const top = this.scroller.scrollTop, div = entry.native.div;
+    return this.scroller.clientWidth > 0 && this.scroller.clientHeight > 0
+      && div.offsetTop + div.offsetHeight >= top - 600 && div.offsetTop <= top + this.scroller.clientHeight + 600;
   }
   private async paint(entry: PageEntry, version: number): Promise<void> {
     const doc = this.root.ownerDocument, viewport = entry.page.getViewport({ scale: entry.native.viewport.scale, rotation: entry.native.viewport.rotation });
@@ -268,18 +294,19 @@ export class PdfSurface extends Component {
     const ratio = Math.min(doc.defaultView!.devicePixelRatio, 2, Math.sqrt(10_000_000 / (viewport.width * viewport.height)));
     const canvas = doc.createElement('canvas'); canvas.width = Math.ceil(viewport.width * ratio); canvas.height = Math.ceil(viewport.height * ratio);
     const task = entry.rendering = entry.page.render({ canvasContext: canvas.getContext('2d')!, viewport, annotationMode: 1, transform: [ratio, 0, 0, ratio, 0, 0] });
-    try { await task.promise; } finally { if (entry.rendering === task) entry.rendering = undefined; }
+    this.activeRender = entry;
+    try { await task.promise; } finally { if (entry.rendering === task) entry.rendering = undefined; if (this.activeRender === entry) this.activeRender = undefined; }
     if (this.closed || version !== entry.version || !entry.native.div.isConnected || !this.nearViewport(entry)) return;
     entry.canvas.width = canvas.width; entry.canvas.height = canvas.height; entry.canvas.getContext('2d')!.drawImage(canvas, 0, 0);
-    entry.painted = version;
+    entry.painted = version; this.paintedEntries.add(entry);
     const content = await entry.page.getTextContent();
-    if (this.closed || version !== entry.version) return;
+    if (this.closed || version !== entry.version || !this.nearViewport(entry)) return;
     entry.text.replaceChildren(); entry.textTask = new this.library!.TextLayer({ container: entry.text, viewport, textContentSource: content });
     await entry.textTask.render();
-    if (this.closed || version !== entry.version) return;
+    if (this.closed || version !== entry.version || !this.nearViewport(entry)) return;
     this.highlight(); entry.links.replaceChildren();
     const annotations = await entry.page.getAnnotations();
-    if (this.closed || version !== entry.version) return;
+    if (this.closed || version !== entry.version || !this.nearViewport(entry)) return;
     for (const annotation of annotations as { subtype: string; rect: number[]; url?: string; dest?: string | unknown[] }[]) {
       if (annotation.subtype !== 'Link') continue;
       const p = viewport.convertToViewportRectangle(annotation.rect);
@@ -422,6 +449,7 @@ export class PdfSurface extends Component {
     if (this.task) void this.task.destroy().catch(() => {});
     for (const task of this.loadingTasks) void task.destroy().catch(() => {});
     this.loadingTasks.clear();
+    this.paintedEntries.clear(); this.activeRender = undefined;
     this.root.remove(); this.native.element.classList.remove('pfs-integrated');
     this.native.element.style.removeProperty('--pfs-embed-height');
   }

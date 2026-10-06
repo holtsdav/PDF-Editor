@@ -13,7 +13,7 @@ async function vault() {
   const pdf = await PDFDocument.create(); pdf.addPage([600, 800]);
   const field = pdf.getForm().createTextField('Answer'); field.setText('Original'); field.addToPage(pdf.getPages()[0]!);
   const files = new Map<string, Uint8Array>([['Folder/Worksheet.pdf', await pdf.save()]]), folders = new Set<string>();
-  const file = { path: 'Folder/Worksheet.pdf', name: 'Worksheet.pdf' } as TFile;
+  const file = { path: 'Folder/Worksheet.pdf', name: 'Worksheet.pdf', basename: 'Worksheet' } as TFile;
   const loaded = new Map<string, TFile>([[file.path, file]]);
   const encoder = new TextEncoder(), decoder = new TextDecoder(); let interrupted: string | undefined;
   const adapter = {
@@ -26,10 +26,18 @@ async function vault() {
     readBinary: async (path: string) => { if (!files.has(path)) throw new Error('Missing file'); return files.get(path)!.slice().buffer; },
     writeBinary: async (path: string, bytes: ArrayBuffer) => { files.set(path, new Uint8Array(bytes).slice()); },
     mkdir: async (path: string) => { folders.add(path); }, remove: async (path: string) => { files.delete(path); },
-    rename: async (from: string, to: string) => { if (files.has(to)) throw new Error('Destination exists'); files.set(to, files.get(from)!); files.delete(from); }
+    rename: async (from: string, to: string) => { if (files.has(to)) throw new Error('Destination exists'); files.set(to, files.get(from)!); files.delete(from); },
+    stat: async (path: string) => files.has(path) ? { size: files.get(path)!.length } : null,
+    list: async (path: string) => ({ files: [...files.keys()].filter(item => item.startsWith(path + '/') && !item.slice(path.length + 1).includes('/')),
+      folders: [...folders].filter(item => item.startsWith(path + '/') && !item.slice(path.length + 1).includes('/')) }),
+    rmdir: async (path: string) => { for (const name of files.keys()) if (name.startsWith(path + '/')) files.delete(name);
+      for (const name of folders) if (name === path || name.startsWith(path + '/')) folders.delete(name); }
   };
   const app = { vault: { configDir: '.obsidian', adapter, getAbstractFileByPath: (path: string) => loaded.get(path),
-    readBinary: (file: TFile) => adapter.readBinary(file.path), modifyBinary: (file: TFile, bytes: ArrayBuffer) => adapter.writeBinary(file.path, bytes) } } as unknown as App;
+    readBinary: (file: TFile) => adapter.readBinary(file.path), modifyBinary: (file: TFile, bytes: ArrayBuffer) => adapter.writeBinary(file.path, bytes),
+    createBinary: async (path: string, bytes: ArrayBuffer) => { if (files.has(path)) throw new Error('Already exists');
+      const created = { path, name: path.split('/').at(-1)!, basename: path.split('/').at(-1)!.replace(/\.pdf$/i, '') } as TFile;
+      await adapter.writeBinary(path, bytes); loaded.set(path, created); return created; } } } as unknown as App;
   const records: Record<string, BackupRecord> = {};
   const create = () => new VaultSessions(app, font, records, async () => {});
   const sessions = create(); await sessions.initialize();
@@ -92,4 +100,38 @@ test('the last closing view flushes and evicts clean sessions while other views 
   assert.equal(reopened.snapshot.fields[0]!.value, 'Last close');
   const releaseFailed = v.sessions.retain(v.file); reopened.setValue('Answer', 'Unsupported 😀');
   await releaseFailed(); assert((await v.sessions.get(v.file)) === reopened); assert.equal(reopened.dirty, true);
+});
+
+test('a verified pending draft exports beside a damaged source without replacing it', async () => {
+  const v = await vault(), session = await v.sessions.get(v.file);
+  session.setValue('Answer', 'Recovered answer'); await session.checkpoint();
+  const damaged = new Uint8Array([1, 2, 3]); v.files.set(v.file.path, damaged);
+  const exported = await v.sessions.exportPendingDraft(v.file);
+  assert.match(exported.path, /^Folder\/Worksheet recovered [a-f0-9]{8}\.pdf$/);
+  assert.deepEqual(v.files.get(v.file.path), damaged);
+  assert.equal((await readTextPdf(v.files.get(exported.path)!)).fields[0]!.value, 'Recovered answer');
+  assert(v.files.has(v.draft), 'Export must retain the original recovery journal');
+});
+
+test('clearing recovery storage requires closed clean sessions and resets the backup index', async () => {
+  const v = await vault(), release = v.sessions.retain(v.file), session = await v.sessions.get(v.file);
+  session.setValue('Answer', 'Saved answer'); await session.save();
+  await assert.rejects(v.sessions.clearRecoveryStorage(), /Close all/);
+  await release();
+  const before = await v.sessions.recoveryUsage();
+  assert.equal(before.indexedPdfs, 1); assert(before.files > 0 && before.bytes > 0);
+  await v.sessions.clearRecoveryStorage();
+  const after = await v.sessions.recoveryUsage();
+  assert.deepEqual(after, { files: 0, bytes: 0, indexedPdfs: 0 });
+  const reopened = await v.sessions.get(v.file); reopened.setValue('Answer', 'Another answer'); await reopened.save();
+  assert(v.sessions.backupFor(v.file), 'The next save must establish a new original copy');
+});
+
+test('pending edits prevent recovery cleanup even after their last view closes', async () => {
+  const v = await vault(), session = await v.sessions.get(v.file);
+  session.setValue('Answer', 'Pending answer'); await session.checkpoint();
+  await assert.rejects(v.sessions.clearRecoveryStorage(), /pending PDF edits/);
+  assert(v.files.has(v.draft));
+  await assert.rejects(v.create().clearRecoveryStorage(), /Pending or leftover PDF drafts/);
+  assert(v.files.has(v.draft));
 });

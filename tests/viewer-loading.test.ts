@@ -107,3 +107,44 @@ test('opening hides native chrome immediately and a failed session restores the 
     assert.equal(f.element.querySelector('[role=status]')?.textContent, 'Unsupported test document');
   } finally { surface.unload(); assert.equal(released, 1); assert.equal(unsubscribed, true); assert.equal(f.element.querySelector('.pfs-surface'), null); f.dom.window.close(); }
 });
+
+test('fast scrolling cancels distant rendering and releases its bitmap and text layer', () => {
+  const f = fixture(); let cancelled = 0, textCancelled = 0;
+  const page = f.doc.createElement('div'), canvas = f.doc.createElement('canvas'), text = f.doc.createElement('div'), links = f.doc.createElement('div');
+  canvas.width = 500; canvas.height = 700; text.textContent = 'Previous page text'; links.textContent = 'Previous link';
+  Object.defineProperties(page, { offsetTop: { value: 0 }, offsetHeight: { value: 700 } });
+  const scroller = f.doc.createElement('div'); scroller.scrollTop = 4000;
+  Object.defineProperties(scroller, { clientWidth: { value: 500 }, clientHeight: { value: 800 } });
+  const entry = { native: { div: page, number: 1 }, canvas, text, links, painted: 1, version: 1,
+    rendering: { cancel() { cancelled++; } }, textTask: { cancel() { textCancelled++; } } };
+  const surface = Object.assign(Object.create(PdfSurface.prototype), { root: f.doc.createElement('div'), scroller, entries: [entry],
+    currentPage: 1, pageInput: f.doc.createElement('input'), previous: f.doc.createElement('button'), next: f.doc.createElement('button'), closed: false,
+    activeRender: entry, paintedEntries: new Set([entry]) });
+  try {
+    (surface as { paintVisible(): void }).paintVisible();
+    assert.equal(cancelled, 1); assert.equal(textCancelled, 1);
+    assert.equal(canvas.width, 0); assert.equal(canvas.height, 0); assert.equal(entry.painted, -1);
+    assert.equal(text.childElementCount, 0); assert.equal(text.textContent, ''); assert.equal(links.textContent, '');
+  } finally { f.dom.window.close(); }
+});
+
+test('a long PDF queues only pages near a fast-scroll destination', async () => {
+  const f = fixture(), scroller = f.doc.createElement('div'); scroller.scrollTop = 99 * 700;
+  Object.defineProperties(scroller, { clientWidth: { value: 500 }, clientHeight: { value: 700 } });
+  const entries = Array.from({ length: 200 }, (_, index) => {
+    const div = f.doc.createElement('div'); f.doc.body.append(div);
+    Object.defineProperties(div, { offsetTop: { value: index * 700 }, offsetHeight: { value: 700 } });
+    return { native: { div, number: index + 1 }, version: 1, painted: -1 };
+  });
+  const painted: number[] = [];
+  const surface = Object.assign(Object.create(PdfSurface.prototype), { root: f.doc.createElement('div'), scroller, entries,
+    currentPage: 1, pageInput: f.doc.createElement('input'), previous: f.doc.createElement('button'), next: f.doc.createElement('button'), closed: false,
+    paintedEntries: new Set(), renderQueue: Promise.resolve(), paint: async (entry: { native: { number: number } }) => { painted.push(entry.native.number); } });
+  try {
+    (surface as { paintVisible(): void }).paintVisible();
+    await (surface as { renderQueue: Promise<void> }).renderQueue;
+    assert.equal(surface.currentPage, 100);
+    assert(painted.length <= 4, 'Only the destination and adjacent pages should be queued');
+    assert(painted.includes(100));
+  } finally { f.dom.window.close(); }
+});

@@ -1,5 +1,11 @@
 # App test record
 
+## Version 0.7.11 public-beta preparation — isolated app pass
+
+The current source adds recovery storage size/folder controls, guarded cleanup, non-overwriting verified-draft export, a 25-page default automatic detection limit, and narrower fast-scroll work with distant render/text release. `npm run check` passes **160 tests**, lint, TypeScript, production build and metadata validation. All four stress workloads pass, including 120 pages and 1,200 long strokes; the 24 MiB image workload still reaches roughly 1.27 GiB peak RSS in the isolated Node process. Automated tests cover export against a damaged source, cleanup after a saved session, rejection of pending/orphaned drafts, preference validation, distant-render cancellation and nearby-page selection after a fast scroll.
+
+On 2026-10-06, the 0.7.11 build was installed and enabled in a disposable scratch vault in Obsidian 1.14.4 on macOS. The settings panel showed the 25-page limit and recovery usage; **Open folder** opened the hidden recovery directory in Finder. With automatic detection enabled, a 32-page PDF displayed the limit skip message. Direct navigation from page 1 to 32 and back rendered the selected page. A newly authored text answer was saved; independent PDF-LIB inspection of the source confirmed its value, and the hidden directory contained one `original.pdf`. The scratch test did not exercise the clear button, damaged-source export, a long continuous wheel-scroll trace, or memory measurement inside Obsidian. External-writer coordination and interrupted rename reconciliation remain open.
+
 ## Toolbar top offset and release review
 
 Checked on 2026-10-06. `npm run check` passes **155 tests**, lint, TypeScript, production build and plugin validation. Preferences tests cover the default, valid value and rejection of invalid/out-of-range stored values; the surface test checks initial application, live updates and listener disposal. `npm run test:stress` passes all four workloads; the 24 MiB image workload still shows notable latency and process memory use. A fresh `npm audit` could not complete because the terminal could not reach the npm registry.

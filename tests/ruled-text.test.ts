@@ -31,12 +31,15 @@ test('invalid stored layouts never become a ruled answer block', () => {
 test('plugin settings migrate old preferences and reject untyped toggle values', () => {
   assert.equal(loadToolPreferences(null).autoDetectLines, false); assert.equal(loadToolPreferences(null).flowAnswerLines, true);
   assert.equal(loadToolPreferences(null).toolbarTopOffset, 0);
+  assert.equal(loadToolPreferences(null).autoDetectPageLimit, 25);
   const loaded = loadToolPreferences({ autoDetectLines: true, flowAnswerLines: false, penWidth: 5 });
   assert.equal(loaded.autoDetectLines, true); assert.equal(loaded.flowAnswerLines, false); assert.equal(loaded.penWidth, 5);
   assert.equal(loadToolPreferences({ autoDetectLines: 'true', flowAnswerLines: 0 }).autoDetectLines, false);
   assert.equal(loadToolPreferences({ flowAnswerLines: 0 }).flowAnswerLines, true);
   assert.equal(loadToolPreferences({ toolbarTopOffset: 72 }).toolbarTopOffset, 72);
   for (const toolbarTopOffset of [-1, 161, 4.5, Infinity, '32']) assert.equal(loadToolPreferences({ toolbarTopOffset }).toolbarTopOffset, 0);
+  assert.equal(loadToolPreferences({ autoDetectPageLimit: 50 }).autoDetectPageLimit, 50);
+  for (const autoDetectPageLimit of [0, 101, 4.5, Infinity, '32']) assert.equal(loadToolPreferences({ autoDetectPageLimit }).autoDetectPageLimit, 25);
 });
 
 test('fractional-pitch growth retains CropBox bounds and whole rows without upward movement', () => {

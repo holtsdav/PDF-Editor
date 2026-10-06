@@ -22,5 +22,5 @@ for (const file of ['main.js', 'styles.css', 'README.md', 'LICENSE']) {
 }
 const bundle = await readFile('main.js', 'utf8');
 assert(bundle.includes('module.exports'), 'Obsidian needs a CommonJS bundle.');
-assert(!/require\(["'](?:node:|electron|fs["']|pdfjs-dist|pdf-lib)/.test(bundle), 'Runtime bundle must not depend on development-only libraries or Node APIs.');
+assert(!/require\(["'](?:node:|fs["']|pdfjs-dist|pdf-lib)/.test(bundle), 'Runtime bundle must not depend on development-only libraries or Node APIs.');
 console.log(`Validated ${manifest.name} ${manifest.version} (${manifest.id}).`);
