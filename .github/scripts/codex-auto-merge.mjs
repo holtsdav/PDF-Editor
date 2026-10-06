@@ -49,7 +49,10 @@ async function processPr(pr) {
   const number = pr.number;
   const sha = pr.head.sha;
   const issuePath = `/repos/${owner}/${repo}/issues/${number}`;
-  const comments = await allPages(`${issuePath}/comments`);
+  const [comments, reviews] = await Promise.all([
+    allPages(`${issuePath}/comments`),
+    allPages(`/repos/${owner}/${repo}/pulls/${number}/reviews`),
+  ]);
   const review = completedReview(comments, sha);
   const request = review?.manual && comments
     .filter((comment) => comment.body?.trim() === '@codex review' &&
@@ -59,7 +62,10 @@ async function processPr(pr) {
     ? request && `/repos/${owner}/${repo}/issues/comments/${request.id}/reactions`
     : `${issuePath}/reactions`;
   const reactions = reactionPath ? await allPages(reactionPath) : [];
-  const clean = Number.isFinite(review?.completed) && reactions.some((reaction) =>
+  const hasFindings = reviews.some((entry) =>
+    entry.user?.login === bot && entry.commit_id === sha &&
+    entry.state === 'COMMENTED');
+  const clean = !hasFindings && Number.isFinite(review?.completed) && reactions.some((reaction) =>
     reaction.user?.login === bot && reaction.content === '+1' &&
     Date.parse(reaction.created_at) >= review.completed);
   const statuses = await api(`/repos/${owner}/${repo}/commits/${sha}/status`);
