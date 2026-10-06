@@ -44,14 +44,34 @@ function completedReview(comments, sha) {
   return { completed: Date.parse(completed), manual: row.includes('| Manual request |') };
 }
 
+async function hasOpenCodexThread(pr) {
+  let cursor = null;
+  do {
+    const result = await api('/graphql', {
+      method: 'POST',
+      body: JSON.stringify({
+        query: 'query($id: ID!, $after: String) { node(id: $id) { ... on PullRequest { reviewThreads(first: 100, after: $after) { nodes { isResolved isOutdated comments(first: 1) { nodes { author { login } } } } pageInfo { hasNextPage endCursor } } } } }',
+        variables: { id: pr.node_id, after: cursor },
+      }),
+    });
+    if (result.errors?.length) throw new Error(JSON.stringify(result.errors));
+    const threads = result.data.node.reviewThreads;
+    if (threads.nodes.some((thread) =>
+      !thread.isResolved && !thread.isOutdated &&
+      thread.comments.nodes[0]?.author?.login === 'chatgpt-codex-connector')) return true;
+    cursor = threads.pageInfo.hasNextPage ? threads.pageInfo.endCursor : null;
+  } while (cursor);
+  return false;
+}
+
 async function processPr(pr) {
   if (pr.draft || pr.state !== 'open') return;
   const number = pr.number;
   const sha = pr.head.sha;
   const issuePath = `/repos/${owner}/${repo}/issues/${number}`;
-  const [comments, reviews] = await Promise.all([
+  const [comments, hasFindings] = await Promise.all([
     allPages(`${issuePath}/comments`),
-    allPages(`/repos/${owner}/${repo}/pulls/${number}/reviews`),
+    hasOpenCodexThread(pr),
   ]);
   const review = completedReview(comments, sha);
   const request = review?.manual && comments
@@ -62,12 +82,6 @@ async function processPr(pr) {
     ? request && `/repos/${owner}/${repo}/issues/comments/${request.id}/reactions`
     : `${issuePath}/reactions`;
   const reactions = reactionPath ? await allPages(reactionPath) : [];
-  const reviewStarted = Date.parse(review?.manual ? request?.created_at : pr.created_at);
-  const hasFindings = reviews.some((entry) =>
-    entry.user?.login === bot && entry.commit_id === sha &&
-    entry.state === 'COMMENTED' &&
-    Date.parse(entry.submitted_at) >= reviewStarted &&
-    Date.parse(entry.submitted_at) <= review?.completed);
   const clean = !hasFindings && Number.isFinite(review?.completed) && reactions.some((reaction) =>
     reaction.user?.login === bot && reaction.content === '+1' &&
     Date.parse(reaction.created_at) >= review.completed);
