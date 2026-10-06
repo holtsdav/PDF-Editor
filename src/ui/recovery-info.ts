@@ -11,7 +11,7 @@ export class RecoveryInfo extends Modal {
   onOpen(): void {
     this.setTitle('PDF safety copies');
     this.contentEl.createEl('p', { text: `Your current PDF, ${this.file.name}, contains your saved text and drawings. These safety copies are separate; your saved edits do not depend on them.` });
-    this.contentEl.createEl('p', { text: 'Original PDF: one full copy is kept from before your first save. It is a safety net if a save damages the file or you want to return the entire PDF to its starting version. Deleting an added text box cannot repair a damaged PDF. This copy does not expire, and there is no new copy for every edit.' });
+    this.contentEl.createEl('p', { text: 'Original PDF: one full copy is kept from before your first save. Use Restore original if you later want to return the whole PDF to that starting version. This copy does not expire, and there is no new copy for every edit.' });
     this.contentEl.createEl('p', { text: 'Before restore: if you restore the original, PDF Editor first keeps a copy of your current PDF so you can reverse that restore.' });
     this.contentEl.createEl('p', { text: 'Temporary draft: unsaved changes may be kept here so they can be recovered after a crash. Drafts are removed after a successful save or when you choose to discard edits.' });
     this.contentEl.createEl('p', { text: 'Older copies from previous versions are also kept. Safety copies may not follow your vault sync settings, so copy this folder separately before removing the plugin.' });

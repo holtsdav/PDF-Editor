@@ -31,7 +31,7 @@ The editor uses Obsidian's theme, icons, existing embeds and vault storage. A co
 
 ## Recovery
 
-Saved text boxes and drawings are stored in the normal PDF, where they remain editable. Safety copies are separate whole-PDF files used to restore an earlier version or recover unsaved work. The original copy protects against a damaged save; deleting an added box cannot repair a damaged PDF. There is no backup for every save, line or character. Deleting safety copies does not remove saved edits or make them uneditable. Regular Undo uses the current editing session and is not stored in these copies; its history is lost when that session ends.
+Saved text boxes and drawings are stored in the normal PDF, where they remain editable. Safety copies are separate whole-PDF files used to restore an earlier version or recover unsaved work. The original copy lets you return the whole PDF to its pre-edit version after the current editing session and its Undo history have ended. It also provides a fallback if a rare write failure damages the PDF. There is no backup for every save, line or character. Deleting safety copies does not remove saved edits or make them uneditable.
 
 Before the first overwrite, one verified **original.pdf** is retained in the plugin's hidden recovery storage (`.obsidian/plugins/pdf-form-studio/recovery`, or the vault's configured settings directory). Further saves reuse it. Checksums are verified before writing or restoring. There is no backup folder in the note list.
 
