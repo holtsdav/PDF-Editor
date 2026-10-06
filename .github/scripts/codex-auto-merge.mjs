@@ -106,11 +106,11 @@ async function processPr(pr) {
   const newerRequestPending = latestRequest &&
     Date.parse(latestRequest.created_at) > review?.completed;
   const request = review?.manual && !newerRequestPending ? latestRequest : null;
-  const reactionPath = review?.manual
-    ? request && `/repos/${owner}/${repo}/issues/comments/${request.id}/reactions`
-    : `${issuePath}/reactions`;
-  const reactions = reactionPath ? await allPages(reactionPath) : [];
+  const reactionPaths = [`${issuePath}/reactions`];
+  if (request) reactionPaths.push(`/repos/${owner}/${repo}/issues/comments/${request.id}/reactions`);
+  const reactions = (await Promise.all(reactionPaths.map(allPages))).flat();
   const clean = !newerRequestPending && !hasFindings &&
+    (!review?.manual || Boolean(request)) &&
     review?.completed >= lastBaseChange &&
     Number.isFinite(review?.completed) && reactions.some((reaction) =>
       reaction.user?.login === bot && reaction.content === '+1' &&
