@@ -56,7 +56,7 @@ export class RecoveryCopies {
     const bytes = await this.store.read(path);
     if (!bytes) throw new Error('This recovery copy was moved or removed.');
     const expected = kind === 'original' ? record.originalHash : record.recoveryHash;
-    if (expected && await hash(bytes) !== expected) throw new Error('The recovery copy changed outside PDF Form Studio. The PDF has not been replaced.');
+    if (expected && await hash(bytes) !== expected) throw new Error('The recovery copy changed outside PDF Editor. The PDF has not been replaced.');
     return bytes;
   }
 
@@ -88,7 +88,7 @@ export class RecoveryCopies {
         throw new Error('The original recovery copy was removed. Restore the missing copy before saving; it will not be replaced with a newer PDF.');
       } else {
         const actual = await hash(existing);
-        if (record.originalHash && record.originalHash !== actual) throw new Error('The original recovery copy changed outside PDF Form Studio. Your pending text is kept; recover the backup before saving.');
+        if (record.originalHash && record.originalHash !== actual) throw new Error('The original recovery copy changed outside PDF Editor. Your pending text is kept; recover the backup before saving.');
         record.originalHash = actual;
       }
     }

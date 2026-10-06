@@ -1,6 +1,6 @@
 Third-party notices bundled in main.js so the three Obsidian install assets include these licenses.
 
-PDF Form Studio — original code
+PDF Editor — original code
 ===============================
 MIT License
 

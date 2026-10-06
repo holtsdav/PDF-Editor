@@ -1,5 +1,5 @@
 {
-  "name": "pdf-form-studio",
+  "name": "pdf-editor",
   "version": "0.7.6",
   "private": true,
   "description": "Integrated PDF editing development beta for Obsidian with mixed-object selection, automatic saving and recovery.",

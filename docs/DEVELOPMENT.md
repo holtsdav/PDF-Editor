@@ -35,7 +35,7 @@ The audited writer also checkpoints explicit saves before source replacement. `d
 2. Run `npm run check` for lint, integration tests, TypeScript, build and metadata checks.
 3. Open an isolated Obsidian vault with a `.obsidian` directory.
 4. Build and run `npm run install:dev -- "/absolute/path/to/development-vault"`.
-5. Enable PDF Form Studio in Community plugins and test anonymous forms/worksheets.
+5. Enable PDF Editor in Community plugins and test anonymous forms/worksheets.
 6. Rebuild/copy and use **Reload app without saving**, after PDF changes show **Saved**.
 
 The installer copies only the three assets, does not enable plugins, refuses symlinked destinations and supports standard `.obsidian` configuration directories. For a custom configuration directory, copy assets manually. `npm run dev` watches/builds but does not install/reload.
