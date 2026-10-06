@@ -6,6 +6,8 @@ The current source adds recovery storage size/folder controls, guarded cleanup, 
 
 On 2026-10-06, the 0.7.11 build was installed and enabled in a disposable scratch vault in Obsidian 1.14.4 on macOS. The settings panel showed the 25-page limit and recovery usage; **Open folder** opened the hidden recovery directory in Finder. With automatic detection enabled, a 32-page PDF displayed the limit skip message. Direct navigation from page 1 to 32 and back rendered the selected page. A newly authored text answer was saved; independent PDF-LIB inspection of the source confirmed its value, and the hidden directory contained one `original.pdf`. The scratch test did not exercise the clear button, damaged-source export, a long continuous wheel-scroll trace, or memory measurement inside Obsidian. External-writer coordination and interrupted rename reconciliation remain open.
 
+A subsequent `npm audit --omit=dev --audit-level=high` completed against npm's registry and found zero production dependency advisories. The latest Settings text was rebuilt and passed the repository checks after this app pass; its changed wording was not reinstalled in the scratch vault.
+
 ## Toolbar top offset and release review
 
 Checked on 2026-10-06. `npm run check` passes **155 tests**, lint, TypeScript, production build and plugin validation. Preferences tests cover the default, valid value and rejection of invalid/out-of-range stored values; the surface test checks initial application, live updates and listener disposal. `npm run test:stress` passes all four workloads; the 24 MiB image workload still shows notable latency and process memory use. A fresh `npm audit` could not complete because the terminal could not reach the npm registry.
