@@ -6,6 +6,8 @@ The current source adds recovery storage size/folder controls, guarded cleanup, 
 
 On 2026-10-06, the 0.7.11 build was installed and enabled in a disposable scratch vault in Obsidian 1.14.4 on macOS. The settings panel showed the 25-page limit and recovery usage; **Open folder** opened the hidden recovery directory in Finder. With automatic detection enabled, a 32-page PDF displayed the limit skip message. Direct navigation from page 1 to 32 and back rendered the selected page. A newly authored text answer was saved; independent PDF-LIB inspection of the source confirmed its value, and the hidden directory contained one `original.pdf`. The scratch test did not exercise the clear button, damaged-source export, a long continuous wheel-scroll trace, or memory measurement inside Obsidian. External-writer coordination and interrupted rename reconciliation remain open.
 
+The latest 0.7.11 build was copied into that disposable vault and the plugin was disabled and re-enabled to load it. The beta safety-copy explanation and default-on **Keep original copies for new PDFs** toggle appeared in Obsidian. Switching it off persisted `false` while the existing indexed original remained on disk; switching it on persisted `true` again. The UI deletion action was not exercised. The automated vault test covers an actual save with new-original creation disabled and the effect of clearing copies while disabled.
+
 A subsequent `npm audit --omit=dev --audit-level=high` completed against npm's registry and found zero production dependency advisories. The latest Settings text was rebuilt and passed the repository checks after this app pass; its changed wording was not reinstalled in the scratch vault.
 
 ## Toolbar top offset and release review
