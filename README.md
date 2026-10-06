@@ -2,7 +2,7 @@
 
 Fill PDF text fields, type answers on printed worksheets, highlight and scribble directly inside Obsidian notes. Text is saved into the vault PDF as editable AcroForm fields; marks use standard ink annotations with appearance streams for other viewers and printing.
 
-**Version 0.7.6: integrated editor development beta.** Ordinary PDF embeds and PDF tabs use a persistent PDF.js editing surface. Saving no longer replaces its page canvases, text controls or drawing layers. Development is private in [holtsdav/BetterPDF](https://github.com/holtsdav/BetterPDF); this is not yet a published Community plugin. See [the test record](docs/TESTING.md) for exact coverage and limitations.
+**Version 0.7.6: integrated editor development beta.** Ordinary PDF embeds and PDF tabs use a persistent PDF.js editing surface. Saving no longer replaces its page canvases, text controls or drawing layers. Development is private in [holtsdav/PDF_Editor](https://github.com/holtsdav/PDF_Editor); this is not yet a published Community plugin. See [the test record](docs/TESTING.md) for exact coverage and limitations.
 
 The current working tree has undergone a [production-readiness audit](docs/PRODUCTION_AUDIT.md): 88 regression tests and four stress workloads pass, including interrupted writes and large documents. It remains a beta: simultaneous external writers, crash recovery during file moves and large-file resource use still limit production readiness.
 
