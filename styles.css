@@ -241,6 +241,9 @@
 .pfs-tool-popover button:hover { filter: brightness(0.94); }
 @media (prefers-reduced-motion: no-preference) { .pfs-tool-popover button, .pfs-tools-host button { transition: background-color 120ms ease-out; } }
 .pfs-recovery-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; border-top: 1px solid var(--background-modifier-border); }
+.pfs-safety-heading { margin: 24px 0 12px; font-size: var(--font-ui-medium); font-weight: var(--font-semibold); }
+.pfs-safety-intro { margin: 0 0 14px; }
+.pfs-safety-usage { margin: 12px 0; color: var(--text-muted); font-size: var(--font-ui-small); }
 
 .pfs-answer-suggestions { position: absolute; inset: 0; z-index: 6; pointer-events: none; }
 .pfs-page button.pfs-answer-suggestion { position: absolute; pointer-events: auto; cursor: text; padding: 0; min-height: 0; border: 1px dashed #1476e5; border-radius: 2px; background: rgb(20 118 229 / 8%); box-shadow: none; }

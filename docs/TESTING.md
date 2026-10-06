@@ -8,6 +8,8 @@ On 2026-10-06, the 0.7.11 build was installed and enabled in a disposable scratc
 
 The latest 0.7.11 build was copied into that disposable vault and the plugin was disabled and re-enabled to load it. The beta safety-copy explanation and default-on **Keep original copies for new PDFs** toggle appeared in Obsidian. Switching it off persisted `false` while the existing indexed original remained on disk; switching it on persisted `true` again. The UI deletion action was not exercised. The automated vault test covers an actual save with new-original creation disabled and the effect of clearing copies while disabled.
 
+The shortened safety-copy Settings section was rebuilt, installed and reloaded in the same scratch vault. A visual check confirmed the section heading and explanatory paragraph share the same left edge; the toggle, storage count, folder button and delete action remained visible.
+
 A subsequent `npm audit --omit=dev --audit-level=high` completed against npm's registry and found zero production dependency advisories. The latest Settings text was rebuilt and passed the repository checks after this app pass; its changed wording was not reinstalled in the scratch vault.
 
 ## Toolbar top offset and release review
