@@ -75,7 +75,7 @@ async function processPr(pr) {
   ]);
   const review = completedReview(comments, sha);
   const request = review?.manual && comments
-    .filter((comment) => comment.body?.trim() === '@codex review' &&
+    .filter((comment) => /^@codex review(?:\s|$)/i.test(comment.body?.trim() ?? '') &&
       Date.parse(comment.created_at) <= review.completed)
     .at(-1);
   const reactionPath = review?.manual
