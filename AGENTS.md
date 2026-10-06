@@ -1,4 +1,4 @@
-# PDF_Editor / PDF Form Studio
+# PDF_Editor / PDF Editor
 
 This repository contains research and a first text editing development beta for Obsidian. Read `README.md`, `docs/RESEARCH.md`, `docs/ROADMAP.md`, and `docs/TESTING.md` before extending editing features. Keep implementation status accurate in the README and manifest description.
 

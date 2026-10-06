@@ -24,7 +24,7 @@ export async function migrateRecovery(store: MigrationStore, root: string, recor
     await store.write(receipt, JSON.stringify({ target }));
   }
   if (!await store.exists(target)) {
-    if (!await store.exists(LEGACY_BACKUP_ROOT)) throw new Error('The recovery folder was moved outside PDF Form Studio during migration.');
+    if (!await store.exists(LEGACY_BACKUP_ROOT)) throw new Error('The recovery folder was moved outside PDF Editor during migration.');
     await store.rename(LEGACY_BACKUP_ROOT, target);
   }
   for (const record of Object.values(records)) for (const kind of ['original', 'recovery'] as const) {

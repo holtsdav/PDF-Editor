@@ -15,7 +15,7 @@ const build = await context({
   sourcemap: production ? false : 'inline',
   minify: production,
   logLevel: 'info',
-  banner: { js: `/* PDF Form Studio | MIT | https://github.com/holtsdav/PDF_Editor\n${notices}\n*/` }
+  banner: { js: `/* PDF Editor | MIT | https://github.com/holtsdav/PDF_Editor\n${notices}\n*/` }
 });
 
 if (production) {

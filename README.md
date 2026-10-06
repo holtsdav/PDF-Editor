@@ -1,4 +1,4 @@
-# PDF Form Studio
+# PDF Editor
 
 Fill PDF text fields, type answers on printed worksheets, highlight and scribble directly inside Obsidian notes. Text is saved into the vault PDF as editable AcroForm fields; marks use standard ink annotations with appearance streams for other viewers and printing.
 
@@ -49,7 +49,7 @@ The plugin uploads nothing. Saved PDFs follow normal vault sync; hidden drafts a
 
 ## Install and develop
 
-Copy `main.js`, `manifest.json` and `styles.css` into `.obsidian/plugins/pdf-form-studio/`, then enable **PDF Form Studio** in Community plugins. Release tags create private **draft** releases with those assets.
+Copy `main.js`, `manifest.json` and `styles.css` into `.obsidian/plugins/pdf-form-studio/`, then enable **PDF Editor** in Community plugins. The installed ID remains `pdf-form-studio` for compatibility. Release tags create private **draft** releases with those assets.
 
 Use Node.js 24:
 

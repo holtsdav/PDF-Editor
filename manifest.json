@@ -1,6 +1,6 @@
 {
   "id": "pdf-form-studio",
-  "name": "PDF Form Studio",
+  "name": "PDF Editor",
   "version": "0.7.6",
   "minAppVersion": "1.13.7",
   "description": "Integrated PDF editing beta with answer-line detection inside frames, direct filling, held shapes, automatic saving and recovery.",

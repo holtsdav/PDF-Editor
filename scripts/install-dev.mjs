@@ -28,4 +28,4 @@ for (const name of ['main.js', 'manifest.json', 'styles.css']) {
   }
   await copyFile(name, destination);
 }
-console.log(`Installed development build in ${directory}. Enable PDF Form Studio in Obsidian's community plugin settings.`);
+console.log(`Installed development build in ${directory}. Enable PDF Editor in Obsidian's community plugin settings.`);
