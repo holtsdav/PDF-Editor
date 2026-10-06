@@ -29,15 +29,15 @@
   "devDependencies": {
     "@eslint/js": "10.0.1",
     "@types/jsdom": "30.0.0",
-    "@types/node": "26.6.4",
+    "@types/node": "24.19.1",
     "esbuild": "0.28.2",
     "eslint": "10.12.0",
     "eslint-plugin-obsidianmd": "0.4.2",
     "globals": "17.13.0",
     "jsdom": "30.1.2",
     "obsidian": "1.13.1",
-    "pdfjs-dist": "6.3.289",
-    "typescript": "7.0.2",
+    "pdfjs-dist": "5.3.31",
+    "typescript": "5.9.3",
     "typescript-eslint": "8.71.0"
   },
   "overrides": {
