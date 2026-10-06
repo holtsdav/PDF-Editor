@@ -28,21 +28,20 @@ export class PdfSettingsTab extends PluginSettingTab {
         catch (error) { new Notice(`Could not save settings: ${String(error)}`); }
       }));
     this.toggle('flowAnswerLines', 'Wrap across consecutive answer lines', 'Treat closely spaced, aligned blank lines as one answer block. Text wraps along the printed rules. Applies to new answers; existing answers stay as they are.');
-    containerEl.createDiv({ cls: 'pfs-safety-heading', text: 'PDF safety copies', attr: { role: 'heading', 'aria-level': '3' } });
-    containerEl.createEl('p', { cls: 'pfs-safety-intro', text: 'Beta protection: keep one original PDF so you can restore the whole file later. Your saved edits stay editable if you turn copies off or delete them.' });
-    this.toggle('keepOriginalBackups', 'Keep originals for new PDFs', 'Off skips new originals; existing copies stay. Crash recovery for unsaved edits stays on. Turning this back on copies the PDF as it is then.');
-    const usage = new Setting(containerEl).setName('Stored copies')
-      .setDesc('One original per PDF, not one per edit.');
-    const usageText = containerEl.createEl('p', { cls: 'pfs-safety-usage', text: 'Calculating storage…' });
+    new Setting(containerEl).setName('PDF backups').setHeading();
+    this.toggle('keepOriginalBackups', 'Keep a copy of each PDF you edit', 'Because PDF Editor is in beta, it can save a separate copy before your first change to a PDF is saved. You can restore that earlier version if needed. Turning this off stops new copies. Existing copies remain.');
+    const usage = new Setting(containerEl).setName('Backup folder')
+      .setDesc('See where your PDF copies are stored.');
+    const usageText = containerEl.createEl('p', { text: 'Calculating backup storage…' });
     void this.sessions.recoveryUsage().then(value => {
-      if (usageText.isConnected) usageText.textContent = `${this.formatBytes(value.bytes)} · ${value.files} ${value.files === 1 ? 'file' : 'files'} · ${value.indexedPdfs} ${value.indexedPdfs === 1 ? 'PDF' : 'PDFs'} backed up`;
+      if (usageText.isConnected) usageText.textContent = `${this.formatBytes(value.bytes)} used · ${value.indexedPdfs} ${value.indexedPdfs === 1 ? 'PDF' : 'PDFs'} backed up`;
     }).catch(error => { if (usageText.isConnected) usageText.textContent = `Could not read recovery storage: ${String(error)}`; });
     usage.addButton(button => button.setButtonText('Open folder').onClick(() => {
       void this.openRecoveryFolder().catch(error => new Notice(`Could not open recovery folder: ${String(error)}`));
     }));
-    new Setting(containerEl).setName('Delete stored copies')
-      .setDesc('Removes backups, not your PDFs or saved edits. Close PDF views and save pending edits first.')
-      .addButton(button => button.setButtonText('Delete copies…').setWarning().onClick(() => this.confirmClearRecovery()));
+    new Setting(containerEl).setName('Delete backups')
+      .setDesc('Remove these copies to free space. The PDFs in your vault stay where they are.')
+      .addButton(button => button.setButtonText('Delete backups…').setWarning().onClick(() => this.confirmClearRecovery()));
   }
 
   private formatBytes(bytes: number): string {
@@ -60,12 +59,12 @@ export class PdfSettingsTab extends PluginSettingTab {
 
   private confirmClearRecovery(): void {
     const modal = new Modal(this.app);
-    modal.setTitle('Delete all PDF safety copies?');
-    modal.contentEl.createEl('p', { text: 'Your PDFs and saved edits stay editable. This permanently removes the earlier versions used by Restore original. Future saves make new originals only while the toggle is on. Close PDF views and save pending edits first.' });
+    modal.setTitle('Delete all PDF backups?');
+    modal.contentEl.createEl('p', { text: 'This permanently removes the backup copies. Your PDFs stay in your vault. Close open PDF Editor views and save pending changes first.' });
     modal.contentEl.createEl('button', { text: 'Cancel' }).addEventListener('click', () => modal.close());
-    modal.contentEl.createEl('button', { text: 'Delete safety copies', cls: 'mod-warning' }).addEventListener('click', () => {
-      void this.sessions.clearRecoveryStorage().then(() => { modal.close(); new Notice('PDF safety copies deleted. Your PDFs are unchanged.'); this.display(); })
-        .catch(error => new Notice(`Could not delete safety copies: ${String(error)}`));
+    modal.contentEl.createEl('button', { text: 'Delete backups', cls: 'mod-warning' }).addEventListener('click', () => {
+      void this.sessions.clearRecoveryStorage().then(() => { modal.close(); new Notice('PDF backups deleted.'); this.display(); })
+        .catch(error => new Notice(`Could not delete backups: ${String(error)}`));
     });
     modal.open();
   }
