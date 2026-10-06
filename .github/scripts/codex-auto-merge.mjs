@@ -65,9 +65,31 @@ async function hasOpenCodexThread(pr) {
 }
 
 async function processPr(pr) {
-  if (pr.draft || pr.state !== 'open' || pr.base.ref !== 'main') return;
+  if (pr.draft || pr.state !== 'open') return;
   const number = pr.number;
   const sha = pr.head.sha;
+  if (pr.base.ref !== 'main') {
+    if (pr.auto_merge) {
+      const result = await api('/graphql', {
+        method: 'POST',
+        body: JSON.stringify({
+          query: 'mutation($id: ID!) { disablePullRequestAutoMerge(input: {pullRequestId: $id}) { pullRequest { number } } }',
+          variables: { id: pr.node_id },
+        }),
+      });
+      if (result.errors?.length) throw new Error(JSON.stringify(result.errors));
+    }
+    const description = 'Codex review gate applies to pull requests targeting main';
+    const statuses = await api(`/repos/${owner}/${repo}/commits/${sha}/status`);
+    const previous = statuses.statuses.find((status) => status.context === context);
+    if (previous?.state !== 'pending' || previous?.description !== description) {
+      await api(`/repos/${owner}/${repo}/statuses/${sha}`, {
+        method: 'POST',
+        body: JSON.stringify({ state: 'pending', context, description, target_url: pr.html_url }),
+      });
+    }
+    return;
+  }
   const issuePath = `/repos/${owner}/${repo}/issues/${number}`;
   const [comments, hasFindings, timeline] = await Promise.all([
     allPages(`${issuePath}/comments`),
