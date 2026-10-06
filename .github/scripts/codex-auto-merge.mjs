@@ -41,7 +41,7 @@ function completedReview(comments, sha) {
   const reviewed = row.match(/\|\s*`([0-9a-f]{7,40})`\s*\|/i)?.[1];
   const completed = row.match(/datetime="([^"]+)"/)?.[1];
   if (!reviewed || !completed || !sha.startsWith(reviewed)) return null;
-  return Date.parse(completed);
+  return { completed: Date.parse(completed), manual: row.includes('| Manual request |') };
 }
 
 async function processPr(pr) {
@@ -49,14 +49,19 @@ async function processPr(pr) {
   const number = pr.number;
   const sha = pr.head.sha;
   const issuePath = `/repos/${owner}/${repo}/issues/${number}`;
-  const [comments, reactions] = await Promise.all([
-    allPages(`${issuePath}/comments`),
-    allPages(`${issuePath}/reactions`),
-  ]);
-  const completed = completedReview(comments, sha);
-  const clean = Number.isFinite(completed) && reactions.some((reaction) =>
+  const comments = await allPages(`${issuePath}/comments`);
+  const review = completedReview(comments, sha);
+  const request = review?.manual && comments
+    .filter((comment) => comment.body?.trim() === '@codex review' &&
+      Date.parse(comment.created_at) <= review.completed)
+    .at(-1);
+  const reactionPath = review?.manual
+    ? request && `/repos/${owner}/${repo}/issues/comments/${request.id}/reactions`
+    : `${issuePath}/reactions`;
+  const reactions = reactionPath ? await allPages(reactionPath) : [];
+  const clean = Number.isFinite(review?.completed) && reactions.some((reaction) =>
     reaction.user?.login === bot && reaction.content === '+1' &&
-    Date.parse(reaction.created_at) >= completed);
+    Date.parse(reaction.created_at) >= review.completed);
   const state = clean ? 'success' : 'pending';
   const description = clean
     ? 'Codex completed this commit review with no findings'
