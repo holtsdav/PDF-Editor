@@ -1,5 +1,9 @@
 # App test record
 
+## CI cancellation-test correction — 2026-10-06
+
+The first CI run for commit `60e1ff6` failed in the full-document cancellation regression: after a fixed 25ms delay, the Ubuntu runner was still scanning page 1, while the assertion expected page 2. The fixture now exposes page-render start promises and explicitly gates page 1 before awaiting page 2. Progress, cancellation, partial-result cleanup and canvas release assertions remain intact; a bounded test timeout catches a missing transition. The test no longer depends on raster speed or competing test processes. `npm run check` passes all 123 tests, lint, TypeScript, production build and plugin validation locally. No production plugin code or PDF persistence behavior changed.
+
 ## Version 0.7.6 answer rules inside frames
 
 Checked on 2026-10-05. `npm run check` passes **123 tests**, lint, TypeScript, production build and plugin validation. Three added regressions check inset answer rules in a complete frame at two raster resolutions and multiple insets, detached fragments at either endpoint, and continued rejection of connected/interior crossings, wide vertical bars and occupied headings. A reported three-line framed answer block was reproduced in a local rendered page; the corrected detector retained the three answer rules while excluding the surrounding frame.

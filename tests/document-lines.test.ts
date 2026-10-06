@@ -2,7 +2,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { setTimeout as pause } from 'node:timers/promises';
 import { JSDOM } from 'jsdom';
 import type { Rect } from '../src/pdf/text-engine.ts';
 
@@ -41,6 +40,11 @@ function fixture(lines = [1, 2, 0, 1]) {
     const el = doc.createElement(tag); el.className = options.cls ?? ''; for (const [key, value] of Object.entries(options.attr ?? {})) el.setAttribute(key, value); this.append(el); return el;
   };
   Object.assign(dom.window.HTMLElement.prototype, { createEl: create, createDiv(this: HTMLElement, options: object) { return create.call(this, 'div', options); } });
+  const starts = lines.map(() => {
+    let resolve!: () => void;
+    const promise = new Promise<void>(done => { resolve = done; });
+    return { promise, resolve };
+  });
   const gates = new Map<number, { promise: Promise<void>; release(): void }>();
   const hold = (page: number) => { let release!: () => void; gates.set(page, { promise: new Promise<void>(resolve => { release = resolve; }), release }); return release; };
   let failPage = 0;
@@ -51,7 +55,7 @@ function fixture(lines = [1, 2, 0, 1]) {
     return { native: { div, number, viewport: viewport(1) }, page: {
       getViewport({ scale, rotation }: { scale: number; rotation: number }) { assert.equal(rotation, 0); return viewport(scale); },
       render({ canvasContext, annotationMode }: { canvasContext: { canvas: HTMLCanvasElement }; annotationMode: number }) {
-        assert.equal(annotationMode, 0); visited.push(number); peak = Math.max(peak, ++active);
+        assert.equal(annotationMode, 0); starts[index]!.resolve(); visited.push(number); peak = Math.max(peak, ++active);
         const context = contexts.get(canvasContext.canvas)!, canvas = context.canvas, sx = canvas.width / 600, sy = canvas.height / 800;
         for (let n = 0; n < count; n++) for (let y = Math.round((150 + n * 70) * sy); y < Math.round((151 + n * 70) * sy); y++) for (let x = Math.round(80 * sx); x < Math.round(320 * sx); x++) {
           const i = (y * canvas.width + x) * 4; context.data[i] = context.data[i + 1] = context.data[i + 2] = 0;
@@ -66,7 +70,7 @@ function fixture(lines = [1, 2, 0, 1]) {
   const surface = Object.assign(Object.create(PdfSurface.prototype), { root, entries, pdf: {}, editor: { setAnswerLines() {}, addSuggestedField(page: number, rect: Rect) { chosen.push({ page, rect }); } },
     session: { snapshot: { fields } }, generation: 1, closed: false, currentPage: lines.length,
     lineButton: doc.querySelector('#detect'), message: doc.querySelector('#message') }) as Harness;
-  return { surface, fields, chosen, hold, visited, canvases, peak: () => peak, cancellations: () => cancellations, fail: (page: number) => { failPage = page; }, dispose: () => { surface.cancelLineScan(); surface.clearSuggestions(); dom.window.close(); } };
+  return { surface, fields, chosen, hold, started: (page: number) => starts[page - 1]!.promise, visited, canvases, peak: () => peak, cancellations: () => cancellations, fail: (page: number) => { failPage = page; }, dispose: () => { surface.cancelLineScan(); surface.clearSuggestions(); dom.window.close(); } };
 }
 test('one scan detects every PDF page, including offscreen pages, with bounded sequential rasters', async () => {
   const f = fixture();
@@ -80,17 +84,20 @@ test('one scan detects every PDF page, including offscreen pages, with bounded s
     await f.surface.detectLines(); assert(f.surface.entries.every(entry => !entry.candidates && !entry.suggestions)); assert.equal(f.visited.length, 4);
   } finally { f.dispose(); }
 });
-test('scan progress is cancellable and partial suggestions are removed', async () => {
-  const f = fixture(); const release = f.hold(2);
+test('scan progress is cancellable and partial suggestions are removed', { timeout: 5000 }, async () => {
+  const f = fixture(); const releaseFirst = f.hold(1), release = f.hold(2);
   try {
-    const scanning = f.surface.detectLines(); await pause(25);
+    const scanning = f.surface.detectLines(); await f.started(1);
+    assert.deepEqual(f.visited, [1]); assert.match(f.surface.message.textContent!, /page 1 of 4/);
+    // Progress is synchronized with rendering, independent of runner speed.
+    releaseFirst(); await f.started(2);
     assert.match(f.surface.message.textContent!, /page 2 of 4/); assert.equal(f.surface.lineButton.getAttribute('aria-label'), 'Cancel answer-line detection');
     assert.equal(f.surface.lineButton.disabled, false); assert.equal(f.surface.entries[0]!.candidates?.length, 1);
     await f.surface.detectLines(); await scanning; release();
     assert.deepEqual(f.visited, [1, 2]); assert.equal(f.cancellations(), 1);
     assert(f.surface.entries.every(entry => !entry.candidates)); assert.match(f.surface.message.textContent!, /cancelled/);
     assert.equal(f.surface.lineButton.getAttribute('aria-busy'), null);
-  } finally { release(); f.dispose(); }
+  } finally { releaseFirst(); release(); f.dispose(); }
 });
 test('cancelled old scans cannot overwrite a restarted scan or its controls', async () => {
   const f = fixture([1, 1]), release = f.hold(1);
