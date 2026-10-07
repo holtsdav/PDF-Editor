@@ -9,7 +9,7 @@ export class PdfSettingsTab extends PluginSettingTab {
 
   display(): void {
     const { containerEl } = this; containerEl.empty();
-    new Setting(containerEl).setName('PDF toolbar top offset').setDesc('Move the PDF header and tools down inside the PDF. Floating tools stay at the top of the note.').addSlider(slider => slider
+    new Setting(containerEl).setName('PDF toolbar top offset').setDesc('Move the PDF toolbar down. When it floats, the space above it covers the PDF.').addSlider(slider => slider
       .setLimits(0, MAX_TOOLBAR_TOP_OFFSET, 1)
       .setValue(this.sessions.preferences.toolbarTopOffset)
       .setDynamicTooltip()

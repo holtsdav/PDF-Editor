@@ -16,7 +16,8 @@ import type { TextField } from '../pdf/text-engine';
 interface PageEntry { native: NativePage; page: PDFPageProxy; canvas: HTMLCanvasElement; text: HTMLElement; links: HTMLElement; version: number; painted: number; queued?: number; rendering?: RenderTask; textTask?: TextLayer; suggestions?: HTMLElement; candidates?: Rect[] }
 interface LineScan { generation: number; targets: PageEntry[]; task?: RenderTask }
 type Library = typeof import('pdfjs-dist');
-const FLOAT_EXIT_MS = 180;
+const FLOAT_EXIT_MS = 110;
+const FLOAT_SCROLL_BUFFER = 6;
 
 /** Owns the visible page lifecycle. Native reloads never replace this surface. */
 export class PdfSurface extends Component {
@@ -309,10 +310,14 @@ export class PdfSurface extends Component {
     const rect = this.root.getBoundingClientRect();
     const top = clip.top;
     const height = this.tools.offsetHeight;
+    const offset = this.sessions.preferences.toolbarTopOffset;
     const left = Math.max(rect.left, clip.left), right = Math.min(rect.right, clip.right);
     // Keep the PDF header in its normal place. Float only the editing tools
     // once their natural position reaches the top of the note.
-    if (rect.top + this.navigation.offsetHeight >= clip.top || rect.bottom <= top + height || clip.bottom <= top + height || right - left < 200 || height < 20) { hide(); return; }
+    // A small scroll buffer prevents a one-pixel reversal from repeatedly
+    // starting and cancelling the fade at the note's top edge.
+    const navThreshold = clip.top + (this.floatingHost ? FLOAT_SCROLL_BUFFER : -FLOAT_SCROLL_BUFFER);
+    if (rect.top + this.navigation.offsetHeight >= navThreshold || rect.bottom <= top + offset + height || clip.bottom <= top + offset + height || right - left < 200 || height < 20) { hide(); return; }
     this.toolbarSpacer.hidden = false; this.toolbarSpacer.style.height = `${height}px`;
     this.root.classList.add('is-floating-toolbar');
     if (this.floatingExitTimer !== undefined) { win.clearTimeout(this.floatingExitTimer); this.floatingExitTimer = undefined; }
@@ -323,7 +328,7 @@ export class PdfSurface extends Component {
       this.floatingHost.append(this.tools);
       this.root.ownerDocument.body.append(this.floatingHost);
     }
-    Object.assign(this.floatingHost.style, { top: `${top}px`, left: `${left}px`, width: `${right - left}px` });
+    Object.assign(this.floatingHost.style, { top: `${top}px`, left: `${left}px`, width: `${right - left}px`, paddingTop: `${offset}px` });
     if (entering) void this.floatingHost.offsetWidth;
     this.floatingHost.classList.add('is-visible');
   }
