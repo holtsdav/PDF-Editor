@@ -16,7 +16,7 @@ async function vault() {
   const file = { path: 'Folder/Worksheet.pdf', name: 'Worksheet.pdf', basename: 'Worksheet' } as TFile;
   const loaded = new Map<string, TFile>([[file.path, file]]);
   const encoder = new TextEncoder(), decoder = new TextDecoder(); let interrupted: string | undefined;
-  let deletionFailure: 'before' | 'after' | undefined, persistenceFailure = false;
+  let deletionFailure: 'before' | 'after' | undefined, persistenceFailure = false, corruptExport = false, exportDeleteFailure = false;
   const adapter = {
     exists: async (path: string) => files.has(path) || folders.has(path),
     read: async (path: string) => { if (!files.has(path)) throw new Error('Missing file'); return decoder.decode(files.get(path)); },
@@ -37,16 +37,21 @@ async function vault() {
       if (deletionFailure === 'after') throw new Error('Deletion failed after removing files'); }
   };
   const app = { vault: { configDir: '.obsidian', adapter, getAbstractFileByPath: (path: string) => loaded.get(path),
-    readBinary: (file: TFile) => adapter.readBinary(file.path), modifyBinary: (file: TFile, bytes: ArrayBuffer) => adapter.writeBinary(file.path, bytes),
+    readBinary: async (file: TFile) => {
+      const bytes = new Uint8Array(await adapter.readBinary(file.path));
+      return corruptExport && file.path.includes(' recovered ') ? bytes.slice(0, -1).buffer : bytes.buffer;
+    }, modifyBinary: (file: TFile, bytes: ArrayBuffer) => adapter.writeBinary(file.path, bytes),
     createBinary: async (path: string, bytes: ArrayBuffer) => { if (files.has(path)) throw new Error('Already exists');
       const created = { path, name: path.split('/').at(-1)!, basename: path.split('/').at(-1)!.replace(/\.pdf$/i, '') } as TFile;
-      await adapter.writeBinary(path, bytes); loaded.set(path, created); return created; } } } as unknown as App;
+      await adapter.writeBinary(path, bytes); loaded.set(path, created); return created; },
+    delete: async (file: TFile) => { if (exportDeleteFailure) throw new Error('Delete failed'); loaded.delete(file.path); files.delete(file.path); } } } as unknown as App;
   const records: Record<string, BackupRecord> = {};
   const create = () => new VaultSessions(app, font, records, async () => { if (persistenceFailure) throw new Error('Index write failed'); });
   const sessions = create(); await sessions.initialize();
   const draft = `${sessions.root}/drafts/${await hash(encoder.encode(file.path))}.json`;
   return { app, sessions, file, files, loaded, records, draft, create, interrupt: (path: string) => { interrupted = path; },
-    failDeletion: (phase?: 'before' | 'after') => { deletionFailure = phase; }, failPersistence: (fail: boolean) => { persistenceFailure = fail; } };
+    failDeletion: (phase?: 'before' | 'after') => { deletionFailure = phase; }, failPersistence: (fail: boolean) => { persistenceFailure = fail; },
+    corruptExports: (corrupt: boolean) => { corruptExport = corrupt; }, failExportDelete: (fail: boolean) => { exportDeleteFailure = fail; } };
 }
 
 test('a second interrupted journal write cannot destroy the only valid fallback', async () => {
@@ -115,6 +120,18 @@ test('a verified pending draft exports beside a damaged source without replacing
   assert.deepEqual(v.files.get(v.file.path), damaged);
   assert.equal((await readTextPdf(v.files.get(exported.path)!)).fields[0]!.value, 'Recovered answer');
   assert(v.files.has(v.draft), 'Export must retain the original recovery journal');
+});
+
+test('failed recovery export verification removes the unverified file and retains the draft', async () => {
+  const v = await vault(), session = await v.sessions.get(v.file);
+  session.setValue('Answer', 'Recovered answer'); await session.checkpoint();
+  v.corruptExports(true);
+  await assert.rejects(v.sessions.exportPendingDraft(v.file), /could not be verified and was removed/);
+  assert(![...v.files.keys()].some(path => path.includes(' recovered ')));
+  assert(v.files.has(v.draft));
+  v.failExportDelete(true);
+  await assert.rejects(v.sessions.exportPendingDraft(v.file), /unverified file.*could not be removed/);
+  assert([...v.files.keys()].some(path => path.includes(' recovered ')), 'a failed cleanup reports the remaining artifact');
 });
 
 test('clearing recovery storage requires closed clean sessions and resets the backup index', async () => {

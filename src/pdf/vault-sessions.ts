@@ -155,10 +155,14 @@ export class VaultSessions {
     do { path = `${folder}${file.basename} recovered ${globalThis.crypto.randomUUID().slice(0, 8)}.pdf`; }
     while (this.app.vault.getAbstractFileByPath(path));
     const created = await this.app.vault.createBinary(path, arrayBuffer(draft.bytes));
-    if (!equalBytes(new Uint8Array(await this.app.vault.readBinary(created)), draft.bytes)) {
-      throw new Error(`The exported PDF could not be verified at ${path}. The recovery draft was retained.`);
+    try {
+      if (equalBytes(new Uint8Array(await this.app.vault.readBinary(created)), draft.bytes)) return created;
+    } catch { /* Read-back failure is also an unverified export. */ }
+    try { await this.app.vault.delete(created); }
+    catch (error) {
+      throw new Error(`The exported PDF could not be verified, and the unverified file at ${path} could not be removed. Remove it manually. The recovery draft was retained. Cleanup failed: ${String(error)}`, { cause: error });
     }
-    return created;
+    throw new Error('The exported PDF could not be verified and was removed. The recovery draft was retained.');
   }
 
   /** Explicit reset only: preserve pending work and never silently expire originals. */
