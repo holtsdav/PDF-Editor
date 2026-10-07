@@ -373,9 +373,9 @@ export class PdfSurface extends Component {
     const start = this.entries.length <= MAX_AUTO_DETECT_PAGES ? 0 : this.currentPage - 1;
     const end = Math.min(this.entries.length, start + MAX_AUTO_DETECT_PAGES);
     const targets = this.entries.slice(start, end);
-    const hideRange = targets.every(entry => entry.candidates) && targets.some(entry => entry.candidates?.length);
+    const hideRange = targets.length > 0 && targets.every(entry => entry.candidates !== undefined);
     const title = this.lineScan ? 'Cancel answer-line scan'
-      : hideRange ? 'Hide detected answer lines on these pages'
+      : hideRange ? 'Clear line scan on these pages'
         : start === 0 && end === this.entries.length ? 'Detect answer lines in PDF'
         : `Detect answer lines on pages ${start + 1}–${end}`;
     return {
@@ -389,7 +389,7 @@ export class PdfSurface extends Component {
     setTooltip(this.lineButton, title);
     this.lineButton.setAttribute('aria-label', title);
     this.lineButton.setAttribute('aria-busy', this.lineScan ? 'true' : 'false');
-    this.lineButton.setAttribute('aria-pressed', [...this.scannedEntries].some(entry => entry.candidates?.length) ? 'true' : 'false');
+    this.lineButton.setAttribute('aria-pressed', this.lineScan || this.scannedEntries.size > 0 ? 'true' : 'false');
   }
   private scanCurrent(scan: LineScan): boolean { return !this.closed && this.lineScan === scan && scan.generation === this.generation; }
   private async detectPageLines(entry: PageEntry, scan: LineScan): Promise<Rect[]> {
@@ -427,7 +427,7 @@ export class PdfSurface extends Component {
     }
     if (!this.pdf || !this.editor || !targets.length || this.closed) return;
     if (targets.length > MAX_AUTO_DETECT_PAGES) throw new Error('Answer-line scans are limited to 100 pages at a time.');
-    if (targets.every(entry => entry.candidates) && targets.some(entry => entry.candidates?.length)) {
+    if (targets.every(entry => entry.candidates !== undefined)) {
       this.clearSuggestions(targets); this.message.textContent = ''; return;
     }
     this.clearSuggestions(targets);

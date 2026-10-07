@@ -109,6 +109,21 @@ test('regular compact dotted answer lines are detected once at both raster resol
     assert.equal(lines.at(-1)!.rect[3], 775, 'a legitimate bottom dotted line remains available');
   }
 });
+test('sparse but regular dotted rules remain detectable at both raster resolutions', () => {
+  for (const scale of [1, 2]) {
+    const pixels = image(scale);
+    for (let x = 70; x < 490; x += 12) pixels.ink(x, 150, 2, 2);
+    assert.deepEqual(detectAnswerLines(pixels, 600, 800).map(line => line.rect), [[70, 132, 480, 150]], `scale ${scale}`);
+  }
+});
+test('tiny rasterized dots with a repeating short-short-long gap stay detectable', () => {
+  for (const scale of [1, 2]) {
+    const pixels = image(scale);
+    for (const y of [150, 220, 300]) for (let x = 70; x < 490; x += 9)
+      for (const offset of [0, 2, 4]) pixels.ink(x + offset, y, 1, 1);
+    assert.deepEqual(detectAnswerLines(pixels, 600, 800).map(line => line.rect[3]), [150, 220, 300], `scale ${scale}`);
+  }
+});
 test('dotted patterns do not admit irregular punctuation, short ellipses, tall letter stems or occupied dot leaders', () => {
   const pixels = image();
   for (let x = 70, i = 0; x < 400; i++) { pixels.ink(x, 150, [1, 3, 2, 1][i % 4]!, 2); x += [6, 10, 4, 8][i % 4]!; }

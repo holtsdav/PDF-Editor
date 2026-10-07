@@ -26,7 +26,7 @@ interface Harness {
   detectLines(targets?: Entry[]): Promise<void>; cancelLineScan(): void; clearSuggestions(): void; refreshSuggestions(): void;
   answerLineActions(): { title: string; run(): void; clear?: () => void };
   dismissRemovedAnswer(field: { widgets: { page: number; rect: Rect }[] }): void;
-  generation: number; closed: boolean; currentPage: number; entries: Entry[]; lineScan?: object; message: HTMLElement;
+  generation: number; closed: boolean; currentPage: number; entries: Entry[]; lineScan?: object; message: HTMLElement; lineButton: HTMLButtonElement;
 }
 function fixture(lines = [1, 2, 0, 1]) {
   const dom = new JSDOM('<body><div id="root"></div><div id="message"></div></body>');
@@ -73,19 +73,21 @@ function fixture(lines = [1, 2, 0, 1]) {
   });
   const surface = Object.assign(Object.create(PdfSurface.prototype), { root, entries, pdf: {}, editor: { setAnswerLines() {}, addSuggestedField(page: number, rect: Rect) { chosen.push({ page, rect }); } },
     session: { snapshot: { fields } }, generation: 1, closed: false, currentPage: lines.length,
-    message: doc.querySelector('#message'), dismissedLines: new Set<string>(), scannedEntries: new Set<Entry>() }) as Harness;
+    message: doc.querySelector('#message'), lineButton: doc.createElement('button'), dismissedLines: new Set<string>(), scannedEntries: new Set<Entry>() }) as Harness;
   return { surface, fields, chosen, hold, started: (page: number) => starts[page - 1]!.promise, visited, canvases, peak: () => peak, cancellations: () => cancellations, fail: (page: number) => { failPage = page; }, dispose: () => { surface.cancelLineScan(); surface.clearSuggestions(); dom.window.close(); } };
 }
 test('one scan detects every PDF page, including offscreen pages, with bounded sequential rasters', async () => {
   const f = fixture();
   try {
     await f.surface.detectLines(); assert.deepEqual(f.visited, [1, 2, 3, 4]); assert.equal(f.peak(), 1);
+    assert.equal(f.surface.lineButton.getAttribute('aria-pressed'), 'true');
     assert.deepEqual(f.surface.entries.map(entry => entry.candidates?.length), [1, 2, 0, 1]);
     assert.equal(f.surface.message.textContent, '');
     assert(f.canvases.every(canvas => canvas.width === 0 && canvas.height === 0));
     const suggestion = f.surface.entries[3]!.suggestions!.querySelector<HTMLButtonElement>('button')!; suggestion.click();
     assert.equal(f.chosen[0]!.page, 4); assert.deepEqual(f.chosen[0]!.rect, [110, 650, 350, 668]);
     await f.surface.detectLines(); assert(f.surface.entries.every(entry => !entry.candidates && !entry.suggestions)); assert.equal(f.visited.length, 4);
+    assert.equal(f.surface.lineButton.getAttribute('aria-pressed'), 'false');
   } finally { f.dispose(); }
 });
 test('manual scans of a long PDF run in 100-page sections from the current page', async () => {
@@ -115,6 +117,7 @@ test('scan progress is cancellable and partial suggestions are removed', { timeo
   try {
     const scanning = f.surface.detectLines(); await f.started(1);
     assert.deepEqual(f.visited, [1]); assert.match(f.surface.message.textContent!, /page 1 of 4/);
+    assert.equal(f.surface.lineButton.getAttribute('aria-pressed'), 'true');
     // Progress is synchronized with rendering, independent of runner speed.
     releaseFirst(); await f.started(2);
     assert.match(f.surface.message.textContent!, /page 2 of 4/); assert.equal(f.surface.answerLineActions().title, 'Cancel answer-line scan');
@@ -151,7 +154,11 @@ test('a page render failure clears partial suggestions, leaves retry enabled and
 });
 test('empty PDFs complete quietly without adding fields', async () => {
   const f = fixture([0, 0, 0]);
-  try { await f.surface.detectLines(); assert.equal(f.surface.message.textContent, ''); assert.equal(f.chosen.length, 0); }
+  try {
+    await f.surface.detectLines(); assert.equal(f.surface.message.textContent, ''); assert.equal(f.chosen.length, 0);
+    assert.equal(f.surface.lineButton.getAttribute('aria-pressed'), 'true', 'a completed automatic scan is active even without matches');
+    await f.surface.detectLines(); assert.equal(f.surface.lineButton.getAttribute('aria-pressed'), 'false');
+  }
   finally { f.dispose(); }
 });
 
