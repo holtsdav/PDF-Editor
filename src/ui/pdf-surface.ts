@@ -16,6 +16,7 @@ import type { TextField } from '../pdf/text-engine';
 interface PageEntry { native: NativePage; page: PDFPageProxy; canvas: HTMLCanvasElement; text: HTMLElement; links: HTMLElement; version: number; painted: number; queued?: number; rendering?: RenderTask; textTask?: TextLayer; suggestions?: HTMLElement; candidates?: Rect[] }
 interface LineScan { generation: number; targets: PageEntry[]; task?: RenderTask }
 type Library = typeof import('pdfjs-dist');
+const FLOAT_EXIT_MS = 180;
 
 /** Owns the visible page lifecycle. Native reloads never replace this surface. */
 export class PdfSurface extends Component {
@@ -67,6 +68,7 @@ export class PdfSurface extends Component {
   private floatingFrame?: number;
   private toolbarSpacer: HTMLElement;
   private floatingHost?: HTMLElement;
+  private floatingExitTimer?: number;
 
   constructor(app: App, native: NativePdf, sessions: VaultSessions, state?: ReturnType<TextEditor['captureState']>, private autoDetectOnOpen = true) {
     super(); this.app = app; this.native = native; this.sessions = sessions; this.state = state;
@@ -266,14 +268,25 @@ export class PdfSurface extends Component {
   }
   private updateFloatingToolbar(): void {
     const win = this.root.ownerDocument.defaultView!;
-    const reset = () => {
+    const restore = () => {
+      if (this.floatingExitTimer !== undefined) win.clearTimeout(this.floatingExitTimer);
+      this.floatingExitTimer = undefined;
       if (this.floatingHost) {
         this.root.insertBefore(this.tools, this.toolbarSpacer);
         this.floatingHost.remove(); this.floatingHost = undefined;
       }
       this.root.classList.remove('is-floating-toolbar'); this.toolbarSpacer.hidden = true;
     };
-    if (!this.root.isConnected || !this.sessions.preferences.floatingToolbar) { reset(); return; }
+    if (!this.root.isConnected || !this.sessions.preferences.floatingToolbar) { restore(); return; }
+    const hide = () => {
+      if (!this.floatingHost) return;
+      if (win.matchMedia?.('(prefers-reduced-motion: reduce)').matches) { restore(); return; }
+      this.floatingHost.classList.remove('is-visible');
+      if (this.floatingExitTimer === undefined) this.floatingExitTimer = win.setTimeout(() => {
+        this.floatingExitTimer = undefined;
+        if (!this.floatingHost?.classList.contains('is-visible')) restore();
+      }, FLOAT_EXIT_MS);
+    };
     let clip = { top: 0, bottom: win.innerHeight, left: 0, right: win.innerWidth };
     // Dock to the pane's visible content, not an embed wrapper or a note
     // scroller whose top can sit well below the actual top of the pane.
@@ -299,9 +312,11 @@ export class PdfSurface extends Component {
     const left = Math.max(rect.left, clip.left), right = Math.min(rect.right, clip.right);
     // Keep the PDF header in its normal place. Float only the editing tools
     // once their natural position reaches the top of the note.
-    if (rect.top + this.navigation.offsetHeight >= clip.top || rect.bottom <= top + height || clip.bottom <= top + height || right - left < 200 || height < 20) { reset(); return; }
+    if (rect.top + this.navigation.offsetHeight >= clip.top || rect.bottom <= top + height || clip.bottom <= top + height || right - left < 200 || height < 20) { hide(); return; }
     this.toolbarSpacer.hidden = false; this.toolbarSpacer.style.height = `${height}px`;
     this.root.classList.add('is-floating-toolbar');
+    if (this.floatingExitTimer !== undefined) { win.clearTimeout(this.floatingExitTimer); this.floatingExitTimer = undefined; }
+    const entering = !this.floatingHost;
     if (!this.floatingHost) {
       this.floatingHost = this.root.ownerDocument.createElement('div');
       this.floatingHost.className = 'pfs-floating-toolbar';
@@ -309,6 +324,8 @@ export class PdfSurface extends Component {
       this.root.ownerDocument.body.append(this.floatingHost);
     }
     Object.assign(this.floatingHost.style, { top: `${top}px`, left: `${left}px`, width: `${right - left}px` });
+    if (entering) void this.floatingHost.offsetWidth;
+    this.floatingHost.classList.add('is-visible');
   }
   private zoom(delta: number): void { this.scale = Math.max(0.35, Math.min(3, (typeof this.scale === 'number' ? this.scale : this.entries[this.currentPage - 1]?.native.viewport.scale ?? 1) + delta)); this.layout(); }
   private requestVisible(): void {
@@ -545,6 +562,7 @@ export class PdfSurface extends Component {
     this.closed = true; this.generation++; this.searchGeneration++;
     if (this.frame !== undefined) this.root.ownerDocument.defaultView!.cancelAnimationFrame(this.frame);
     if (this.floatingFrame !== undefined) this.root.ownerDocument.defaultView!.cancelAnimationFrame(this.floatingFrame);
+    if (this.floatingExitTimer !== undefined) this.root.ownerDocument.defaultView!.clearTimeout(this.floatingExitTimer);
     this.floatingHost?.remove(); this.floatingHost = undefined;
     if (this.editor) this.removeChild(this.editor);
     for (const entry of this.entries) { entry.version++; entry.rendering?.cancel(); entry.textTask?.cancel(); }

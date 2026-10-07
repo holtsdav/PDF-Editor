@@ -93,7 +93,7 @@ test('one scan detects every PDF page, including offscreen pages, with bounded s
     assert.equal(f.surface.lineButton.getAttribute('aria-pressed'), 'false');
   } finally { f.dispose(); }
 });
-test('floating editing tools dock at the pane top and leave when the PDF scrolls away', () => {
+test('floating editing tools ease in and out, reverse smoothly, and dock at the pane top', async () => {
   const dom = new JSDOM('<body><div id="pane" class="view-content"><div id="note" class="cm-scroller"><div id="wrapper"><div id="host"><div id="pdf"><div id="nav"></div><div id="tools"></div><div id="spacer" hidden></div></div></div></div></div></div></body>');
   try {
     const doc = dom.window.document, pane = doc.querySelector<HTMLElement>('#pane')!, note = doc.querySelector<HTMLElement>('#note')!, wrapper = doc.querySelector<HTMLElement>('#wrapper')!, host = doc.querySelector<HTMLElement>('#host')!, root = doc.querySelector<HTMLElement>('#pdf')!;
@@ -121,6 +121,7 @@ test('floating editing tools dock at the pane top and leave when the PDF scrolls
     top = -250; surface.updateFloatingToolbar();
     assert.equal(root.classList.contains('is-floating-toolbar'), true);
     const floatingHost = doc.querySelector<HTMLElement>('body > .pfs-floating-toolbar')!;
+    assert.equal(floatingHost.classList.contains('is-visible'), true);
     assert.equal(floatingHost.style.top, '100px'); assert.equal(floatingHost.style.left, '70px');
     assert.equal(floatingHost.style.width, '560px');
     assert.deepEqual([...floatingHost.children], [tools]);
@@ -129,9 +130,21 @@ test('floating editing tools dock at the pane top and leave when the PDF scrolls
     preferences.toolbarTopOffset = 0; surface.updateFloatingToolbar();
     assert.equal(floatingHost.style.top, '100px', 'the inline offset does not push floating controls into the PDF');
     bottom = 140; surface.updateFloatingToolbar();
+    assert.equal(floatingHost.classList.contains('is-visible'), false);
+    assert.equal(floatingHost.isConnected, true, 'the toolbar stays mounted while fading out');
+    bottom = 550; surface.updateFloatingToolbar();
+    assert.equal(floatingHost.classList.contains('is-visible'), true, 'scrolling back reverses the exit');
+    await new Promise(resolve => setTimeout(resolve, 220));
+    assert.equal(floatingHost.isConnected, true, 'the cancelled exit cannot remove the toolbar');
+    bottom = 140; surface.updateFloatingToolbar();
+    await new Promise(resolve => setTimeout(resolve, 220));
     assert.equal(root.classList.contains('is-floating-toolbar'), false); assert.equal(toolbarSpacer.hidden, true);
     assert.equal(doc.querySelector('.pfs-floating-toolbar'), null);
     assert.deepEqual([...root.children], [navigation, tools, toolbarSpacer]);
+    Object.defineProperty(dom.window, 'matchMedia', { value: () => ({ matches: true }) });
+    bottom = 550; surface.updateFloatingToolbar();
+    bottom = 140; surface.updateFloatingToolbar();
+    assert.equal(doc.querySelector('.pfs-floating-toolbar'), null, 'reduced motion restores the inline toolbar immediately');
   } finally { dom.window.close(); }
 });
 test('manual scans of a long PDF run in 100-page sections from the current page', async () => {
