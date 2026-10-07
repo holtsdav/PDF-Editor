@@ -138,7 +138,9 @@ export class PdfSurface extends Component {
     this.registerDomEvent(this.scroller, 'scroll', () => this.requestVisible(), { passive: true });
     this.registerDomEvent(doc, 'scroll', () => this.queueFloatingToolbar(), true);
     this.registerDomEvent(doc.defaultView!, 'resize', () => this.queueFloatingToolbar());
-    this.registerDomEvent(this.root, 'keydown', event => {
+    this.registerDomEvent(doc.defaultView!, 'keydown', event => {
+      const target = event.target;
+      if (!(target instanceof doc.defaultView!.Node) || (!this.root.contains(target) && !this.floatingHost?.contains(target))) return;
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f') { event.preventDefault(); event.stopPropagation(); this.showSearch(); }
     }, true);
     const resize = new doc.defaultView!.ResizeObserver(() => { this.layout(); this.queueFloatingToolbar(); });
@@ -396,7 +398,7 @@ export class PdfSurface extends Component {
     try { await task.promise; } finally { if (entry.rendering === task) entry.rendering = undefined; if (this.activeRender === entry) this.activeRender = undefined; }
     if (this.closed || version !== entry.version || !entry.native.div.isConnected || !this.nearViewport(entry)) return;
     entry.canvas.width = canvas.width; entry.canvas.height = canvas.height; entry.canvas.getContext('2d')!.drawImage(canvas, 0, 0);
-    entry.painted = version; this.paintedEntries.add(entry);
+    this.paintedEntries.add(entry);
     const content = await entry.page.getTextContent();
     if (this.closed || version !== entry.version || !this.nearViewport(entry)) return;
     entry.text.replaceChildren(); entry.textTask = new this.library!.TextLayer({ container: entry.text, viewport, textContentSource: content });
@@ -413,6 +415,7 @@ export class PdfSurface extends Component {
       if (annotation.url && /^(https?:|mailto:)/i.test(annotation.url)) { link.href = annotation.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; }
       else if (annotation.dest) { link.href = '#'; link.onclick = event => { event.preventDefault(); void this.destination(annotation.dest!).catch(error => this.fail(error)); }; }
     }
+    entry.painted = version;
   }
   private clearSuggestions(targets: PageEntry[] = this.entries): void {
     for (const entry of targets) { entry.suggestions?.remove(); entry.suggestions = undefined; entry.candidates = undefined; this.scannedEntries.delete(entry); }

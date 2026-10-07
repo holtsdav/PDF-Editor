@@ -392,6 +392,26 @@ test('selected PDF elements copy, paste and duplicate without intercepting text 
     assert.equal(nativeCopy.defaultPrevented, false);
   } finally { f.dispose(); }
 });
+test('Save shortcut remains scoped to the PDF after its toolbar floats outside the editor', async () => {
+  const f = await fixture();
+  try {
+    const host = f.doc.createElement('div'); host.className = 'pfs-floating-toolbar';
+    const navigation = host.appendChild(f.doc.createElement('button'));
+    const search = host.appendChild(f.doc.createElement('input'));
+    host.append(f.doc.querySelector('#tools')!); f.doc.body.append(host);
+    let saves = 0;
+    (f.editor as unknown as { save(): Promise<void> }).save = async () => { saves++; };
+    for (const target of [navigation, search]) {
+      const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 's', metaKey: true, bubbles: true, cancelable: true });
+      target.dispatchEvent(event);
+      assert.equal(event.defaultPrevented, true);
+    }
+    assert.equal(saves, 2);
+    const outside = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 's', metaKey: true, bubbles: true, cancelable: true });
+    f.doc.querySelector('#outside')!.dispatchEvent(outside);
+    assert.equal(outside.defaultPrevented, false);
+  } finally { f.dispose(); }
+});
 test('rounded browser scroll measurements do not append an unnecessary ruled row', async () => {
   const f = await fixture();
   try {

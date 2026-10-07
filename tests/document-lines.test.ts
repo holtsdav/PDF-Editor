@@ -158,6 +158,46 @@ test('floating PDF controls and editing tools stay together without flickering a
     assert.equal(doc.querySelector('.pfs-floating-toolbar'), null, 'reduced motion restores the inline toolbar immediately');
   } finally { dom.window.close(); }
 });
+test('a page scrolled away during text loading can render its text and links on return', async () => {
+  const dom = new JSDOM('<body><div id="root"><div id="page"></div></div></body>');
+  try {
+    const doc = dom.window.document, div = doc.querySelector<HTMLElement>('#page')!;
+    Object.defineProperties(div, { offsetTop: { value: 0 }, offsetHeight: { value: 800 } });
+    const scroller = doc.createElement('div');
+    Object.defineProperties(scroller, { clientWidth: { value: 600 }, clientHeight: { value: 800 }, scrollTop: { value: 0, writable: true } });
+    dom.window.HTMLCanvasElement.prototype.getContext = (() => ({ drawImage() {} })) as unknown as typeof dom.window.HTMLCanvasElement.prototype.getContext;
+    let releaseText!: () => void, textStarted!: () => void, reads = 0;
+    const deferred = new Promise<void>(resolve => { releaseText = resolve; });
+    const started = new Promise<void>(resolve => { textStarted = resolve; });
+    const text = doc.createElement('div'), links = doc.createElement('div');
+    Object.assign(dom.window.HTMLElement.prototype, { createEl(this: HTMLElement, tag: string, options: { cls?: string; attr?: Record<string, string> }) {
+      const element = doc.createElement(tag); element.className = options.cls ?? '';
+      for (const [key, value] of Object.entries(options.attr ?? {})) element.setAttribute(key, value);
+      this.append(element); return element;
+    } });
+    const viewport = { width: 600, height: 800, convertToViewportRectangle: (rect: number[]) => rect };
+    const entry = { native: { div, number: 1, viewport: { scale: 1, rotation: 0 } }, version: 1, painted: -1,
+      canvas: doc.createElement('canvas'), text, links, page: {
+        getViewport: () => viewport,
+        render: () => ({ promise: Promise.resolve(), cancel() {} }),
+        async getTextContent() { if (++reads === 1) { textStarted(); await deferred; } return {}; },
+        async getAnnotations() { return [{ subtype: 'Link', rect: [1, 2, 3, 4], url: 'https://example.com' }]; }
+      } };
+    const surface = Object.assign(Object.create(PdfSurface.prototype), { root: doc.querySelector('#root'), scroller, entries: [entry],
+      paintedEntries: new Set(), closed: false, currentPage: 1, renderQueue: Promise.resolve(),
+      pageInput: doc.createElement('input'), previous: doc.createElement('button'), next: doc.createElement('button'),
+      library: { TextLayer: class { private readonly options: { container: HTMLElement }; constructor(options: { container: HTMLElement }) { this.options = options; } async render() { this.options.container.textContent = 'Page text'; } } },
+      highlight() {}, updateLineButton() {}, fail(error: unknown) { throw error; } }) as { paintVisible(): void; renderQueue: Promise<void> };
+    surface.paintVisible();
+    await started;
+    scroller.scrollTop = 1500; releaseText(); await surface.renderQueue;
+    assert.equal(entry.painted, -1, 'the bitmap alone must not count as a finished page');
+    scroller.scrollTop = 0; surface.paintVisible(); await surface.renderQueue;
+    assert.equal(text.textContent, 'Page text');
+    assert.equal(links.querySelectorAll('a').length, 1);
+    assert.equal(entry.painted, 1);
+  } finally { dom.window.close(); }
+});
 test('manual scans of a long PDF run in 100-page sections from the current page', async () => {
   const f = fixture(Array(205).fill(0));
   try {

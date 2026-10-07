@@ -16,6 +16,7 @@ async function vault() {
   const file = { path: 'Folder/Worksheet.pdf', name: 'Worksheet.pdf', basename: 'Worksheet' } as TFile;
   const loaded = new Map<string, TFile>([[file.path, file]]);
   const encoder = new TextEncoder(), decoder = new TextDecoder(); let interrupted: string | undefined;
+  let deletionFailure: 'before' | 'after' | undefined, persistenceFailure = false;
   const adapter = {
     exists: async (path: string) => files.has(path) || folders.has(path),
     read: async (path: string) => { if (!files.has(path)) throw new Error('Missing file'); return decoder.decode(files.get(path)); },
@@ -30,8 +31,10 @@ async function vault() {
     stat: async (path: string) => files.has(path) ? { size: files.get(path)!.length } : null,
     list: async (path: string) => ({ files: [...files.keys()].filter(item => item.startsWith(path + '/') && !item.slice(path.length + 1).includes('/')),
       folders: [...folders].filter(item => item.startsWith(path + '/') && !item.slice(path.length + 1).includes('/')) }),
-    rmdir: async (path: string) => { for (const name of files.keys()) if (name.startsWith(path + '/')) files.delete(name);
-      for (const name of folders) if (name === path || name.startsWith(path + '/')) folders.delete(name); }
+    rmdir: async (path: string) => { if (deletionFailure === 'before') throw new Error('Deletion failed');
+      for (const name of files.keys()) if (name.startsWith(path + '/')) files.delete(name);
+      for (const name of folders) if (name === path || name.startsWith(path + '/')) folders.delete(name);
+      if (deletionFailure === 'after') throw new Error('Deletion failed after removing files'); }
   };
   const app = { vault: { configDir: '.obsidian', adapter, getAbstractFileByPath: (path: string) => loaded.get(path),
     readBinary: (file: TFile) => adapter.readBinary(file.path), modifyBinary: (file: TFile, bytes: ArrayBuffer) => adapter.writeBinary(file.path, bytes),
@@ -39,10 +42,11 @@ async function vault() {
       const created = { path, name: path.split('/').at(-1)!, basename: path.split('/').at(-1)!.replace(/\.pdf$/i, '') } as TFile;
       await adapter.writeBinary(path, bytes); loaded.set(path, created); return created; } } } as unknown as App;
   const records: Record<string, BackupRecord> = {};
-  const create = () => new VaultSessions(app, font, records, async () => {});
+  const create = () => new VaultSessions(app, font, records, async () => { if (persistenceFailure) throw new Error('Index write failed'); });
   const sessions = create(); await sessions.initialize();
   const draft = `${sessions.root}/drafts/${await hash(encoder.encode(file.path))}.json`;
-  return { app, sessions, file, files, loaded, records, draft, create, interrupt: (path: string) => { interrupted = path; } };
+  return { app, sessions, file, files, loaded, records, draft, create, interrupt: (path: string) => { interrupted = path; },
+    failDeletion: (phase?: 'before' | 'after') => { deletionFailure = phase; }, failPersistence: (fail: boolean) => { persistenceFailure = fail; } };
 }
 
 test('a second interrupted journal write cannot destroy the only valid fallback', async () => {
@@ -125,6 +129,34 @@ test('clearing recovery storage requires closed clean sessions and resets the ba
   assert.deepEqual(after, { files: 0, bytes: 0, indexedPdfs: 0 });
   const reopened = await v.sessions.get(v.file); reopened.setValue('Answer', 'Another answer'); await reopened.save();
   assert(v.sessions.backupFor(v.file), 'The next save must establish a new original copy');
+});
+
+test('interrupted backup deletion retains the index and cannot silently replace an original', async () => {
+  const v = await vault(), session = await v.sessions.get(v.file);
+  session.setValue('Answer', 'Saved answer'); await session.save();
+  const original = v.sessions.backupFor(v.file)!;
+  v.failDeletion('before');
+  await assert.rejects(v.sessions.clearRecoveryStorage(), /Deletion failed/);
+  assert.equal(v.sessions.backupFor(v.file), original);
+  assert(v.files.has(original), 'a failed delete leaves the original reachable');
+  v.failDeletion('after');
+  await assert.rejects(v.sessions.clearRecoveryStorage(), /Deletion failed/);
+  assert.equal(v.sessions.backupFor(v.file), original, 'even a partial delete cannot drop the original record');
+  assert.equal(v.files.has(original), false);
+  session.setValue('Answer', 'Later answer');
+  await assert.rejects(session.save(), /original recovery copy was removed/);
+  assert.equal((await readTextPdf(v.files.get(v.file.path)!)).fields[0]!.value, 'Saved answer');
+});
+
+test('an index-write failure after deleting backups blocks new saves until cleanup is retried', async () => {
+  const v = await vault(), session = await v.sessions.get(v.file);
+  session.setValue('Answer', 'Saved answer'); await session.save();
+  const original = v.sessions.backupFor(v.file)!;
+  v.failPersistence(true);
+  await assert.rejects(v.sessions.clearRecoveryStorage(), /Index write failed/);
+  assert.equal(v.sessions.backupFor(v.file), original);
+  session.setValue('Answer', 'Later answer');
+  await assert.rejects(session.save(), /original recovery copy was removed/);
 });
 
 test('turning original copies off skips new PDFs without removing existing copies', async () => {

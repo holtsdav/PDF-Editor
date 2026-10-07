@@ -151,7 +151,7 @@ export class TextEditor extends Component {
     // Claim Save at the window capture phase, scoped to this editor's controls.
     this.registerDomEvent(doc.defaultView!, 'keydown', event => {
       const target = event.target;
-      if (!(target instanceof doc.defaultView!.Node) || (!native.element.contains(target) && !(target === doc.body && (this.selection?.active || (event.key === 'Escape' && this.tool !== 'select'))))) return;
+      if (!this.shortcutTarget(target) && !(target === doc.body && event.key === 'Escape' && this.tool !== 'select')) return;
       if (event.key === 'Tab' && !event.metaKey && !event.ctrlKey && !event.altKey && target instanceof doc.defaultView!.HTMLElement
         && target.dataset.pdfField && !event.isComposing && this.navigateAnswerLine(target.dataset.pdfField, event.shiftKey ? -1 : 1)) {
         event.preventDefault(); event.stopImmediatePropagation(); return;
@@ -314,7 +314,9 @@ export class TextEditor extends Component {
   }
   private shortcutTarget(target: EventTarget | null): boolean {
     const doc = this.native.element.ownerDocument;
+    const floatingHost = this.native.toolbarHost().parentElement;
     return target instanceof doc.defaultView!.Node && (this.native.element.contains(target)
+      || !!floatingHost?.classList.contains('pfs-floating-toolbar') && floatingHost.contains(target)
       || target === doc.body && !!this.selection?.active);
   }
   private selectedObjects(): PdfObject[] {

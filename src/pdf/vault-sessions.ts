@@ -174,13 +174,15 @@ export class VaultSessions {
       if (await this.app.vault.adapter.exists(drafts) && (await this.app.vault.adapter.list(drafts)).files.length) {
         throw new Error('Pending or leftover PDF drafts exist. Open or export those PDFs and reach Saved before clearing recovery storage.');
       }
+      const adapter = this.app.vault.adapter;
+      if (await adapter.exists(this.root)) await adapter.rmdir(this.root, true);
+      await this.ensureFolder(this.root);
+      // Keep records until deletion has succeeded. A failed or partial delete
+      // must leave surviving originals indexed and missing ones blocking saves.
       const previous = Object.entries(this.backups);
       for (const key of Object.keys(this.backups)) delete this.backups[key];
       try { await this.persist(); }
       catch (error) { for (const [key, record] of previous) this.backups[key] = record; throw error; }
-      const adapter = this.app.vault.adapter;
-      if (await adapter.exists(this.root)) await adapter.rmdir(this.root, true);
-      await this.ensureFolder(this.root);
     });
   }
 
