@@ -7,6 +7,7 @@ import type { TextSession } from '../pdf/text-session';
 import { DrawHold, recognizeShape, smoothInk } from '../pdf/ink-assist';
 import type { RecognizedShape } from '../pdf/ink-assist';
 import { HeldShape } from '../pdf/held-shape';
+import { labelSvgOverlay } from './overlay-label';
 
 export type EditorTool = 'select' | 'text' | 'marker' | 'scribble' | 'eraser';
 interface InkOptions {
@@ -99,7 +100,7 @@ export class InkLayer extends Component {
     const doc = this.layer.ownerDocument;
     const group = doc.createElementNS(namespace, 'g'); group.classList.add('pdf-form-studio-ink-control'); group.setAttribute('role', 'button');
     group.dataset.pdfStroke = stroke.id;
-    group.setAttribute('aria-label', `${stroke.kind === 'marker' ? 'Marker' : 'Scribble'} on page ${stroke.page}. Drag to move; Delete to remove.`);
+    const removeLabel = labelSvgOverlay(group, this.layer, `${stroke.kind === 'marker' ? 'Marker' : 'Scribble'} on page ${stroke.page}. Drag to move; Delete to remove.`);
     const visual = doc.createElementNS(namespace, 'path'); visual.classList.add('pdf-form-studio-stroke');
     const hit = doc.createElementNS(namespace, 'path'); hit.classList.add('pdf-form-studio-stroke-hit'); hit.setAttribute('fill', 'none'); hit.setAttribute('stroke', 'transparent');
     hit.setAttribute('stroke-linecap', 'round'); hit.setAttribute('stroke-linejoin', 'round');
@@ -128,7 +129,7 @@ export class InkLayer extends Component {
       }
     };
     group.addEventListener('focus', focus); group.addEventListener('blur', blur); group.addEventListener('pointerdown', pointer); group.addEventListener('keydown', key);
-    return { group, visual, hit, outline, dispose: () => { release?.(); group.removeEventListener('focus', focus); group.removeEventListener('blur', blur); group.removeEventListener('pointerdown', pointer); group.removeEventListener('keydown', key); group.remove(); } };
+    return { group, visual, hit, outline, dispose: () => { release?.(); group.removeEventListener('focus', focus); group.removeEventListener('blur', blur); group.removeEventListener('pointerdown', pointer); group.removeEventListener('keydown', key); removeLabel(); group.remove(); } };
   }
   private collect(event: PointerEvent): void {
     const gesture = this.gesture; if (!gesture) return;

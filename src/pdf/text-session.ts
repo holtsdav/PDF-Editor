@@ -22,6 +22,9 @@ export interface PdfStore {
 }
 type TextState = { fields: TextField[]; values: TextChanges['values']; added: TextChanges['added']; boxes: TextChanges['boxes']; deleted: TextChanges['deleted']; formats: TextChanges['formats'] };
 export interface PdfObject { kind: 'text' | 'ink'; id: string }
+export type CopiedPdfObject =
+  | { kind: 'text'; page: number; rect: Rect; rotation: number; value: string; fontSize: number; fontFamily: FontFamily; color: PdfColor; multiline: boolean; ruled?: RuledLayout }
+  | { kind: 'ink'; page: number; rect: Rect; points: Point[]; strokeKind: InkKind; width: number; color: PdfColor; opacity: number };
 type UndoEntry = { kind: 'objects'; state: TextState; strokes: InkStroke[] } | { kind: 'ink'; strokes: InkStroke[] } | { kind: 'text'; state: TextState; key: string; time: number };
 
 export interface PdfDraft { baselineHash: string; bytes: Uint8Array }
@@ -195,6 +198,21 @@ export class TextSession {
     this.changed();
   }
 
+  adoptRuledBlock(name: string, rect: Rect, layout: RuledLayout): boolean {
+    this.assertAvailable();
+    const field = this.snapshot.fields.find(field => field.name === name);
+    if (!field?.owned || field.readOnly || field.widgets.length !== 1 || this.status === 'conflict') return false;
+    const widget = field.widgets[0]!, bounds = this.snapshot.pages[widget.page - 1]!;
+    const firstHeight = rect[3] - rect[1] - (layout.rows - 1) * layout.spacing;
+    if (widget.rotation !== 0 || !validRuledLayout(layout, rect) || field.fontSize * 1.2 + 2 > firstHeight + 0.001
+      || rect[0] < bounds[0] || rect[1] < bounds[1] || rect[2] > bounds[2] || rect[3] > bounds[3]) return false;
+    this.rememberText(name, false);
+    widget.rect = [...rect]; field.multiline = true; field.ruled = { ...layout };
+    this.changes.boxes.set(name, { rect: [...rect], fontSize: field.fontSize, multiline: true, ruled: { ...layout } });
+    this.changes.values.set(name, field.value);
+    this.changed(); return true;
+  }
+
   formatField(name: string, format: Partial<TextFormat>): void {
     this.assertAvailable();
     const field = this.snapshot.fields.find(field => field.name === name);
@@ -283,6 +301,66 @@ export class TextSession {
       if (!stroke || stroke.readOnly || stroke.hidden) throw new Error('This drawing cannot be edited as part of a group.');
       return { object, page: stroke.page, rect: stroke.rect };
     });
+  }
+  copyObjects(objects: PdfObject[]): CopiedPdfObject[] {
+    return this.objectItems(objects).map(({ object, page, rect }) => {
+      if (object.kind === 'text') {
+        const field = this.snapshot.fields.find(field => field.name === object.id)!;
+        return { kind: 'text', page, rect: [...rect], rotation: field.widgets[0]!.rotation, value: field.value,
+          fontSize: field.fontSize, fontFamily: field.fontFamily, color: [...field.color], multiline: field.multiline,
+          ...(field.ruled ? { ruled: { ...field.ruled } } : {}) };
+      }
+      const stroke = this.snapshot.strokes.find(stroke => stroke.id === object.id)!;
+      return { kind: 'ink', page, rect: [...rect], points: stroke.points.map(point => [...point]), strokeKind: stroke.kind,
+        width: stroke.width, color: [...stroke.color], opacity: stroke.opacity };
+    });
+  }
+  /** Add independent IDs and one undo entry for a copied selection. */
+  pasteObjects(copied: CopiedPdfObject[], offset: Point = [12, -12]): PdfObject[] {
+    this.assertAvailable();
+    if (this.conflicted || this.inkAction) throw new Error('Finish the current gesture or reload the PDF before pasting objects.');
+    if (!copied.length || copied.length > 500 || !offset.every(Number.isFinite)) return [];
+    let left = -Infinity, right = Infinity, bottom = -Infinity, top = Infinity;
+    for (const item of copied) {
+      const bounds = this.snapshot.pages[item.page - 1];
+      if (!bounds || !Number.isInteger(item.page) || item.rect.length !== 4 || item.rect.some(n => !Number.isFinite(n))
+        || item.rect[0] < bounds[0] || item.rect[1] < bounds[1] || item.rect[2] > bounds[2] || item.rect[3] > bounds[3]
+        || item.rect[2] <= item.rect[0] || item.rect[3] <= item.rect[1]) throw new Error('Copied object does not fit on this PDF page.');
+      if (item.kind === 'text') {
+        if (!Number.isFinite(item.fontSize) || item.fontSize < 1 || item.fontSize > 200 || item.rotation % 90 !== 0
+          || !validColor(item.color) || !['sans', 'serif', 'mono'].includes(item.fontFamily)
+          || (item.ruled && !validRuledLayout(item.ruled, item.rect))) throw new Error('Invalid copied text box.');
+      } else if (item.kind === 'ink') {
+        validateStroke({ id: INK_PREFIX + 'copy', page: item.page, kind: item.strokeKind, points: item.points, width: item.width,
+          color: item.color, opacity: item.opacity, rect: item.rect, readOnly: false }, bounds);
+      } else throw new Error('Invalid copied PDF object.');
+      left = Math.max(left, bounds[0] - item.rect[0]); right = Math.min(right, bounds[2] - item.rect[2]);
+      bottom = Math.max(bottom, bounds[1] - item.rect[1]); top = Math.min(top, bounds[3] - item.rect[3]);
+    }
+    const dx = Math.max(left, Math.min(right, offset[0])), dy = Math.max(bottom, Math.min(top, offset[1]));
+    this.rememberObjects();
+    const created: PdfObject[] = [];
+    for (const item of copied) {
+      if (item.kind === 'text') {
+        const name = FIELD_PREFIX + globalThis.crypto.randomUUID();
+        const rect: Rect = [item.rect[0] + dx, item.rect[1] + dy, item.rect[2] + dx, item.rect[3] + dy];
+        const added: AddedField = { name, page: item.page, rect, fontSize: item.fontSize, multiline: item.multiline, rotation: item.rotation,
+          ...(item.ruled ? { ruled: { ...item.ruled } } : {}) };
+        this.snapshot.fields.push({ name, value: item.value, fontSize: item.fontSize, fontFamily: item.fontFamily,
+          color: [...item.color], multiline: item.multiline, readOnly: false, owned: true,
+          widgets: [{ page: item.page, rect: [...rect], rotation: item.rotation }], ...(item.ruled ? { ruled: { ...item.ruled } } : {}) });
+        this.changes.added.set(name, added); this.changes.values.set(name, item.value);
+        this.changes.formats.set(name, { fontFamily: item.fontFamily, fontSize: item.fontSize, color: [...item.color] });
+        created.push({ kind: 'text', id: name });
+      } else {
+        const id = INK_PREFIX + globalThis.crypto.randomUUID(), bounds = this.snapshot.pages[item.page - 1]!;
+        const points = item.points.map<Point>(([x, y]) => [x + dx, y + dy]);
+        const stroke: InkStroke = { id, page: item.page, kind: item.strokeKind, points, width: item.width,
+          color: [...item.color], opacity: item.opacity, rect: strokeBounds(points, item.width, bounds), readOnly: false };
+        this.snapshot.strokes.push(stroke); this.changes.strokes.set(id, stroke); created.push({ kind: 'ink', id });
+      }
+    }
+    this.changed(); return created;
   }
   /** One shared translation keeps spacing intact, even when a group reaches an edge. */
   objectDelta(objects: PdfObject[], delta: Point): Point {

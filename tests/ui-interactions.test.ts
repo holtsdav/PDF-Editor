@@ -64,7 +64,8 @@ async function fixture(pageCount = 1) {
     hasPointerCapture(this: HTMLElement, id: number) { return this.dataset.capture === String(id); },
     releasePointerCapture(this: HTMLElement) { delete this.dataset.capture; }
   });
-  const native = { identity: {}, element: doc.querySelector('#editor')!, file: {}, toolbarHost: () => doc.querySelector('#tools')!, pages: () => Array.from({ length: pageCount }, (_, i) => ({ div: doc.querySelector(i ? '#page' + (i + 1) : '#page')!, number: i + 1, annotationElements: () => [], viewport: {
+  const scanButton = doc.createElement('button'); scanButton.setAttribute('aria-label', 'Detect answer lines in PDF');
+  const native = { identity: {}, element: doc.querySelector('#editor')!, file: {}, toolbarHost: () => doc.querySelector('#tools')!, answerLineButton: () => scanButton, pages: () => Array.from({ length: pageCount }, (_, i) => ({ div: doc.querySelector(i ? '#page' + (i + 1) : '#page')!, number: i + 1, annotationElements: () => [], viewport: {
     width: 600, height: 800, scale: 1, rotation: 0, convertToPdfPoint: (x: number, y: number) => [x, 800 - y], convertToViewportRectangle: (r: number[]) => [r[0]!, 800 - r[1]!, r[2]!, 800 - r[3]!]
   } })) } as unknown as EditorSurface;
   const sessions = { get: async () => session, preferences: loadToolPreferences({ holdShapes: true }), updatePreferences: async () => {} } as unknown as VaultSessions;
@@ -81,6 +82,16 @@ async function fixture(pageCount = 1) {
   const dispose = () => { (editor as Editor & { unload(): void }).unload(); dom.window.close(); };
   return { doc, session, editor, sessions, pointer, tool, dispose, bytes: () => bytes };
 }
+
+test('answer-line scan button sits beside Add text box in the editing toolbar', async () => {
+  const f = await fixture();
+  try {
+    const labels = [...f.doc.querySelectorAll<HTMLButtonElement>('.pdf-form-studio-toolbar > button')].map(button => button.getAttribute('aria-label'));
+    const text = labels.findIndex(label => label?.startsWith('Add text box'));
+    assert.equal(labels[text + 1], 'Detect answer lines in PDF');
+    assert(labels[text + 2]?.startsWith('Highlighter'));
+  } finally { f.dispose(); }
+});
 
 test('a newly placed empty box can move, resize and switch to Select before typing; leaving it deletes it', async () => {
   const f = await fixture();
@@ -229,6 +240,12 @@ test('detected answers use Select, reuse fields and never create boxes from subs
     f.pointer(layer, 'pointerdown', 150, 250); f.pointer(layer, 'pointerup', 150, 250);
     assert.equal(f.session.snapshot.fields.length, 1);
     const frame = f.doc.querySelector('.pdf-form-studio-box')!;
+    for (const element of [frame, frame.querySelector('[data-resize="se"]')!, input]) {
+      assert.equal(element.hasAttribute('aria-label'), false, 'PDF objects do not trigger Obsidian hover labels');
+      assert.equal(element.hasAttribute('title'), false);
+      const label = f.doc.getElementById(element.getAttribute('aria-labelledby')!);
+      assert.equal(label?.hidden, true, 'screen-reader names remain available');
+    }
     f.pointer(frame, 'pointerdown', 100, 180); assert.equal(f.doc.activeElement, input); assert.equal(input.readOnly, false);
     f.editor.addSuggestedField(1, rect); assert.equal(f.session.snapshot.fields.length, 1); assert.equal(f.session.snapshot.fields[0]!.value, 'Keep this answer');
     f.editor.setAnswerLines([]); input.blur(); f.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); await pause(0);
@@ -307,6 +324,135 @@ test('consecutive detected lines create one persistent ruled answer with normal 
     assert.equal(f.doc.activeElement, input);
   } finally { f.dispose(); }
 });
+test('clicking an adjacent suggestion turns an existing detected answer into one ruled block', async () => {
+  const f = await fixture();
+  try {
+    const lines = [600, 572, 543].map((y, i) => ({ page: 1, rect: [70 - i, y, 460 - i, y + 18] as [number, number, number, number] }));
+    f.editor.setAnswerLines([lines[0]!]); f.editor.addSuggestedField(1, lines[0]!.rect);
+    const first = f.session.snapshot.fields[0]!;
+    const originalRect = [...first.widgets[0]!.rect];
+    f.session.setValue(first.name, 'Existing answer');
+    f.editor.setAnswerLines(lines); f.editor.addSuggestedField(1, lines[1]!.rect);
+    assert.equal(f.session.snapshot.fields.length, 1);
+    assert.equal(first.value, 'Existing answer');
+    assert.equal(first.ruled?.rows, 3);
+    assert.equal(first.multiline, true);
+    f.session.undoStroke();
+    const undone = f.session.snapshot.fields.find(field => field.name === first.name)!;
+    assert.equal(undone.value, 'Existing answer');
+    assert.equal(undone.ruled, undefined);
+    assert.deepEqual(undone.widgets[0]!.rect, originalRect);
+    f.session.redoStroke();
+    assert.equal(f.session.snapshot.fields.find(field => field.name === first.name)?.ruled?.rows, 3);
+    await f.session.save();
+    const saved = (await readTextPdf(f.bytes())).fields[0]!;
+    assert.equal(saved.value, 'Existing answer');
+    assert.equal(saved.ruled?.rows, 3);
+  } finally { f.dispose(); }
+});
+test('a saved two-row answer extends onto the next detected dotted line', async () => {
+  const f = await fixture();
+  try {
+    const field = f.session.add(1, [76.66, 677.27, 469.99, 722.6], 12, true, 0, { spacing: 27.33, rows: 2 });
+    f.session.setValue(field.name, 'Existing answer');
+    const remaining = [
+      { page: 1, rect: [77.33, 677.27, 470.66, 695.27] as [number, number, number, number] },
+      { page: 1, rect: [76.66, 647.94, 467.32, 665.94] as [number, number, number, number] }
+    ];
+    f.editor.setAnswerLines(remaining); f.editor.addSuggestedField(1, remaining[1]!.rect);
+    assert.equal(f.session.snapshot.fields.length, 1);
+    assert.equal(field.value, 'Existing answer');
+    assert.equal(field.ruled?.rows, 3);
+    assert.equal(field.widgets[0]!.rect[3], 722.6);
+    f.session.undoStroke(); assert.equal(f.session.snapshot.fields[0]!.ruled?.rows, 2);
+    f.session.redoStroke(); await f.session.save();
+    assert.equal((await readTextPdf(f.bytes())).fields[0]!.ruled?.rows, 3);
+  } finally { f.dispose(); }
+});
+test('selected PDF elements copy, paste and duplicate without intercepting text editing', async () => {
+  const f = await fixture();
+  try {
+    const field = f.session.add(1, [80, 580, 240, 610], 12, true); f.session.setValue(field.name, 'Copy me'); f.editor.refresh();
+    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!; frame.focus();
+    const values = new Map<string, string>();
+    const clipboardData = { setData(type: string, value: string) { values.set(type, value); }, getData(type: string) { return values.get(type) ?? ''; } };
+    const copy = new f.doc.defaultView!.Event('copy', { bubbles: true, cancelable: true });
+    Object.defineProperty(copy, 'clipboardData', { value: clipboardData }); frame.dispatchEvent(copy);
+    assert.equal(copy.defaultPrevented, true);
+    const paste = new f.doc.defaultView!.Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, 'clipboardData', { value: clipboardData }); frame.dispatchEvent(paste);
+    assert.equal(paste.defaultPrevented, true); assert.equal(f.session.snapshot.fields.length, 2);
+    assert.equal(f.session.snapshot.fields[1]!.value, 'Copy me');
+    const duplicate = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'd', metaKey: true, bubbles: true, cancelable: true });
+    frame.dispatchEvent(duplicate); assert.equal(duplicate.defaultPrevented, true);
+    assert.equal(f.session.snapshot.fields.length, 3);
+    const input = frame.querySelector<HTMLInputElement | HTMLTextAreaElement>('[data-pdf-field]')!;
+    const nativeCopy = new f.doc.defaultView!.Event('copy', { bubbles: true, cancelable: true });
+    Object.defineProperty(nativeCopy, 'clipboardData', { value: clipboardData }); input.dispatchEvent(nativeCopy);
+    assert.equal(nativeCopy.defaultPrevented, false);
+  } finally { f.dispose(); }
+});
+test('selecting an ink mark clears old printed-text selection before object copy', async () => {
+  const f = await fixture();
+  try {
+    const printed = f.doc.createElement('span'); printed.textContent = 'Old printed text'; f.doc.querySelector('#page')!.append(printed);
+    const range = f.doc.createRange(); range.selectNodeContents(printed); f.doc.getSelection()!.addRange(range);
+    assert.equal(f.doc.getSelection()!.toString(), 'Old printed text');
+    const stroke = f.session.addStroke(1, 'scribble', [[80, 500], [120, 520]], 2); f.editor.refresh();
+    const mark = f.doc.querySelector<SVGElement>(`[data-pdf-stroke="${stroke.id}"]`)!;
+    f.pointer(mark, 'pointerdown', 90, 290);
+    f.pointer(f.doc.querySelector('.pdf-form-studio-layer')!, 'pointerup', 90, 290);
+    assert.equal(f.doc.getSelection()!.toString(), '');
+    const values = new Map<string, string>();
+    const copy = new f.doc.defaultView!.Event('copy', { bubbles: true, cancelable: true });
+    Object.defineProperty(copy, 'clipboardData', { value: { setData(type: string, value: string) { values.set(type, value); } } });
+    mark.dispatchEvent(copy);
+    assert.equal(copy.defaultPrevented, true);
+    assert([...values.keys()].some(type => type !== 'text/plain'), 'the selected ink mark is copied as a PDF element');
+  } finally { f.dispose(); }
+});
+test('Save shortcut remains scoped to the PDF after its toolbar floats outside the editor', async () => {
+  const f = await fixture();
+  try {
+    const host = f.doc.createElement('div'); host.className = 'pfs-floating-toolbar';
+    const navigation = host.appendChild(f.doc.createElement('button'));
+    const search = host.appendChild(f.doc.createElement('input'));
+    host.append(f.doc.querySelector('#tools')!); f.doc.body.append(host);
+    let saves = 0;
+    (f.editor as unknown as { save(): Promise<void> }).save = async () => { saves++; };
+    for (const target of [navigation, search]) {
+      const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 's', metaKey: true, bubbles: true, cancelable: true });
+      target.dispatchEvent(event);
+      assert.equal(event.defaultPrevented, true);
+    }
+    assert.equal(saves, 2);
+    const outside = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 's', metaKey: true, bubbles: true, cancelable: true });
+    f.doc.querySelector('#outside')!.dispatchEvent(outside);
+    assert.equal(outside.defaultPrevented, false);
+  } finally { f.dispose(); }
+});
+test('floating toolbar actions retain a selected group until the action runs', async () => {
+  const f = await fixture();
+  try {
+    const first = f.session.add(1, [80, 580, 180, 610], 12, true); f.session.setValue(first.name, 'First');
+    const second = f.session.add(1, [220, 580, 320, 610], 12, true); f.session.setValue(second.name, 'Second');
+    f.editor.refresh();
+    const frames = f.doc.querySelectorAll('.pdf-form-studio-box');
+    f.pointer(frames[0]!, 'pointerdown', 100, 200, true);
+    f.pointer(frames[1]!, 'pointerdown', 250, 200, true);
+    assert.equal(f.doc.querySelectorAll('.is-multi-selected').length, 2);
+    const host = f.doc.createElement('div'); host.className = 'pfs-floating-toolbar';
+    host.append(f.doc.querySelector('#tools')!); f.doc.body.append(host);
+    const search = host.appendChild(f.doc.createElement('input')); search.focus();
+    assert.equal(f.doc.querySelectorAll('.is-multi-selected').length, 0, 'a floated input releases the PDF group scope');
+    f.pointer(frames[0]!, 'pointerdown', 100, 200, true);
+    f.pointer(frames[1]!, 'pointerdown', 250, 200, true);
+    assert.equal(f.doc.querySelectorAll('.is-multi-selected').length, 2);
+    const remove = host.querySelector<HTMLButtonElement>('button[aria-label^="Remove 2 selected objects"]')!;
+    f.pointer(remove, 'pointerdown'); remove.focus(); remove.click();
+    assert.equal(f.session.snapshot.fields.length, 0);
+  } finally { f.dispose(); }
+});
 test('rounded browser scroll measurements do not append an unnecessary ruled row', async () => {
   const f = await fixture();
   try {
@@ -319,14 +465,15 @@ test('rounded browser scroll measurements do not append an unnecessary ruled row
     assert.equal(input.parentElement!.classList.contains('is-overflow'), false);
   } finally { f.dispose(); }
 });
-test('disabling line flow preserves separate fields and an occupied answer is never merged', async () => {
+test('line flow stays off until enabled; clicking an adjacent line then joins the existing answer', async () => {
   const f = await fixture();
   try {
     const lines = [620, 596, 572].map(y => ({ page: 1, rect: [80, y, 340, y + 18] as [number, number, number, number] }));
     f.sessions.preferences.flowAnswerLines = false; f.editor.setAnswerLines(lines); f.editor.addSuggestedField(1, lines[0]!.rect);
     const first = f.session.snapshot.fields[0]!; assert.equal(first.ruled, undefined);
     f.session.setValue(first.name, 'Keep separate'); f.sessions.preferences.flowAnswerLines = true;
-    f.editor.addSuggestedField(1, lines[1]!.rect); assert.equal(f.session.snapshot.fields.length, 2);
-    assert.deepEqual(f.session.snapshot.fields[1]!.ruled, { spacing: 24, rows: 2 }); assert.equal(first.value, 'Keep separate');
+    assert.equal(first.ruled, undefined, 'changing the setting alone does not alter existing answers');
+    f.editor.addSuggestedField(1, lines[1]!.rect); assert.equal(f.session.snapshot.fields.length, 1);
+    assert.deepEqual(first.ruled, { spacing: 24, rows: 3 }); assert.equal(first.value, 'Keep separate');
   } finally { f.dispose(); }
 });

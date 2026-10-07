@@ -36,9 +36,25 @@ export function detectAnswerLines(image: PagePixels, pageWidth: number, pageHeig
           const spaces = group.slice(1).map((segment, i) => segment.left - group[i]!.right - 1);
           const spacing = [...spaces].sort((a, b) => a - b)[Math.floor(spaces.length / 2)] ?? 0;
           const regular = (values: number[], median: number) => values.filter(value => Math.abs(value - median) <= Math.max(1, sx)).length / values.length >= 0.9;
-          if (group.length < 8 || density < 0.12 || density > 0.65 || middle < 0.45 * sx || middle > 2.8 * sx
-            || spacing < middle * 0.75 || spacing + middle < 2.8 * sx || spacing + middle > 12 * sx
-            || !regular(lengths, middle) || !regular(spaces, spacing)) return;
+          // Some PDFs rasterize a dotted rule as a tiny repeating ink pattern:
+          // one row can look like three close dots followed by a wider gap.
+          const periodic = () => {
+            for (let period = Math.ceil(3 * sx); period <= Math.floor(12 * sx); period++) {
+              if (right - left + 1 < period * 8) continue;
+              const comparisons = right - left + 1 - period, allowed = Math.floor(comparisons * 0.12);
+              let different = 0;
+              for (let x = left; x + period <= right; x++) {
+                if (dark(x, y) !== dark(x + period, y)) different++;
+                if (different > allowed) break;
+              }
+              if (different <= allowed) return true;
+            }
+            return false;
+          };
+          const simpleDots = density >= 0.12 && spacing + middle >= 2.8 * sx && regular(spaces, spacing);
+          if (group.length < 8 || density < 0.10 || density > 0.65 || middle < 0.45 * sx || middle > 2.8 * sx
+            || spacing < middle * 0.75 || spacing + middle > 12 * sx
+            || !regular(lengths, middle) || (!simpleDots && !periodic())) return;
         } else {
           if (density < 0.58) return;
           // Regular substantial dashes are allowed; irregular glyph baselines are not.
@@ -60,7 +76,7 @@ export function detectAnswerLines(image: PagePixels, pageWidth: number, pageHeig
       }
       flush();
     };
-    collect(gap, false); collect(Math.max(gap, Math.round(8 * sx)), true);
+    collect(gap, false); collect(Math.max(gap, Math.round(11 * sx)), true);
   }
   const suggestions: AnswerLine[] = [];
   for (const candidate of runs) {

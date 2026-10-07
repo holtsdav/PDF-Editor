@@ -14,10 +14,10 @@ import monoBytes from '../assets/fonts/NotoSansMono-Regular.ttf';
 class PdfPicker extends FuzzySuggestModal<TFile> {
   private choose: (file: TFile) => void;
 
-  constructor(plugin: Plugin, choose: (file: TFile) => void) {
+  constructor(plugin: Plugin, choose: (file: TFile) => void, placeholder = 'Choose a PDF to inspect') {
     super(plugin.app);
     this.choose = choose;
-    this.setPlaceholder('Choose a PDF to inspect');
+    this.setPlaceholder(placeholder);
   }
 
   getItems(): TFile[] { return this.app.vault.getFiles().filter(file => file.extension.toLowerCase() === 'pdf'); }
@@ -54,6 +54,15 @@ export default class PdfEditor extends Plugin {
         const active = this.app.workspace.getActiveFile();
         if (active?.extension.toLowerCase() === 'pdf') this.inspect(active);
         else this.openModal(new PdfPicker(this, file => this.inspect(file)));
+      }
+    });
+    this.addCommand({
+      id: 'export-pending-pdf-recovery',
+      name: 'Export pending PDF recovery draft',
+      callback: () => {
+        const active = this.app.workspace.getActiveFile();
+        if (active?.extension.toLowerCase() === 'pdf') void this.exportPendingDraft(active);
+        else this.openModal(new PdfPicker(this, file => { void this.exportPendingDraft(file); }, 'Choose a PDF with a pending recovery draft'));
       }
     });
     const scan = () => this.scanEditors();
@@ -104,6 +113,13 @@ export default class PdfEditor extends Plugin {
   }
 
   private inspect(file: TFile): void { this.openModal(new PdfInspectionModal(this.app, file)); }
+
+  private async exportPendingDraft(file: TFile): Promise<void> {
+    try {
+      const exported = await this.sessions.exportPendingDraft(file);
+      new Notice(`Recovered PDF exported as ${exported.path}. The source PDF was not replaced.`);
+    } catch (error) { new Notice(`Could not export recovery draft: ${String(error)}`); }
+  }
 
   private openModal(modal: Modal): void {
     this.modals.add(modal);

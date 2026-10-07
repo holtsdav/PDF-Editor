@@ -9,6 +9,19 @@ test('aligned consecutive lines form one fixed writing block from any clicked ro
   const rows = [620, 596, 572, 548].map(y => line(y));
   for (const target of rows) assert.deepEqual(ruledAnswerBlock([...rows].reverse(), target, () => false), { rect: [70, 548, 370, 638], layout: { spacing: 24, rows: 4 } });
 });
+test('wide dotted rules group despite rasterized ends and wider printed spacing', () => {
+  const rows: DetectedLine[] = [
+    { page: 1, rect: [70, 600, 460, 618] },
+    { page: 1, rect: [69, 572, 462, 590] },
+    { page: 1, rect: [68, 543, 459, 561] },
+    { page: 1, rect: [96, 180, 422, 198] },
+    { page: 1, rect: [93, 147, 423, 165] },
+    { page: 1, rect: [92, 115, 422, 133] },
+    { page: 1, rect: [93, 84, 423, 102] }
+  ];
+  for (const target of rows.slice(0, 3)) assert.equal(ruledAnswerBlock(rows, target, () => false)?.layout.rows, 3);
+  for (const target of rows.slice(3)) assert.equal(ruledAnswerBlock(rows, target, () => false)?.layout.rows, 4);
+});
 test('grouping stops at occupied lines, page boundaries, column offsets and question gaps', () => {
   const rows = [line(620), line(596), line(572), line(548), line(500), line(476, 1, 100), line(452, 2)];
   assert.deepEqual(ruledAnswerBlock(rows, rows[0]!, l => l === rows[2]), { rect: [70, 596, 370, 638], layout: { spacing: 24, rows: 2 } });
@@ -31,12 +44,21 @@ test('invalid stored layouts never become a ruled answer block', () => {
 test('plugin settings migrate old preferences and reject untyped toggle values', () => {
   assert.equal(loadToolPreferences(null).autoDetectLines, false); assert.equal(loadToolPreferences(null).flowAnswerLines, true);
   assert.equal(loadToolPreferences(null).toolbarTopOffset, 0);
+  assert.equal(loadToolPreferences(null).floatingToolbar, false);
+  assert.equal(loadToolPreferences(null).autoDetectPageLimit, 25);
+  assert.equal(loadToolPreferences(null).keepOriginalBackups, true);
   const loaded = loadToolPreferences({ autoDetectLines: true, flowAnswerLines: false, penWidth: 5 });
   assert.equal(loaded.autoDetectLines, true); assert.equal(loaded.flowAnswerLines, false); assert.equal(loaded.penWidth, 5);
   assert.equal(loadToolPreferences({ autoDetectLines: 'true', flowAnswerLines: 0 }).autoDetectLines, false);
   assert.equal(loadToolPreferences({ flowAnswerLines: 0 }).flowAnswerLines, true);
   assert.equal(loadToolPreferences({ toolbarTopOffset: 72 }).toolbarTopOffset, 72);
+  assert.equal(loadToolPreferences({ floatingToolbar: true }).floatingToolbar, true);
+  assert.equal(loadToolPreferences({ floatingToolbar: 'true' }).floatingToolbar, false);
   for (const toolbarTopOffset of [-1, 161, 4.5, Infinity, '32']) assert.equal(loadToolPreferences({ toolbarTopOffset }).toolbarTopOffset, 0);
+  assert.equal(loadToolPreferences({ autoDetectPageLimit: 50 }).autoDetectPageLimit, 50);
+  for (const autoDetectPageLimit of [0, 101, 4.5, Infinity, '32']) assert.equal(loadToolPreferences({ autoDetectPageLimit }).autoDetectPageLimit, 25);
+  assert.equal(loadToolPreferences({ keepOriginalBackups: false }).keepOriginalBackups, false);
+  for (const keepOriginalBackups of ['false', 0, null]) assert.equal(loadToolPreferences({ keepOriginalBackups }).keepOriginalBackups, true);
 });
 
 test('fractional-pitch growth retains CropBox bounds and whole rows without upward movement', () => {

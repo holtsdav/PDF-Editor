@@ -1,5 +1,6 @@
 import { Component, Scope } from 'obsidian';
 import type { App } from 'obsidian';
+import { labelOverlay } from './overlay-label';
 import type { NativePage } from '../compat/native-pdf';
 import { pdfRectangle, screenRectangle } from '../compat/native-pdf';
 import type { Point } from '../pdf/ink-engine';
@@ -9,6 +10,7 @@ import type { PdfObject, TextSession } from '../pdf/text-session';
 
 interface Options {
   enabled(): boolean; changed(): void; save(): void; error(error: unknown): void; endTyping(): void;
+  floatingToolbar(): HTMLElement | undefined;
 }
 interface PageSelection { page: NativePage; layer: HTMLElement; overlay: HTMLElement; dispose(): void }
 interface Gesture {
@@ -39,18 +41,20 @@ export class ObjectSelection extends Component {
     }
     this.registerDomEvent(doc, 'pointerdown', event => {
       const target = event.target;
-      if (target instanceof doc.defaultView!.Element && !root.contains(target) && !target.closest('.pfs-tool-popover')) this.clear();
+      if (target instanceof doc.defaultView!.Element && !this.withinEditor(target) && !target.closest('.pfs-tool-popover')) this.clear();
     }, true);
     this.registerDomEvent(doc, 'focusin', event => {
       const target = event.target;
-      if (target instanceof doc.defaultView!.Element && (!root.contains(target) || target.matches('input, textarea'))) this.clear();
+      if (target instanceof doc.defaultView!.Element && (!this.withinEditor(target) || target.matches('input, textarea'))) this.clear();
     });
     this.registerDomEvent(doc.defaultView!, 'keydown', event => this.keyDown(event), true);
     this.register(() => { this.cancel(); this.clear(); for (const entry of this.pages.values()) entry.dispose(); this.pages.clear(); });
   }
   get active(): boolean { return !!this.gesture || this.objects.length > 0; }
+  private withinEditor(target: Element): boolean { return this.root.contains(target) || !!this.options.floatingToolbar()?.contains(target); }
   has(kind: PdfObject['kind'], id: string): boolean { return this.objects.some(object => object.kind === kind && object.id === id); }
   clear(): void { if (this.objects.length) this.set([]); }
+  selectObjects(objects: PdfObject[]): void { this.cancel(); this.set(objects); }
   private set(objects: PdfObject[]): void {
     const unique = [...new Map(objects.map(object => [key(object), object])).values()];
     const claims = unique.filter(object => object.kind === 'text').map(object => this.session.beginTextEdit(object.id));
@@ -179,7 +183,7 @@ export class ObjectSelection extends Component {
       }
       entry.overlay.hidden = !rect; entry.overlay.classList.toggle('is-marquee', !!g && !g.move);
       if (rect) Object.assign(entry.overlay.style, { left: `${rect[0] + dx}px`, top: `${rect[1] + dy}px`, width: `${rect[2] - rect[0]}px`, height: `${rect[3] - rect[1]}px` });
-      entry.layer.setAttribute('aria-label', this.objects.length ? `${this.objects.length} PDF objects selected. Drag a selected object to move the group; Delete removes it.` : 'PDF editing layer');
+      labelOverlay(entry.layer, this.objects.length ? `${this.objects.length} PDF objects selected. Drag a selected object to move the group; Delete removes it.` : 'PDF editing layer');
     }
   }
   cancel(): void {
@@ -190,7 +194,7 @@ export class ObjectSelection extends Component {
   remove(): void { if (!this.objects.length) return; this.cancel(); this.session.deleteObjects(this.objects); this.clear(); this.options.save(); }
   private keyDown(event: KeyboardEvent): void {
     const doc = this.root.ownerDocument, target = event.target;
-    if (!(target instanceof doc.defaultView!.Element) || (!this.root.contains(target) && target !== doc.body && target !== doc.documentElement) || target.matches('input, textarea') || !this.objects.length) return;
+    if (!(target instanceof doc.defaultView!.Element) || (!this.withinEditor(target) && target !== doc.body && target !== doc.documentElement) || target.matches('input, textarea') || !this.objects.length) return;
     try {
       if (event.key === 'Escape') { this.cancel(); this.clear(); return; }
       if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); event.stopImmediatePropagation(); this.remove(); return; }

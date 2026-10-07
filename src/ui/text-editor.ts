@@ -5,7 +5,7 @@ import { pdfRectangle, screenRectangle } from '../compat/native-pdf';
 import type { Rect, TextField } from '../pdf/text-engine';
 import type { BackupKind } from '../pdf/recovery';
 import { usePdfFont } from './pdf-font';
-import type { TextSession } from '../pdf/text-session';
+import type { CopiedPdfObject, PdfObject, TextSession } from '../pdf/text-session';
 import type { VaultSessions } from '../pdf/vault-sessions';
 import { growBox, rotatedHandle, transformBox } from '../pdf/box-geometry';
 import type { ResizeHandle } from '../pdf/box-geometry';
@@ -18,9 +18,12 @@ import { RecoveryInfo } from './recovery-info';
 import { RecoveryPreview } from './recovery-preview';
 import { ToolPopover } from './tool-popover';
 import { ruledAnswerBlock } from '../pdf/ruled-text';
+import { labelOverlay } from './overlay-label';
 
 
 interface AnswerLine { page: number; rect: Rect }
+const objectClipboardType = 'application/x-pdf-editor-objects';
+let copiedObjects: { token: string; objects: CopiedPdfObject[] } | undefined;
 
 interface FieldControl {
   frame: HTMLElement; input: HTMLInputElement | HTMLTextAreaElement;
@@ -95,7 +98,10 @@ export class TextEditor extends Component {
     for (const [tool, label, icon] of [
       ['select', 'Select — drag blank space for objects; drag printed text to select text', 'mouse-pointer-2'], ['text', 'Add text box — click or drag on the PDF', 'type'],
       ['marker', 'Highlighter — draw and hold for a straight line', 'highlighter'], ['scribble', 'Pen — draw', 'pencil'], ['eraser', 'Eraser — drag over marks to remove them', 'eraser']
-    ] as const) this.tools.set(tool, button(this.toolbar, label, icon, () => { if (this.tool === tool) this.closePopover(); else this.setTool(tool); }));
+    ] as const) {
+      this.tools.set(tool, button(this.toolbar, label, icon, () => { if (this.tool === tool) this.closePopover(); else this.setTool(tool); }));
+      if (tool === 'text') this.toolbar.append(this.native.answerLineButton());
+    }
     this.editControls = doc.createElement('div'); this.editControls.className = 'pdf-form-studio-edit-controls'; this.toolbar.append(this.editControls);
     this.propertiesButton = button(this.editControls, 'Tool settings', 'sliders-horizontal', () => this.openProperties());
     this.propertiesButton.classList.add('pfs-properties-button');
@@ -132,7 +138,7 @@ export class TextEditor extends Component {
       // Keyboard-opened dialogs also move focus deliberately. Never restore
       // a PDF input over the quick switcher, command palette or another note.
       if (this.focused && event.target !== this.focused.input) this.focused = undefined;
-      if (event.target instanceof doc.defaultView!.Element && !this.native.element.contains(event.target) && !event.target.closest('.pfs-tool-popover')) this.endTextEditing();
+      if (event.target instanceof doc.defaultView!.Element && !this.native.element.contains(event.target) && !event.target.closest('.pfs-tool-popover, .pdf-form-studio-toolbar')) this.endTextEditing();
       if (event.target instanceof doc.defaultView!.HTMLElement && this.toolbar.contains(event.target) && this.session) {
         this.releaseFocus(); this.focusInteraction = { input: event.target, release: this.session.beginInteraction() };
       }
@@ -145,7 +151,7 @@ export class TextEditor extends Component {
     // Claim Save at the window capture phase, scoped to this editor's controls.
     this.registerDomEvent(doc.defaultView!, 'keydown', event => {
       const target = event.target;
-      if (!(target instanceof doc.defaultView!.Node) || (!native.element.contains(target) && !(target === doc.body && (this.selection?.active || (event.key === 'Escape' && this.tool !== 'select'))))) return;
+      if (!this.shortcutTarget(target) && !(target === doc.body && event.key === 'Escape' && this.tool !== 'select')) return;
       if (event.key === 'Tab' && !event.metaKey && !event.ctrlKey && !event.altKey && target instanceof doc.defaultView!.HTMLElement
         && target.dataset.pdfField && !event.isComposing && this.navigateAnswerLine(target.dataset.pdfField, event.shiftKey ? -1 : 1)) {
         event.preventDefault(); event.stopImmediatePropagation(); return;
@@ -164,6 +170,15 @@ export class TextEditor extends Component {
         }
         return;
       }
+      if (event.key.toLowerCase() === 'd' && !event.shiftKey && !this.isTextTarget(target)) {
+        const objects = this.selectedObjects();
+        if (objects.length && this.session) {
+          event.preventDefault(); event.stopImmediatePropagation();
+          try { this.selectCreated(this.session.pasteObjects(this.session.copyObjects(objects))); this.scheduleSave(); }
+          catch (error) { this.showError(error); }
+          return;
+        }
+      }
       if (event.key.toLowerCase() === 's') {
         event.preventDefault(); event.stopImmediatePropagation(); void this.save();
       }
@@ -171,6 +186,25 @@ export class TextEditor extends Component {
         && !(target instanceof doc.defaultView!.HTMLInputElement || target instanceof doc.defaultView!.HTMLTextAreaElement)) {
         event.preventDefault(); event.stopImmediatePropagation(); if (event.shiftKey) this.session?.redoStroke(); else this.session?.undoStroke(); this.selectedStroke = undefined; this.scheduleSave();
       }
+    }, true);
+    this.registerDomEvent(doc.defaultView!, 'copy', event => {
+      if (!this.shortcutTarget(event.target) || this.isTextTarget(event.target) || doc.getSelection()?.toString()) return;
+      const objects = this.selectedObjects();
+      if (!objects.length || !this.session || !event.clipboardData) return;
+      try {
+        const token = globalThis.crypto.randomUUID(), data = this.session.copyObjects(objects);
+        event.clipboardData.setData(objectClipboardType, token);
+        event.clipboardData.setData('text/plain', data.filter(item => item.kind === 'text').map(item => item.value).join('\n') || 'PDF Editor elements');
+        copiedObjects = { token, objects: data };
+        event.preventDefault(); event.stopImmediatePropagation();
+      } catch (error) { this.showError(error); }
+    }, true);
+    this.registerDomEvent(doc.defaultView!, 'paste', event => {
+      if (!this.shortcutTarget(event.target) || this.isTextTarget(event.target) || !this.session || !event.clipboardData
+        || event.clipboardData.getData(objectClipboardType) !== copiedObjects?.token) return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      try { this.selectCreated(this.session.pasteObjects(copiedObjects.objects)); this.scheduleSave(); }
+      catch (error) { this.showError(error); }
     }, true);
     this.updateStatus();
     void this.openSession().then(() => { this.updateStatus(); this.refresh(); }).catch(error => {
@@ -192,6 +226,7 @@ export class TextEditor extends Component {
     this.session = session;
     this.selection = this.addChild(new ObjectSelection(session, this.native.element, {
       enabled: () => this.tool === 'select', changed: () => { this.updateStatus(); this.refresh(); }, save: () => this.scheduleSave(), error: error => this.showError(error),
+      floatingToolbar: () => this.floatingToolbarHost(),
       endTyping: () => { this.selected = undefined; this.selectedStroke = undefined; this.focused = undefined; this.endTextEditing(); }
     }, this.app));
     this.unsubscribe = session.subscribe(() => { this.updateStatus(); this.refresh(); });
@@ -254,6 +289,59 @@ export class TextEditor extends Component {
     }
     return false;
   }
+  private adoptAdjacentAnswer(line: AnswerLine): TextField | undefined {
+    if (!this.session || !this.sessions.preferences.flowAnswerLines) return;
+    for (const anchor of this.session.snapshot.fields) {
+      if (!anchor.owned || anchor.readOnly || anchor.widgets.length !== 1) continue;
+      const widget = anchor.widgets[0]!;
+      if (widget.page !== line.page || widget.rotation !== 0) continue;
+      const rows = anchor.ruled?.rows ?? 1;
+      if (rows > 500) continue;
+      const height = widget.rect[3] - widget.rect[1] - (rows - 1) * (anchor.ruled?.spacing ?? 0);
+      if (!anchor.ruled && (widget.rect[2] - widget.rect[0] < 100 || height > 35)) continue;
+      const anchors: AnswerLine[] = Array.from({ length: rows }, (_, i) => ({ page: line.page,
+        rect: [widget.rect[0], widget.rect[3] - height - i * (anchor.ruled?.spacing ?? 0), widget.rect[2], widget.rect[3] - i * (anchor.ruled?.spacing ?? 0)] }));
+      const candidates = [...this.answerLines.filter(candidate => candidate.page === line.page && this.answerWidget(anchor, candidate) < 0), ...anchors];
+      const block = ruledAnswerBlock(candidates, line, candidate => this.session!.snapshot.fields.some(field => field !== anchor && this.answerWidget(field, candidate) >= 0));
+      if (!block || block.layout.rows <= rows || Math.abs(block.rect[3] - widget.rect[3]) > 3) continue;
+      const rect: Rect = [widget.rect[0], block.rect[1], widget.rect[2], widget.rect[3]];
+      if (this.session.adoptRuledBlock(anchor.name, rect, block.layout)) return anchor;
+    }
+    return;
+  }
+  private isTextTarget(target: EventTarget | null): boolean {
+    const element = target instanceof this.native.element.ownerDocument.defaultView!.Element ? target : undefined;
+    return !!element?.closest('input, textarea, [contenteditable="true"]');
+  }
+  private floatingToolbarHost(): HTMLElement | undefined {
+    const host = this.native.toolbarHost().parentElement;
+    return host?.classList.contains('pfs-floating-toolbar') ? host : undefined;
+  }
+  private shortcutTarget(target: EventTarget | null): boolean {
+    const doc = this.native.element.ownerDocument;
+    return target instanceof doc.defaultView!.Node && (this.native.element.contains(target)
+      || !!this.floatingToolbarHost()?.contains(target)
+      || target === doc.body && !!this.selection?.active);
+  }
+  private selectedObjects(): PdfObject[] {
+    if (this.selection?.objects.length) return [...this.selection.objects];
+    if (this.selected && this.session?.snapshot.fields.some(field => field.name === this.selected && field.owned && !field.readOnly)) return [{ kind: 'text', id: this.selected }];
+    if (this.selectedStroke && this.session?.snapshot.strokes.some(stroke => stroke.id === this.selectedStroke && !stroke.readOnly)) return [{ kind: 'ink', id: this.selectedStroke }];
+    return [];
+  }
+  private clearBrowserSelection(): void { this.native.element.ownerDocument.getSelection()?.removeAllRanges(); }
+  private selectCreated(objects: PdfObject[]): void {
+    if (!objects.length) return;
+    this.clearBrowserSelection();
+    this.selected = undefined; this.selectedStroke = undefined;
+    if (objects.length > 1) this.selection?.selectObjects(objects);
+    else {
+      this.selection?.clear();
+      if (objects[0]!.kind === 'text') this.selected = objects[0]!.id;
+      else this.selectedStroke = objects[0]!.id;
+    }
+    this.updateStatus(); this.refresh();
+  }
   addSuggestedField(page: number, rect: Rect, scroll = false): void {
     if (!this.session || this.session.replacing || this.session.status === 'conflict') return;
     try {
@@ -264,6 +352,7 @@ export class TextEditor extends Component {
       let field = this.session.snapshot.fields.find(field => this.answerWidget(field, line) >= 0);
       if (field?.readOnly) return;
       this.setTool('select'); this.endTextEditing(field?.name);
+      if (!field) field = this.adoptAdjacentAnswer(line);
       if (!field) {
         const block = this.sessions.preferences.flowAnswerLines ? ruledAnswerBlock(this.answerLines, line,
           candidate => this.session!.snapshot.fields.some(existing => this.answerWidget(existing, candidate) >= 0)) : undefined;
@@ -387,6 +476,10 @@ export class TextEditor extends Component {
     const file = this.native.file;
     const original = this.sessions.backupFor(file); const recovery = this.sessions.backupFor(file, 'recovery');
     const blocked = (this.session?.status === 'conflict' || this.session?.replacing) || this.session?.status === 'saving';
+    menu.addItem(item => item.setTitle('Floating toolbar').setIcon('pin').setChecked(this.sessions.preferences.floatingToolbar)
+      .onClick(() => { void this.sessions.updatePreferences({ ...this.sessions.preferences, floatingToolbar: !this.sessions.preferences.floatingToolbar })
+        .catch(error => this.showError(error)); }));
+    menu.addSeparator();
     menu.addItem(item => item.setTitle('Reload PDF').setIcon('refresh-cw').setDisabled(!this.session).onClick(() => this.requestReload()));
     menu.addSeparator();
     menu.addItem(item => item.setTitle('Recovery copies…').setIcon('shield-check').onClick(() => { const modal = new RecoveryInfo(this.app, this.sessions, file); this.register(() => modal.close()); modal.open(); }));
@@ -461,7 +554,7 @@ export class TextEditor extends Component {
         const ink = this.addChild(new InkLayer(page, layer, this.session, {
           tool: () => this.tool, width: kind => kind === 'marker' ? this.markerWidth : this.penWidth, color: kind => kind === 'marker' ? this.markerColor : this.penColor, selected: () => this.selectedStroke,
           smooth: () => this.smoothPen, shapes: () => this.holdShapes, straightHold: () => this.holdHighlighter,
-          select: id => { this.selection?.clear(); this.selectedStroke = id; this.selected = undefined; this.focused = undefined; this.updateStatus(); this.refresh(); },
+          select: id => { if (id) this.clearBrowserSelection(); this.selection?.clear(); this.selectedStroke = id; this.selected = undefined; this.focused = undefined; this.updateStatus(); this.refresh(); },
           start: () => {
             this.focused = undefined; this.selected = undefined; this.selectedStroke = undefined;
             const active = layer.ownerDocument.activeElement;
@@ -497,7 +590,7 @@ export class TextEditor extends Component {
         control.input.tabIndex = !drawing && this.editing === field.name ? 0 : -1;
         control.frame.tabIndex = drawing ? -1 : 0;
         control.frame.classList.toggle('is-answer-field', this.answerFields.has(field.name) || !!field.ruled);
-        if (this.answerFields.has(field.name) || field.ruled) control.frame.setAttribute('aria-label', field.ruled ? 'Ruled answer block. Click to edit; text wraps along the printed lines.' : 'Detected answer. Click to edit; Tab or Shift+Tab to change answer lines.');
+        if (this.answerFields.has(field.name) || field.ruled) labelOverlay(control.frame, field.ruled ? 'Ruled answer block. Click to edit; text wraps along the printed lines.' : 'Detected answer. Click to edit; Tab or Shift+Tab to change answer lines.');
         control.frame.classList.toggle('is-editing', this.editing === field.name);
         control.frame.classList.toggle('is-selected', field.name === this.selected);
         control.frame.classList.toggle('is-locked', (this.session.status === 'conflict' || this.session.replacing) || field.readOnly || (field.owned && field.widgets.length !== 1));
@@ -547,7 +640,7 @@ export class TextEditor extends Component {
     const control: FieldControl = { frame, input };
     if (input instanceof doc.defaultView!.HTMLInputElement) input.type = 'text';
     input.className = 'pdf-form-studio-field'; input.dataset.pdfField = field.name;
-    input.value = field.value; input.setAttribute('aria-label', field.owned ? 'PDF answer' : field.name);
+    input.value = field.value;
     if (field.owned) input.placeholder = ' ';
     input.spellcheck = false;
     if (field.maxLength !== undefined) input.maxLength = field.maxLength;
@@ -585,7 +678,7 @@ export class TextEditor extends Component {
       if ((key.metaKey || key.ctrlKey) && key.key.toLowerCase() === 's') { event.preventDefault(); void this.save(); }
       if (key.key === 'Escape') { input.blur(); }
     });
-    frame.append(input); entry.layer.append(frame); entry.controls.set(key, control);
+    frame.append(input); labelOverlay(input, field.owned ? 'PDF answer' : field.name); entry.layer.append(frame); entry.controls.set(key, control);
     control.dispose = this.bindBox(entry, control, field.name);
   }
 
@@ -621,7 +714,8 @@ export class TextEditor extends Component {
     }
     const overflow = field.ruled ? measuredRows > field.ruled.rows : height / viewport.scale > widget.rect[3] - widget.rect[1] + 1;
     control.frame.classList.toggle('is-overflow', overflow);
-    control.frame.title = overflow ? 'Text reaches the page edge. Widen the box or reduce the text size.' : '';
+    if (overflow) control.frame.setAttribute('aria-description', 'Text reaches the page edge. Widen the box or reduce the text size.');
+    else control.frame.removeAttribute('aria-description');
   }
 
   private bindBox(entry: PageLayer, control: FieldControl, name: string): () => void {
@@ -629,20 +723,21 @@ export class TextEditor extends Component {
     const doc = frame.ownerDocument;
     frame.tabIndex = 0; frame.setAttribute('role', 'group');
     const owned = this.session!.snapshot.fields.find(field => field.name === name)!.owned;
-    frame.setAttribute('aria-label', owned ? 'Text box. Click to select, drag to move, double-click or Enter to edit, Backspace to delete.' : 'Form field. Double-click or Enter to edit.');
+    labelOverlay(frame, owned ? 'Text box. Click to select, drag to move, double-click or Enter to edit, Backspace to delete.' : 'Form field. Double-click or Enter to edit.');
     const labels: Record<ResizeHandle, string> = {
       n: 'top', ne: 'top right', e: 'right', se: 'bottom right', s: 'bottom', sw: 'bottom left', w: 'left', nw: 'top left'
     };
     for (const handle of (owned ? Object.keys(labels) : []) as ResizeHandle[]) {
       const button = doc.createElement('button'); button.type = 'button'; button.tabIndex = -1;
       button.className = 'pdf-form-studio-handle'; button.dataset.resize = handle;
-      button.setAttribute('aria-label', `Resize text box from ${labels[handle]}`); frame.append(button);
+      labelOverlay(button, `Resize text box from ${labels[handle]}`); frame.append(button);
     }
     for (const edge of owned ? ['n', 'e', 's', 'w'] : []) {
       const border = doc.createElement('div'); border.className = 'pdf-form-studio-move-edge'; border.dataset.edge = edge;
       border.setAttribute('aria-hidden', 'true'); frame.append(border);
     }
     const select = () => {
+      this.clearBrowserSelection();
       this.selection?.clear();
       this.selected = name; this.selectedStroke = undefined; this.updateStatus(); this.refresh();
     };
