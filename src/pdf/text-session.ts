@@ -195,6 +195,21 @@ export class TextSession {
     this.changed();
   }
 
+  adoptRuledBlock(name: string, rect: Rect, layout: RuledLayout): boolean {
+    this.assertAvailable();
+    const field = this.snapshot.fields.find(field => field.name === name);
+    if (!field?.owned || field.readOnly || field.ruled || field.widgets.length !== 1 || this.status === 'conflict') return false;
+    const widget = field.widgets[0]!, bounds = this.snapshot.pages[widget.page - 1]!;
+    const firstHeight = rect[3] - rect[1] - (layout.rows - 1) * layout.spacing;
+    if (widget.rotation !== 0 || !validRuledLayout(layout, rect) || field.fontSize * 1.2 + 2 > firstHeight + 0.001
+      || rect[0] < bounds[0] || rect[1] < bounds[1] || rect[2] > bounds[2] || rect[3] > bounds[3]) return false;
+    this.rememberText(name, false);
+    widget.rect = [...rect]; field.multiline = true; field.ruled = { ...layout };
+    this.changes.boxes.set(name, { rect: [...rect], fontSize: field.fontSize, multiline: true, ruled: { ...layout } });
+    this.changes.values.set(name, field.value);
+    this.changed(); return true;
+  }
+
   formatField(name: string, format: Partial<TextFormat>): void {
     this.assertAvailable();
     const field = this.snapshot.fields.find(field => field.name === name);

@@ -18,6 +18,7 @@ import { RecoveryInfo } from './recovery-info';
 import { RecoveryPreview } from './recovery-preview';
 import { ToolPopover } from './tool-popover';
 import { ruledAnswerBlock } from '../pdf/ruled-text';
+import { labelOverlay } from './overlay-label';
 
 
 interface AnswerLine { page: number; rect: Rect }
@@ -257,6 +258,20 @@ export class TextEditor extends Component {
     }
     return false;
   }
+  private adoptAdjacentAnswer(line: AnswerLine): TextField | undefined {
+    if (!this.session || !this.sessions.preferences.flowAnswerLines) return;
+    for (const anchor of this.session.snapshot.fields) {
+      if (!anchor.owned || anchor.readOnly || anchor.ruled || anchor.widgets.length !== 1 || !this.answerFields.has(anchor.name)) continue;
+      const widget = anchor.widgets[0]!;
+      const anchorLine = this.answerLines.find(candidate => candidate.page === line.page && this.answerWidget(anchor, candidate) >= 0
+        && candidate.rect.every((edge, i) => Math.abs(widget.rect[i]! - edge) <= (i % 2 === 0 ? 6 : 3)));
+      if (!anchorLine) continue;
+      const block = ruledAnswerBlock(this.answerLines, line, candidate => this.session!.snapshot.fields.some(field => field !== anchor && this.answerWidget(field, candidate) >= 0));
+      if (!block || anchorLine.rect[1] < block.rect[1] - 1 || anchorLine.rect[3] > block.rect[3] + 1) continue;
+      if (this.session.adoptRuledBlock(anchor.name, block.rect, block.layout)) return anchor;
+    }
+    return;
+  }
   addSuggestedField(page: number, rect: Rect, scroll = false): void {
     if (!this.session || this.session.replacing || this.session.status === 'conflict') return;
     try {
@@ -267,6 +282,7 @@ export class TextEditor extends Component {
       let field = this.session.snapshot.fields.find(field => this.answerWidget(field, line) >= 0);
       if (field?.readOnly) return;
       this.setTool('select'); this.endTextEditing(field?.name);
+      if (!field) field = this.adoptAdjacentAnswer(line);
       if (!field) {
         const block = this.sessions.preferences.flowAnswerLines ? ruledAnswerBlock(this.answerLines, line,
           candidate => this.session!.snapshot.fields.some(existing => this.answerWidget(existing, candidate) >= 0)) : undefined;
@@ -500,7 +516,7 @@ export class TextEditor extends Component {
         control.input.tabIndex = !drawing && this.editing === field.name ? 0 : -1;
         control.frame.tabIndex = drawing ? -1 : 0;
         control.frame.classList.toggle('is-answer-field', this.answerFields.has(field.name) || !!field.ruled);
-        if (this.answerFields.has(field.name) || field.ruled) control.frame.setAttribute('aria-label', field.ruled ? 'Ruled answer block. Click to edit; text wraps along the printed lines.' : 'Detected answer. Click to edit; Tab or Shift+Tab to change answer lines.');
+        if (this.answerFields.has(field.name) || field.ruled) labelOverlay(control.frame, field.ruled ? 'Ruled answer block. Click to edit; text wraps along the printed lines.' : 'Detected answer. Click to edit; Tab or Shift+Tab to change answer lines.');
         control.frame.classList.toggle('is-editing', this.editing === field.name);
         control.frame.classList.toggle('is-selected', field.name === this.selected);
         control.frame.classList.toggle('is-locked', (this.session.status === 'conflict' || this.session.replacing) || field.readOnly || (field.owned && field.widgets.length !== 1));
@@ -550,7 +566,7 @@ export class TextEditor extends Component {
     const control: FieldControl = { frame, input };
     if (input instanceof doc.defaultView!.HTMLInputElement) input.type = 'text';
     input.className = 'pdf-form-studio-field'; input.dataset.pdfField = field.name;
-    input.value = field.value; input.setAttribute('aria-label', field.owned ? 'PDF answer' : field.name);
+    input.value = field.value;
     if (field.owned) input.placeholder = ' ';
     input.spellcheck = false;
     if (field.maxLength !== undefined) input.maxLength = field.maxLength;
@@ -588,7 +604,7 @@ export class TextEditor extends Component {
       if ((key.metaKey || key.ctrlKey) && key.key.toLowerCase() === 's') { event.preventDefault(); void this.save(); }
       if (key.key === 'Escape') { input.blur(); }
     });
-    frame.append(input); entry.layer.append(frame); entry.controls.set(key, control);
+    frame.append(input); labelOverlay(input, field.owned ? 'PDF answer' : field.name); entry.layer.append(frame); entry.controls.set(key, control);
     control.dispose = this.bindBox(entry, control, field.name);
   }
 
@@ -624,7 +640,8 @@ export class TextEditor extends Component {
     }
     const overflow = field.ruled ? measuredRows > field.ruled.rows : height / viewport.scale > widget.rect[3] - widget.rect[1] + 1;
     control.frame.classList.toggle('is-overflow', overflow);
-    control.frame.title = overflow ? 'Text reaches the page edge. Widen the box or reduce the text size.' : '';
+    if (overflow) control.frame.setAttribute('aria-description', 'Text reaches the page edge. Widen the box or reduce the text size.');
+    else control.frame.removeAttribute('aria-description');
   }
 
   private bindBox(entry: PageLayer, control: FieldControl, name: string): () => void {
@@ -632,14 +649,14 @@ export class TextEditor extends Component {
     const doc = frame.ownerDocument;
     frame.tabIndex = 0; frame.setAttribute('role', 'group');
     const owned = this.session!.snapshot.fields.find(field => field.name === name)!.owned;
-    frame.setAttribute('aria-label', owned ? 'Text box. Click to select, drag to move, double-click or Enter to edit, Backspace to delete.' : 'Form field. Double-click or Enter to edit.');
+    labelOverlay(frame, owned ? 'Text box. Click to select, drag to move, double-click or Enter to edit, Backspace to delete.' : 'Form field. Double-click or Enter to edit.');
     const labels: Record<ResizeHandle, string> = {
       n: 'top', ne: 'top right', e: 'right', se: 'bottom right', s: 'bottom', sw: 'bottom left', w: 'left', nw: 'top left'
     };
     for (const handle of (owned ? Object.keys(labels) : []) as ResizeHandle[]) {
       const button = doc.createElement('button'); button.type = 'button'; button.tabIndex = -1;
       button.className = 'pdf-form-studio-handle'; button.dataset.resize = handle;
-      button.setAttribute('aria-label', `Resize text box from ${labels[handle]}`); frame.append(button);
+      labelOverlay(button, `Resize text box from ${labels[handle]}`); frame.append(button);
     }
     for (const edge of owned ? ['n', 'e', 's', 'w'] : []) {
       const border = doc.createElement('div'); border.className = 'pdf-form-studio-move-edge'; border.dataset.edge = edge;

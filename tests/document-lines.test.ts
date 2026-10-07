@@ -85,6 +85,9 @@ test('one scan detects every PDF page, including offscreen pages, with bounded s
     assert.equal(f.surface.message.textContent, '');
     assert(f.canvases.every(canvas => canvas.width === 0 && canvas.height === 0));
     const suggestion = f.surface.entries[3]!.suggestions!.querySelector<HTMLButtonElement>('button')!; suggestion.click();
+    assert.equal(suggestion.hasAttribute('title'), false);
+    assert.equal(suggestion.hasAttribute('aria-label'), false);
+    assert.equal(suggestion.ownerDocument.getElementById(suggestion.getAttribute('aria-labelledby')!)?.textContent, 'Fill detected answer line');
     assert.equal(f.chosen[0]!.page, 4); assert.deepEqual(f.chosen[0]!.rect, [110, 650, 350, 668]);
     await f.surface.detectLines(); assert(f.surface.entries.every(entry => !entry.candidates && !entry.suggestions)); assert.equal(f.visited.length, 4);
     assert.equal(f.surface.lineButton.getAttribute('aria-pressed'), 'false');

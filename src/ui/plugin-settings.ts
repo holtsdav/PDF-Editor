@@ -27,7 +27,7 @@ export class PdfSettingsTab extends PluginSettingTab {
         try { await this.sessions.updatePreferences({ ...this.sessions.preferences, autoDetectPageLimit: value }); }
         catch (error) { new Notice(`Could not save settings: ${String(error)}`); }
       }));
-    this.toggle('flowAnswerLines', 'Wrap across consecutive answer lines', 'Treat closely spaced, aligned blank lines as one answer block. Text wraps along the printed rules. Applies to new answers; existing answers stay as they are.');
+    this.toggle('flowAnswerLines', 'Wrap across consecutive answer lines', 'Nearby aligned lines make one text block. Click a neighboring detected line to extend an existing answer.');
     new Setting(containerEl).setName('PDF backups').setHeading();
     this.toggle('keepOriginalBackups', 'Keep one backup of each PDF you edit', 'While PDF Editor is in beta, it keeps one copy of a PDF as it was before your first saved change. Later edits do not replace that copy. You can restore it from the PDF menu. Turning this off stops new backups; existing backups stay.');
     const usage = new Setting(containerEl).setName('Backup folder')

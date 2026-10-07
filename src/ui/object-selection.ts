@@ -1,5 +1,6 @@
 import { Component, Scope } from 'obsidian';
 import type { App } from 'obsidian';
+import { labelOverlay } from './overlay-label';
 import type { NativePage } from '../compat/native-pdf';
 import { pdfRectangle, screenRectangle } from '../compat/native-pdf';
 import type { Point } from '../pdf/ink-engine';
@@ -179,7 +180,7 @@ export class ObjectSelection extends Component {
       }
       entry.overlay.hidden = !rect; entry.overlay.classList.toggle('is-marquee', !!g && !g.move);
       if (rect) Object.assign(entry.overlay.style, { left: `${rect[0] + dx}px`, top: `${rect[1] + dy}px`, width: `${rect[2] - rect[0]}px`, height: `${rect[3] - rect[1]}px` });
-      entry.layer.setAttribute('aria-label', this.objects.length ? `${this.objects.length} PDF objects selected. Drag a selected object to move the group; Delete removes it.` : 'PDF editing layer');
+      labelOverlay(entry.layer, this.objects.length ? `${this.objects.length} PDF objects selected. Drag a selected object to move the group; Delete removes it.` : 'PDF editing layer');
     }
   }
   cancel(): void {

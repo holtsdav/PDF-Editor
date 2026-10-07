@@ -9,6 +9,7 @@ import { renamedPdfPath } from '../pdf/file-name';
 import { decorativeFooterRules, excludeDecorativeFooters } from '../compat/pdf-artifacts';
 import { detectAnswerLines } from '../pdf/answer-lines';
 import { MAX_AUTO_DETECT_PAGES } from '../pdf/tool-preferences';
+import { labelOverlay } from './overlay-label';
 import type { Rect } from '../pdf/text-engine';
 import type { TextField } from '../pdf/text-engine';
 
@@ -354,7 +355,8 @@ export class PdfSurface extends Component {
         if (this.overlapsField(entry.native.number, rect) || this.dismissedLines.has(this.lineKey(entry.native.number, rect))) continue;
         const p = entry.native.viewport.convertToViewportRectangle(rect), v = entry.native.viewport;
         const key = JSON.stringify(rect);
-        const button = buttons.get(key) ?? entry.suggestions.createEl('button', { cls: 'pfs-answer-suggestion', attr: { 'aria-label': 'Fill detected answer line', title: 'Click to add an editable answer field' } });
+        const button = buttons.get(key) ?? entry.suggestions.createEl('button', { cls: 'pfs-answer-suggestion' });
+        labelOverlay(button, 'Fill detected answer line');
         button.dataset.rect = key; buttons.delete(key);
         Object.assign(button.style, { left: `${Math.min(p[0]!, p[2]!) / v.width * 100}%`, top: `${Math.min(p[1]!, p[3]!) / v.height * 100}%`,
           width: `${Math.abs(p[2]! - p[0]!) / v.width * 100}%`, height: `${Math.abs(p[3]! - p[1]!) / v.height * 100}%` });

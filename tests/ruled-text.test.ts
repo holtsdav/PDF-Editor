@@ -9,6 +9,19 @@ test('aligned consecutive lines form one fixed writing block from any clicked ro
   const rows = [620, 596, 572, 548].map(y => line(y));
   for (const target of rows) assert.deepEqual(ruledAnswerBlock([...rows].reverse(), target, () => false), { rect: [70, 548, 370, 638], layout: { spacing: 24, rows: 4 } });
 });
+test('wide dotted rules group despite rasterized ends and wider printed spacing', () => {
+  const rows: DetectedLine[] = [
+    { page: 1, rect: [70, 600, 460, 618] },
+    { page: 1, rect: [69, 572, 462, 590] },
+    { page: 1, rect: [68, 543, 459, 561] },
+    { page: 1, rect: [96, 180, 422, 198] },
+    { page: 1, rect: [93, 147, 423, 165] },
+    { page: 1, rect: [92, 115, 422, 133] },
+    { page: 1, rect: [93, 84, 423, 102] }
+  ];
+  for (const target of rows.slice(0, 3)) assert.equal(ruledAnswerBlock(rows, target, () => false)?.layout.rows, 3);
+  for (const target of rows.slice(3)) assert.equal(ruledAnswerBlock(rows, target, () => false)?.layout.rows, 4);
+});
 test('grouping stops at occupied lines, page boundaries, column offsets and question gaps', () => {
   const rows = [line(620), line(596), line(572), line(548), line(500), line(476, 1, 100), line(452, 2)];
   assert.deepEqual(ruledAnswerBlock(rows, rows[0]!, l => l === rows[2]), { rect: [70, 596, 370, 638], layout: { spacing: 24, rows: 2 } });

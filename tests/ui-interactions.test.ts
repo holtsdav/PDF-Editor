@@ -240,6 +240,12 @@ test('detected answers use Select, reuse fields and never create boxes from subs
     f.pointer(layer, 'pointerdown', 150, 250); f.pointer(layer, 'pointerup', 150, 250);
     assert.equal(f.session.snapshot.fields.length, 1);
     const frame = f.doc.querySelector('.pdf-form-studio-box')!;
+    for (const element of [frame, frame.querySelector('[data-resize="se"]')!, input]) {
+      assert.equal(element.hasAttribute('aria-label'), false, 'PDF objects do not trigger Obsidian hover labels');
+      assert.equal(element.hasAttribute('title'), false);
+      const label = f.doc.getElementById(element.getAttribute('aria-labelledby')!);
+      assert.equal(label?.hidden, true, 'screen-reader names remain available');
+    }
     f.pointer(frame, 'pointerdown', 100, 180); assert.equal(f.doc.activeElement, input); assert.equal(input.readOnly, false);
     f.editor.addSuggestedField(1, rect); assert.equal(f.session.snapshot.fields.length, 1); assert.equal(f.session.snapshot.fields[0]!.value, 'Keep this answer');
     f.editor.setAnswerLines([]); input.blur(); f.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); await pause(0);
@@ -318,6 +324,32 @@ test('consecutive detected lines create one persistent ruled answer with normal 
     assert.equal(f.doc.activeElement, input);
   } finally { f.dispose(); }
 });
+test('clicking an adjacent suggestion turns an existing detected answer into one ruled block', async () => {
+  const f = await fixture();
+  try {
+    const lines = [600, 572, 543].map((y, i) => ({ page: 1, rect: [70 - i, y, 460 - i, y + 18] as [number, number, number, number] }));
+    f.editor.setAnswerLines([lines[0]!]); f.editor.addSuggestedField(1, lines[0]!.rect);
+    const first = f.session.snapshot.fields[0]!;
+    const originalRect = [...first.widgets[0]!.rect];
+    f.session.setValue(first.name, 'Existing answer');
+    f.editor.setAnswerLines(lines); f.editor.addSuggestedField(1, lines[1]!.rect);
+    assert.equal(f.session.snapshot.fields.length, 1);
+    assert.equal(first.value, 'Existing answer');
+    assert.equal(first.ruled?.rows, 3);
+    assert.equal(first.multiline, true);
+    f.session.undoStroke();
+    const undone = f.session.snapshot.fields.find(field => field.name === first.name)!;
+    assert.equal(undone.value, 'Existing answer');
+    assert.equal(undone.ruled, undefined);
+    assert.deepEqual(undone.widgets[0]!.rect, originalRect);
+    f.session.redoStroke();
+    assert.equal(f.session.snapshot.fields.find(field => field.name === first.name)?.ruled?.rows, 3);
+    await f.session.save();
+    const saved = (await readTextPdf(f.bytes())).fields[0]!;
+    assert.equal(saved.value, 'Existing answer');
+    assert.equal(saved.ruled?.rows, 3);
+  } finally { f.dispose(); }
+});
 test('rounded browser scroll measurements do not append an unnecessary ruled row', async () => {
   const f = await fixture();
   try {
@@ -330,14 +362,15 @@ test('rounded browser scroll measurements do not append an unnecessary ruled row
     assert.equal(input.parentElement!.classList.contains('is-overflow'), false);
   } finally { f.dispose(); }
 });
-test('disabling line flow preserves separate fields and an occupied answer is never merged', async () => {
+test('line flow stays off until enabled; clicking an adjacent line then joins the existing answer', async () => {
   const f = await fixture();
   try {
     const lines = [620, 596, 572].map(y => ({ page: 1, rect: [80, y, 340, y + 18] as [number, number, number, number] }));
     f.sessions.preferences.flowAnswerLines = false; f.editor.setAnswerLines(lines); f.editor.addSuggestedField(1, lines[0]!.rect);
     const first = f.session.snapshot.fields[0]!; assert.equal(first.ruled, undefined);
     f.session.setValue(first.name, 'Keep separate'); f.sessions.preferences.flowAnswerLines = true;
-    f.editor.addSuggestedField(1, lines[1]!.rect); assert.equal(f.session.snapshot.fields.length, 2);
-    assert.deepEqual(f.session.snapshot.fields[1]!.ruled, { spacing: 24, rows: 2 }); assert.equal(first.value, 'Keep separate');
+    assert.equal(first.ruled, undefined, 'changing the setting alone does not alter existing answers');
+    f.editor.addSuggestedField(1, lines[1]!.rect); assert.equal(f.session.snapshot.fields.length, 1);
+    assert.deepEqual(first.ruled, { spacing: 24, rows: 3 }); assert.equal(first.value, 'Keep separate');
   } finally { f.dispose(); }
 });

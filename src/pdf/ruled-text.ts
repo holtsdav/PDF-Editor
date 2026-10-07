@@ -31,9 +31,10 @@ export function ruledAnswerBlock(lines: DetectedLine[], target: DetectedLine, oc
   if (index < 0 || occupied(sorted[index]!)) return;
   const joins = (a: DetectedLine, b: DetectedLine, spacing?: number): boolean => {
     const pitch = a.rect[1] - b.rect[1], ah = a.rect[3] - a.rect[1], bh = b.rect[3] - b.rect[1];
-    return !occupied(a) && !occupied(b) && Math.abs(a.rect[0] - b.rect[0]) <= 2 && Math.abs(a.rect[2] - b.rect[2]) <= 2
-      && Math.abs(ah - bh) <= 3 && pitch >= Math.max(ah, bh) - 1 && pitch <= Math.min(ah, bh) + 8
-      && pitch >= 10 && pitch <= 48 && (spacing === undefined || Math.abs(pitch - spacing) <= 1);
+    const edgeTolerance = Math.max(6, Math.min(a.rect[2] - a.rect[0], b.rect[2] - b.rect[0]) * 0.02);
+    return !occupied(a) && !occupied(b) && Math.abs(a.rect[0] - b.rect[0]) <= edgeTolerance && Math.abs(a.rect[2] - b.rect[2]) <= edgeTolerance
+      && Math.abs(ah - bh) <= 3 && pitch >= Math.max(ah, bh) - 1 && pitch <= Math.min(ah, bh) + 18
+      && pitch >= 10 && pitch <= 48 && (spacing === undefined || Math.abs(pitch - spacing) <= 2.25);
   };
   let first = index, last = index;
   let spacing = index + 1 < sorted.length && joins(sorted[index]!, sorted[index + 1]!) ? sorted[index]!.rect[1] - sorted[index + 1]!.rect[1]
@@ -45,7 +46,7 @@ export function ruledAnswerBlock(lines: DetectedLine[], target: DetectedLine, oc
   // Fit the full span rather than accumulating the first rasterized gap.
   // Fractional printed pitch alternates between neighboring pixel distances.
   spacing = (sorted[first]!.rect[1] - sorted[last]!.rect[1]) / (rows - 1);
-  for (let i = first; i <= last; i++) if (Math.abs(sorted[i]!.rect[1] - (sorted[first]!.rect[1] - (i - first) * spacing)) > 1) return;
+  for (let i = first; i <= last; i++) if (Math.abs(sorted[i]!.rect[1] - (sorted[first]!.rect[1] - (i - first) * spacing)) > 2) return;
   const left = Math.max(...sorted.slice(first, last + 1).map(line => line.rect[0]));
   const right = Math.min(...sorted.slice(first, last + 1).map(line => line.rect[2]));
   const rect: Rect = [left, sorted[last]!.rect[1], right, sorted[first]!.rect[3]];
