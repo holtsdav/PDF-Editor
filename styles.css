@@ -178,8 +178,7 @@
 .pfs-navigation .pfs-zoom { width: 68px; min-width: 68px; padding: 0 2px; background: transparent; font-size: var(--font-ui-smaller); font-variant-numeric: tabular-nums; }
 .pfs-tools-host { flex-shrink: 0; border-bottom: 1px solid var(--background-modifier-border); }
 .pfs-toolbar-spacer { flex-shrink: 0; }
-.pfs-surface.is-floating-toolbar .pfs-navigation,
-.pfs-surface.is-floating-toolbar .pfs-tools-host { position: fixed; z-index: 100; box-sizing: border-box; background: var(--background-primary); box-shadow: 0 3px 12px rgb(0 0 0 / 15%); }
+.pfs-floating-toolbar { position: fixed; z-index: 100; box-sizing: border-box; background: var(--background-primary); box-shadow: 0 3px 12px rgb(0 0 0 / 15%); }
 .pfs-tools-host > .pdf-form-studio-toolbar { display: flex; justify-content: flex-start; height: 44px; padding: 6px 10px; gap: 4px; overflow-x: auto; }
 .pfs-tools-host .pdf-form-studio-icon { width: 30px; min-width: 30px; height: 30px; border-radius: var(--radius-s); }
 .pfs-tools-host .pdf-form-studio-edit-controls { border-left: 1px solid var(--background-modifier-border); padding-left: 8px; margin-left: 4px; gap: 4px; }

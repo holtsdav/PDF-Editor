@@ -110,11 +110,15 @@ test('floating controls stay within the visible note and leave when the PDF scro
     const surface = Object.assign(Object.create(PdfSurface.prototype), { root, navigation, tools, toolbarSpacer, sessions: { preferences } }) as { updateFloatingToolbar(): void };
     surface.updateFloatingToolbar();
     assert.equal(root.classList.contains('is-floating-toolbar'), true);
-    assert.equal(navigation.style.top, '112px'); assert.equal(tools.style.top, '154px');
-    assert.equal(navigation.style.left, '70px'); assert.equal(navigation.style.width, '560px');
+    const floatingHost = doc.querySelector<HTMLElement>('body > .pfs-floating-toolbar')!;
+    assert.equal(floatingHost.style.top, '112px'); assert.equal(floatingHost.style.left, '70px');
+    assert.equal(floatingHost.style.width, '560px');
+    assert.deepEqual([...floatingHost.children], [navigation, tools]);
     assert.equal(toolbarSpacer.hidden, false); assert.equal(toolbarSpacer.style.height, '86px');
     bottom = 180; surface.updateFloatingToolbar();
     assert.equal(root.classList.contains('is-floating-toolbar'), false); assert.equal(toolbarSpacer.hidden, true);
+    assert.equal(doc.querySelector('.pfs-floating-toolbar'), null);
+    assert.deepEqual([...root.children], [navigation, tools, toolbarSpacer]);
   } finally { dom.window.close(); }
 });
 test('manual scans of a long PDF run in 100-page sections from the current page', async () => {

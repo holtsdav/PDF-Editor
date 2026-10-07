@@ -138,7 +138,7 @@ export class TextEditor extends Component {
       // Keyboard-opened dialogs also move focus deliberately. Never restore
       // a PDF input over the quick switcher, command palette or another note.
       if (this.focused && event.target !== this.focused.input) this.focused = undefined;
-      if (event.target instanceof doc.defaultView!.Element && !this.native.element.contains(event.target) && !event.target.closest('.pfs-tool-popover')) this.endTextEditing();
+      if (event.target instanceof doc.defaultView!.Element && !this.native.element.contains(event.target) && !event.target.closest('.pfs-tool-popover, .pdf-form-studio-toolbar')) this.endTextEditing();
       if (event.target instanceof doc.defaultView!.HTMLElement && this.toolbar.contains(event.target) && this.session) {
         this.releaseFocus(); this.focusInteraction = { input: event.target, release: this.session.beginInteraction() };
       }

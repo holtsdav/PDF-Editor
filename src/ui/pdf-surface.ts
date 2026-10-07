@@ -66,6 +66,7 @@ export class PdfSurface extends Component {
   private renaming = false;
   private floatingFrame?: number;
   private toolbarSpacer: HTMLElement;
+  private floatingHost?: HTMLElement;
 
   constructor(app: App, native: NativePdf, sessions: VaultSessions, state?: ReturnType<TextEditor['captureState']>, private autoDetectOnOpen = true) {
     super(); this.app = app; this.native = native; this.sessions = sessions; this.state = state;
@@ -266,10 +267,12 @@ export class PdfSurface extends Component {
   private updateFloatingToolbar(): void {
     const win = this.root.ownerDocument.defaultView!;
     const reset = () => {
-      this.root.classList.remove('is-floating-toolbar'); this.toolbarSpacer.hidden = true;
-      for (const element of [this.navigation, this.tools]) {
-        element.style.removeProperty('top'); element.style.removeProperty('left'); element.style.removeProperty('width');
+      if (this.floatingHost) {
+        this.root.insertBefore(this.navigation, this.toolbarSpacer);
+        this.root.insertBefore(this.tools, this.toolbarSpacer);
+        this.floatingHost.remove(); this.floatingHost = undefined;
       }
+      this.root.classList.remove('is-floating-toolbar'); this.toolbarSpacer.hidden = true;
     };
     if (!this.root.isConnected || !this.sessions.preferences.floatingToolbar) { reset(); return; }
     let clip = { top: 0, bottom: win.innerHeight, left: 0, right: win.innerWidth };
@@ -288,8 +291,13 @@ export class PdfSurface extends Component {
     if (rect.top >= top || rect.bottom <= top + height || clip.bottom <= top + height || right - left < 200 || height < 20) { reset(); return; }
     this.toolbarSpacer.hidden = false; this.toolbarSpacer.style.height = `${height}px`;
     this.root.classList.add('is-floating-toolbar');
-    Object.assign(this.navigation.style, { top: `${top}px`, left: `${left}px`, width: `${right - left}px` });
-    Object.assign(this.tools.style, { top: `${top + this.navigation.offsetHeight}px`, left: `${left}px`, width: `${right - left}px` });
+    if (!this.floatingHost) {
+      this.floatingHost = this.root.ownerDocument.createElement('div');
+      this.floatingHost.className = 'pfs-floating-toolbar';
+      this.floatingHost.append(this.navigation, this.tools);
+      this.root.ownerDocument.body.append(this.floatingHost);
+    }
+    Object.assign(this.floatingHost.style, { top: `${top}px`, left: `${left}px`, width: `${right - left}px` });
   }
   private zoom(delta: number): void { this.scale = Math.max(0.35, Math.min(3, (typeof this.scale === 'number' ? this.scale : this.entries[this.currentPage - 1]?.native.viewport.scale ?? 1) + delta)); this.layout(); }
   private requestVisible(): void {
@@ -526,6 +534,7 @@ export class PdfSurface extends Component {
     this.closed = true; this.generation++; this.searchGeneration++;
     if (this.frame !== undefined) this.root.ownerDocument.defaultView!.cancelAnimationFrame(this.frame);
     if (this.floatingFrame !== undefined) this.root.ownerDocument.defaultView!.cancelAnimationFrame(this.floatingFrame);
+    this.floatingHost?.remove(); this.floatingHost = undefined;
     if (this.editor) this.removeChild(this.editor);
     for (const entry of this.entries) { entry.version++; entry.rendering?.cancel(); entry.textTask?.cancel(); }
     if (this.task) void this.task.destroy().catch(() => {});
