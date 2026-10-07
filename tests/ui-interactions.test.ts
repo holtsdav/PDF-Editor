@@ -392,6 +392,25 @@ test('selected PDF elements copy, paste and duplicate without intercepting text 
     assert.equal(nativeCopy.defaultPrevented, false);
   } finally { f.dispose(); }
 });
+test('selecting an ink mark clears old printed-text selection before object copy', async () => {
+  const f = await fixture();
+  try {
+    const printed = f.doc.createElement('span'); printed.textContent = 'Old printed text'; f.doc.querySelector('#page')!.append(printed);
+    const range = f.doc.createRange(); range.selectNodeContents(printed); f.doc.getSelection()!.addRange(range);
+    assert.equal(f.doc.getSelection()!.toString(), 'Old printed text');
+    const stroke = f.session.addStroke(1, 'scribble', [[80, 500], [120, 520]], 2); f.editor.refresh();
+    const mark = f.doc.querySelector<SVGElement>(`[data-pdf-stroke="${stroke.id}"]`)!;
+    f.pointer(mark, 'pointerdown', 90, 290);
+    f.pointer(f.doc.querySelector('.pdf-form-studio-layer')!, 'pointerup', 90, 290);
+    assert.equal(f.doc.getSelection()!.toString(), '');
+    const values = new Map<string, string>();
+    const copy = new f.doc.defaultView!.Event('copy', { bubbles: true, cancelable: true });
+    Object.defineProperty(copy, 'clipboardData', { value: { setData(type: string, value: string) { values.set(type, value); } } });
+    mark.dispatchEvent(copy);
+    assert.equal(copy.defaultPrevented, true);
+    assert([...values.keys()].some(type => type !== 'text/plain'), 'the selected ink mark is copied as a PDF element');
+  } finally { f.dispose(); }
+});
 test('Save shortcut remains scoped to the PDF after its toolbar floats outside the editor', async () => {
   const f = await fixture();
   try {

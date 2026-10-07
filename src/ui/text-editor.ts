@@ -325,8 +325,10 @@ export class TextEditor extends Component {
     if (this.selectedStroke && this.session?.snapshot.strokes.some(stroke => stroke.id === this.selectedStroke && !stroke.readOnly)) return [{ kind: 'ink', id: this.selectedStroke }];
     return [];
   }
+  private clearBrowserSelection(): void { this.native.element.ownerDocument.getSelection()?.removeAllRanges(); }
   private selectCreated(objects: PdfObject[]): void {
     if (!objects.length) return;
+    this.clearBrowserSelection();
     this.selected = undefined; this.selectedStroke = undefined;
     if (objects.length > 1) this.selection?.selectObjects(objects);
     else {
@@ -548,7 +550,7 @@ export class TextEditor extends Component {
         const ink = this.addChild(new InkLayer(page, layer, this.session, {
           tool: () => this.tool, width: kind => kind === 'marker' ? this.markerWidth : this.penWidth, color: kind => kind === 'marker' ? this.markerColor : this.penColor, selected: () => this.selectedStroke,
           smooth: () => this.smoothPen, shapes: () => this.holdShapes, straightHold: () => this.holdHighlighter,
-          select: id => { this.selection?.clear(); this.selectedStroke = id; this.selected = undefined; this.focused = undefined; this.updateStatus(); this.refresh(); },
+          select: id => { if (id) this.clearBrowserSelection(); this.selection?.clear(); this.selectedStroke = id; this.selected = undefined; this.focused = undefined; this.updateStatus(); this.refresh(); },
           start: () => {
             this.focused = undefined; this.selected = undefined; this.selectedStroke = undefined;
             const active = layer.ownerDocument.activeElement;
@@ -731,6 +733,7 @@ export class TextEditor extends Component {
       border.setAttribute('aria-hidden', 'true'); frame.append(border);
     }
     const select = () => {
+      this.clearBrowserSelection();
       this.selection?.clear();
       this.selected = name; this.selectedStroke = undefined; this.updateStatus(); this.refresh();
     };
