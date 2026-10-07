@@ -93,12 +93,12 @@ test('one scan detects every PDF page, including offscreen pages, with bounded s
     assert.equal(f.surface.lineButton.getAttribute('aria-pressed'), 'false');
   } finally { f.dispose(); }
 });
-test('floating editing tools fade quickly without flickering at the pane top', async () => {
-  const dom = new JSDOM('<body><div id="pane" class="view-content"><div id="note" class="cm-scroller"><div id="wrapper"><div id="host"><div id="pdf"><div id="nav"></div><div id="tools"></div><div id="spacer" hidden></div></div></div></div></div></div></body>');
+test('floating PDF controls and editing tools stay together without flickering at the pane top', async () => {
+  const dom = new JSDOM('<body><div id="pane" class="view-content"><div id="note" class="cm-scroller"><div id="wrapper"><div id="host"><div id="pdf"><div id="nav"></div><div id="tools"></div><div id="spacer" hidden></div><div id="search" hidden></div><div id="message"></div></div></div></div></div></div></body>');
   try {
     const doc = dom.window.document, pane = doc.querySelector<HTMLElement>('#pane')!, note = doc.querySelector<HTMLElement>('#note')!, wrapper = doc.querySelector<HTMLElement>('#wrapper')!, host = doc.querySelector<HTMLElement>('#host')!, root = doc.querySelector<HTMLElement>('#pdf')!;
     const navigation = doc.querySelector<HTMLElement>('#nav')!, tools = doc.querySelector<HTMLElement>('#tools')!;
-    const toolbarSpacer = doc.querySelector<HTMLElement>('#spacer')!;
+    const toolbarSpacer = doc.querySelector<HTMLElement>('#spacer')!, searchRow = doc.querySelector<HTMLElement>('#search')!, message = doc.querySelector<HTMLElement>('#message')!;
     note.style.overflowY = 'auto';
     Object.defineProperties(note, { scrollHeight: { value: 1600 }, clientHeight: { value: 600 } });
     host.style.overflowY = 'auto';
@@ -107,14 +107,15 @@ test('floating editing tools fade quickly without flickering at the pane top', a
     Object.defineProperties(wrapper, { scrollHeight: { value: 1100 }, clientHeight: { value: 500 } });
     Object.defineProperties(navigation, { offsetHeight: { value: 42 } });
     Object.defineProperties(tools, { offsetHeight: { value: 44 } });
+    Object.defineProperties(searchRow, { offsetHeight: { value: 36 } });
     pane.getBoundingClientRect = () => ({ top: 100, bottom: 700, left: 50, right: 650, width: 600, height: 600 } as DOMRect);
     note.getBoundingClientRect = () => ({ top: 220, bottom: 700, left: 50, right: 650, width: 600, height: 480 } as DOMRect);
     host.getBoundingClientRect = () => ({ top: 320, bottom: 820, left: 60, right: 640, width: 580, height: 500 } as DOMRect);
     wrapper.getBoundingClientRect = () => ({ top: 300, bottom: 800, left: 60, right: 640, width: 580, height: 500 } as DOMRect);
-    let top = 75, bottom = 550;
+    let top = 110, bottom = 550;
     root.getBoundingClientRect = () => ({ top, bottom, left: 70, right: 630, width: 560, height: bottom - top } as DOMRect);
     const preferences = { floatingToolbar: true, toolbarTopOffset: 96 };
-    const surface = Object.assign(Object.create(PdfSurface.prototype), { root, navigation, tools, toolbarSpacer, native: { element: host }, sessions: { preferences } }) as { updateFloatingToolbar(): void };
+    const surface = Object.assign(Object.create(PdfSurface.prototype), { root, navigation, tools, toolbarSpacer, searchRow, message, native: { element: host }, sessions: { preferences } }) as { updateFloatingToolbar(): void };
     surface.updateFloatingToolbar();
     assert.equal(doc.querySelector('.pfs-floating-toolbar'), null, 'the tools stay inline while their natural position is visible');
     assert.equal(toolbarSpacer.hidden, true);
@@ -125,14 +126,17 @@ test('floating editing tools fade quickly without flickering at the pane top', a
     assert.equal(floatingHost.style.top, '100px'); assert.equal(floatingHost.style.left, '70px');
     assert.equal(floatingHost.style.paddingTop, '96px', 'the floating toolbar keeps the same covered top offset');
     assert.equal(floatingHost.style.width, '560px');
-    assert.deepEqual([...floatingHost.children], [tools]);
-    assert.equal(navigation.parentElement, root);
-    assert.equal(toolbarSpacer.hidden, false); assert.equal(toolbarSpacer.style.height, '44px');
+    assert.deepEqual([...floatingHost.children], [navigation, tools, searchRow]);
+    assert.equal(toolbarSpacer.hidden, false); assert.equal(toolbarSpacer.style.height, '86px');
+    searchRow.hidden = false; surface.updateFloatingToolbar();
+    assert.equal(toolbarSpacer.style.height, '122px', 'opening PDF search reserves space for its floating row');
+    searchRow.hidden = true; surface.updateFloatingToolbar();
+    assert.equal(toolbarSpacer.style.height, '86px');
     preferences.toolbarTopOffset = 0; surface.updateFloatingToolbar();
     assert.equal(floatingHost.style.top, '100px'); assert.equal(floatingHost.style.paddingTop, '0px');
-    top = 61; surface.updateFloatingToolbar();
+    top = 100; surface.updateFloatingToolbar();
     assert.equal(floatingHost.classList.contains('is-visible'), true, 'minor scroll reversals stay docked');
-    top = 65; surface.updateFloatingToolbar();
+    top = 110; surface.updateFloatingToolbar();
     assert.equal(floatingHost.classList.contains('is-visible'), false, 'the bar fades after crossing the exit buffer');
     top = -250; surface.updateFloatingToolbar();
     assert.equal(floatingHost.classList.contains('is-visible'), true, 'returning immediately reverses the fade');
@@ -147,7 +151,7 @@ test('floating editing tools fade quickly without flickering at the pane top', a
     await new Promise(resolve => setTimeout(resolve, 140));
     assert.equal(root.classList.contains('is-floating-toolbar'), false); assert.equal(toolbarSpacer.hidden, true);
     assert.equal(doc.querySelector('.pfs-floating-toolbar'), null);
-    assert.deepEqual([...root.children], [navigation, tools, toolbarSpacer]);
+    assert.deepEqual([...root.children], [navigation, tools, toolbarSpacer, searchRow, message]);
     Object.defineProperty(dom.window, 'matchMedia', { value: () => ({ matches: true }) });
     bottom = 550; surface.updateFloatingToolbar();
     bottom = 140; surface.updateFloatingToolbar();

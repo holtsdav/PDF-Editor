@@ -179,10 +179,10 @@
 .pfs-tools-host { flex-shrink: 0; border-bottom: 1px solid var(--background-modifier-border); }
 .pfs-toolbar-spacer { flex-shrink: 0; }
 .pfs-floating-toolbar { position: fixed; z-index: 100; box-sizing: border-box; background: var(--background-primary); box-shadow: 0 3px 12px rgb(0 0 0 / 15%); pointer-events: none; }
-.pfs-floating-toolbar .pfs-tools-host { opacity: 0; transition: opacity 90ms ease-out; }
+.pfs-floating-toolbar > .pfs-navigation, .pfs-floating-toolbar > .pfs-tools-host, .pfs-floating-toolbar > .pfs-search { opacity: 0; transition: opacity 90ms ease-out; }
 .pfs-floating-toolbar.is-visible { pointer-events: auto; }
-.pfs-floating-toolbar.is-visible .pfs-tools-host { opacity: 1; }
-@media (prefers-reduced-motion: reduce) { .pfs-floating-toolbar .pfs-tools-host { transition: none; } }
+.pfs-floating-toolbar.is-visible > .pfs-navigation, .pfs-floating-toolbar.is-visible > .pfs-tools-host, .pfs-floating-toolbar.is-visible > .pfs-search { opacity: 1; }
+@media (prefers-reduced-motion: reduce) { .pfs-floating-toolbar > .pfs-navigation, .pfs-floating-toolbar > .pfs-tools-host, .pfs-floating-toolbar > .pfs-search { transition: none; } }
 .pfs-tools-host > .pdf-form-studio-toolbar { display: flex; justify-content: flex-start; height: 44px; padding: 6px 10px; gap: 4px; overflow-x: auto; }
 .pfs-tools-host .pdf-form-studio-icon { width: 30px; min-width: 30px; height: 30px; border-radius: var(--radius-s); }
 .pfs-tools-host .pdf-form-studio-edit-controls { border-left: 1px solid var(--background-modifier-border); padding-left: 8px; margin-left: 4px; gap: 4px; }

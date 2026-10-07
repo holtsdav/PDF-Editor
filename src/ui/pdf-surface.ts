@@ -124,9 +124,9 @@ export class PdfSurface extends Component {
     this.searchStatus = this.searchRow.createSpan({ cls: 'pfs-search-status' });
     this.button(this.searchRow, 'Previous match', 'chevron-up', () => this.nextMatch(-1));
     this.button(this.searchRow, 'Next match', 'chevron-down', () => this.nextMatch(1));
-    this.button(this.searchRow, 'Close search', 'x', () => { this.searchRow.hidden = true; this.search.value = ''; this.searchGeneration++; this.highlight(); this.scroller.focus(); });
+    this.button(this.searchRow, 'Close search', 'x', () => { this.searchRow.hidden = true; this.search.value = ''; this.searchGeneration++; this.highlight(); this.scroller.focus(); this.queueFloatingToolbar(); });
     this.registerDomEvent(this.search, 'input', () => { void this.find().catch(error => this.fail(error)); });
-    this.registerDomEvent(this.search, 'keydown', event => { event.stopPropagation(); if (event.key === 'Enter') { event.preventDefault(); this.nextMatch(event.shiftKey ? -1 : 1); } if (event.key === 'Escape') { this.searchRow.hidden = true; this.scroller.focus(); } });
+    this.registerDomEvent(this.search, 'keydown', event => { event.stopPropagation(); if (event.key === 'Enter') { event.preventDefault(); this.nextMatch(event.shiftKey ? -1 : 1); } if (event.key === 'Escape') { this.searchRow.hidden = true; this.scroller.focus(); this.queueFloatingToolbar(); } });
     this.message = this.root.createDiv({ cls: 'pfs-surface-message', text: 'Opening PDF…', attr: { role: 'status' } });
     this.scroller = this.root.createDiv({ cls: 'pfs-pages', attr: { tabindex: '0', 'aria-label': 'PDF pages' } });
     this.stack = this.scroller.createDiv({ cls: 'pfs-page-stack' });
@@ -273,7 +273,9 @@ export class PdfSurface extends Component {
       if (this.floatingExitTimer !== undefined) win.clearTimeout(this.floatingExitTimer);
       this.floatingExitTimer = undefined;
       if (this.floatingHost) {
+        this.root.insertBefore(this.navigation, this.toolbarSpacer);
         this.root.insertBefore(this.tools, this.toolbarSpacer);
+        this.root.insertBefore(this.searchRow, this.message);
         this.floatingHost.remove(); this.floatingHost = undefined;
       }
       this.root.classList.remove('is-floating-toolbar'); this.toolbarSpacer.hidden = true;
@@ -309,15 +311,15 @@ export class PdfSurface extends Component {
     }
     const rect = this.root.getBoundingClientRect();
     const top = clip.top;
-    const height = this.tools.offsetHeight;
+    const height = this.navigation.offsetHeight + this.tools.offsetHeight + (this.searchRow.hidden ? 0 : this.searchRow.offsetHeight);
     const offset = this.sessions.preferences.toolbarTopOffset;
     const left = Math.max(rect.left, clip.left), right = Math.min(rect.right, clip.right);
-    // Keep the PDF header in its normal place. Float only the editing tools
-    // once their natural position reaches the top of the note.
+    // Keep the document controls and editing tools together once their
+    // natural position reaches the top of the note.
     // A small scroll buffer prevents a one-pixel reversal from repeatedly
     // starting and cancelling the fade at the note's top edge.
     const navThreshold = clip.top + (this.floatingHost ? FLOAT_SCROLL_BUFFER : -FLOAT_SCROLL_BUFFER);
-    if (rect.top + this.navigation.offsetHeight >= navThreshold || rect.bottom <= top + offset + height || clip.bottom <= top + offset + height || right - left < 200 || height < 20) { hide(); return; }
+    if (rect.top >= navThreshold || rect.bottom <= top + offset + height || clip.bottom <= top + offset + height || right - left < 200 || height < 20) { hide(); return; }
     this.toolbarSpacer.hidden = false; this.toolbarSpacer.style.height = `${height}px`;
     this.root.classList.add('is-floating-toolbar');
     if (this.floatingExitTimer !== undefined) { win.clearTimeout(this.floatingExitTimer); this.floatingExitTimer = undefined; }
@@ -325,7 +327,7 @@ export class PdfSurface extends Component {
     if (!this.floatingHost) {
       this.floatingHost = this.root.ownerDocument.createElement('div');
       this.floatingHost.className = 'pfs-floating-toolbar';
-      this.floatingHost.append(this.tools);
+      this.floatingHost.append(this.navigation, this.tools, this.searchRow);
       this.root.ownerDocument.body.append(this.floatingHost);
     }
     Object.assign(this.floatingHost.style, { top: `${top}px`, left: `${left}px`, width: `${right - left}px`, paddingTop: `${offset}px` });
@@ -548,7 +550,7 @@ export class PdfSurface extends Component {
     const ref = dest[0]; const number = typeof ref === 'number' ? ref : await this.pdf!.getPageIndex(ref as { num: number; gen: number }); this.go(number + 1);
   }
   private go(number: number): void { const index = Math.max(1, Math.min(this.entries.length, Math.round(number) || 1)); const entry = this.entries[index - 1]; if (entry) { this.currentPage = index; this.updateLineButton(); this.scroller.scrollTop = entry.native.div.offsetTop; this.requestVisible(); } }
-  private showSearch(): void { this.searchRow.hidden = false; this.search.focus(); this.search.select(); }
+  private showSearch(): void { this.searchRow.hidden = false; this.search.focus(); this.search.select(); this.queueFloatingToolbar(); }
   private async find(): Promise<void> {
     const generation = ++this.searchGeneration, query = this.search.value.trim().toLocaleLowerCase();
     this.matchesFound = []; this.matchIndex = -1; this.searchStatus.textContent = query ? 'Searching…' : ''; this.highlight();

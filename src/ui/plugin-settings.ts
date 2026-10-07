@@ -17,7 +17,7 @@ export class PdfSettingsTab extends PluginSettingTab {
         try { await this.sessions.updatePreferences({ ...this.sessions.preferences, toolbarTopOffset: value }); }
         catch (error) { new Notice(`Could not save settings: ${String(error)}`); }
       }));
-    this.toggle('floatingToolbar', 'Floating PDF toolbar', 'Keep the editing tools visible at the top of a note while its PDF is on screen. You can also switch this from the PDF options menu.');
+    this.toggle('floatingToolbar', 'Floating PDF toolbar', 'Keep the PDF controls and editing tools visible at the top of a note while its PDF is on screen. You can also switch this from the PDF options menu.');
     new Setting(containerEl).setName('Answer lines').setHeading();
     this.toggle('autoDetectLines', 'Detect answer lines on PDF open', 'Scan for blank answer lines when a PDF opens. For larger PDFs, use the scan button beside Add text box to scan up to 100 pages at a time.');
     new Setting(containerEl).setName('Automatic detection page limit').setDesc('Only scan automatically when the PDF has this many pages or fewer. Manual scans can cover larger PDFs in 100-page sections.').addSlider(slider => slider
