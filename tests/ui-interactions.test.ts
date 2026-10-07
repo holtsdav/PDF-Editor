@@ -431,6 +431,23 @@ test('Save shortcut remains scoped to the PDF after its toolbar floats outside t
     assert.equal(outside.defaultPrevented, false);
   } finally { f.dispose(); }
 });
+test('floating toolbar actions retain a selected group until the action runs', async () => {
+  const f = await fixture();
+  try {
+    const first = f.session.add(1, [80, 580, 180, 610], 12, true); f.session.setValue(first.name, 'First');
+    const second = f.session.add(1, [220, 580, 320, 610], 12, true); f.session.setValue(second.name, 'Second');
+    f.editor.refresh();
+    const frames = f.doc.querySelectorAll('.pdf-form-studio-box');
+    f.pointer(frames[0]!, 'pointerdown', 100, 200, true);
+    f.pointer(frames[1]!, 'pointerdown', 250, 200, true);
+    assert.equal(f.doc.querySelectorAll('.is-multi-selected').length, 2);
+    const host = f.doc.createElement('div'); host.className = 'pfs-floating-toolbar';
+    host.append(f.doc.querySelector('#tools')!); f.doc.body.append(host);
+    const remove = host.querySelector<HTMLButtonElement>('button[aria-label^="Remove 2 selected objects"]')!;
+    f.pointer(remove, 'pointerdown'); remove.focus(); remove.click();
+    assert.equal(f.session.snapshot.fields.length, 0);
+  } finally { f.dispose(); }
+});
 test('rounded browser scroll measurements do not append an unnecessary ruled row', async () => {
   const f = await fixture();
   try {

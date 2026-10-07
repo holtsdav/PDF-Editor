@@ -226,6 +226,7 @@ export class TextEditor extends Component {
     this.session = session;
     this.selection = this.addChild(new ObjectSelection(session, this.native.element, {
       enabled: () => this.tool === 'select', changed: () => { this.updateStatus(); this.refresh(); }, save: () => this.scheduleSave(), error: error => this.showError(error),
+      floatingToolbar: () => this.floatingToolbarHost(),
       endTyping: () => { this.selected = undefined; this.selectedStroke = undefined; this.focused = undefined; this.endTextEditing(); }
     }, this.app));
     this.unsubscribe = session.subscribe(() => { this.updateStatus(); this.refresh(); });
@@ -312,11 +313,14 @@ export class TextEditor extends Component {
     const element = target instanceof this.native.element.ownerDocument.defaultView!.Element ? target : undefined;
     return !!element?.closest('input, textarea, [contenteditable="true"]');
   }
+  private floatingToolbarHost(): HTMLElement | undefined {
+    const host = this.native.toolbarHost().parentElement;
+    return host?.classList.contains('pfs-floating-toolbar') ? host : undefined;
+  }
   private shortcutTarget(target: EventTarget | null): boolean {
     const doc = this.native.element.ownerDocument;
-    const floatingHost = this.native.toolbarHost().parentElement;
     return target instanceof doc.defaultView!.Node && (this.native.element.contains(target)
-      || !!floatingHost?.classList.contains('pfs-floating-toolbar') && floatingHost.contains(target)
+      || !!this.floatingToolbarHost()?.contains(target)
       || target === doc.body && !!this.selection?.active);
   }
   private selectedObjects(): PdfObject[] {

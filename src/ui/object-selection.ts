@@ -10,6 +10,7 @@ import type { PdfObject, TextSession } from '../pdf/text-session';
 
 interface Options {
   enabled(): boolean; changed(): void; save(): void; error(error: unknown): void; endTyping(): void;
+  floatingToolbar(): HTMLElement | undefined;
 }
 interface PageSelection { page: NativePage; layer: HTMLElement; overlay: HTMLElement; dispose(): void }
 interface Gesture {
@@ -40,16 +41,17 @@ export class ObjectSelection extends Component {
     }
     this.registerDomEvent(doc, 'pointerdown', event => {
       const target = event.target;
-      if (target instanceof doc.defaultView!.Element && !root.contains(target) && !target.closest('.pfs-tool-popover')) this.clear();
+      if (target instanceof doc.defaultView!.Element && !this.withinEditor(target) && !target.closest('.pfs-tool-popover')) this.clear();
     }, true);
     this.registerDomEvent(doc, 'focusin', event => {
       const target = event.target;
-      if (target instanceof doc.defaultView!.Element && (!root.contains(target) || target.matches('input, textarea'))) this.clear();
+      if (target instanceof doc.defaultView!.Element && (!this.withinEditor(target) || (root.contains(target) && target.matches('input, textarea')))) this.clear();
     });
     this.registerDomEvent(doc.defaultView!, 'keydown', event => this.keyDown(event), true);
     this.register(() => { this.cancel(); this.clear(); for (const entry of this.pages.values()) entry.dispose(); this.pages.clear(); });
   }
   get active(): boolean { return !!this.gesture || this.objects.length > 0; }
+  private withinEditor(target: Element): boolean { return this.root.contains(target) || !!this.options.floatingToolbar()?.contains(target); }
   has(kind: PdfObject['kind'], id: string): boolean { return this.objects.some(object => object.kind === kind && object.id === id); }
   clear(): void { if (this.objects.length) this.set([]); }
   selectObjects(objects: PdfObject[]): void { this.cancel(); this.set(objects); }
@@ -192,7 +194,7 @@ export class ObjectSelection extends Component {
   remove(): void { if (!this.objects.length) return; this.cancel(); this.session.deleteObjects(this.objects); this.clear(); this.options.save(); }
   private keyDown(event: KeyboardEvent): void {
     const doc = this.root.ownerDocument, target = event.target;
-    if (!(target instanceof doc.defaultView!.Element) || (!this.root.contains(target) && target !== doc.body && target !== doc.documentElement) || target.matches('input, textarea') || !this.objects.length) return;
+    if (!(target instanceof doc.defaultView!.Element) || (!this.withinEditor(target) && target !== doc.body && target !== doc.documentElement) || target.matches('input, textarea') || !this.objects.length) return;
     try {
       if (event.key === 'Escape') { this.cancel(); this.clear(); return; }
       if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); event.stopImmediatePropagation(); this.remove(); return; }

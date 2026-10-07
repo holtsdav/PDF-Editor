@@ -5,7 +5,16 @@ import type { VaultSessions } from '../pdf/vault-sessions';
 import { MAX_AUTO_DETECT_PAGES, MAX_TOOLBAR_TOP_OFFSET } from '../pdf/tool-preferences';
 
 export class PdfSettingsTab extends PluginSettingTab {
-  constructor(app: App, plugin: Plugin, private sessions: VaultSessions) { super(app, plugin); }
+  private confirmModal?: Modal;
+  private unloaded = false;
+  constructor(app: App, plugin: Plugin, private sessions: VaultSessions) {
+    super(app, plugin);
+    plugin.register(() => { this.unloaded = true; this.closeConfirmation(); });
+  }
+
+  hide(): void { this.closeConfirmation(); super.hide(); }
+
+  private closeConfirmation(): void { this.confirmModal?.close(); this.confirmModal = undefined; }
 
   display(): void {
     const { containerEl } = this; containerEl.empty();
@@ -59,12 +68,17 @@ export class PdfSettingsTab extends PluginSettingTab {
   }
 
   private confirmClearRecovery(): void {
+    if (this.unloaded) return;
+    this.closeConfirmation();
     const modal = new Modal(this.app);
+    this.confirmModal = modal;
+    modal.onClose = () => { if (this.confirmModal === modal) this.confirmModal = undefined; };
     modal.setTitle('Delete all PDF backups?');
     modal.contentEl.createEl('p', { text: 'This permanently removes the backup copies. Your PDFs stay in your vault. Close open PDF Editor views and save pending changes first.' });
     modal.contentEl.createEl('button', { text: 'Cancel' }).addEventListener('click', () => modal.close());
     modal.contentEl.createEl('button', { text: 'Delete backups', cls: 'mod-warning' }).addEventListener('click', () => {
-      void this.sessions.clearRecoveryStorage().then(() => { modal.close(); new Notice('PDF backups deleted.'); this.display(); })
+      if (this.unloaded || this.confirmModal !== modal) return;
+      void this.sessions.clearRecoveryStorage().then(() => { modal.close(); if (!this.unloaded) { new Notice('PDF backups deleted.'); this.display(); } })
         .catch(error => new Notice(`Could not delete backups: ${String(error)}`));
     });
     modal.open();

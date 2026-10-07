@@ -166,9 +166,11 @@ test('a page scrolled away during text loading can render its text and links on 
     const scroller = doc.createElement('div');
     Object.defineProperties(scroller, { clientWidth: { value: 600 }, clientHeight: { value: 800 }, scrollTop: { value: 0, writable: true } });
     dom.window.HTMLCanvasElement.prototype.getContext = (() => ({ drawImage() {} })) as unknown as typeof dom.window.HTMLCanvasElement.prototype.getContext;
-    let releaseText!: () => void, textStarted!: () => void, reads = 0;
+    let releaseText!: () => void, textStarted!: () => void, releaseEvictedText!: () => void, evictionTextStarted!: () => void, reads = 0;
     const deferred = new Promise<void>(resolve => { releaseText = resolve; });
     const started = new Promise<void>(resolve => { textStarted = resolve; });
+    const evictedText = new Promise<void>(resolve => { releaseEvictedText = resolve; });
+    const evictionStarted = new Promise<void>(resolve => { evictionTextStarted = resolve; });
     const text = doc.createElement('div'), links = doc.createElement('div');
     Object.assign(dom.window.HTMLElement.prototype, { createEl(this: HTMLElement, tag: string, options: { cls?: string; attr?: Record<string, string> }) {
       const element = doc.createElement(tag); element.className = options.cls ?? '';
@@ -180,13 +182,13 @@ test('a page scrolled away during text loading can render its text and links on 
       canvas: doc.createElement('canvas'), text, links, page: {
         getViewport: () => viewport,
         render: () => ({ promise: Promise.resolve(), cancel() {} }),
-        async getTextContent() { if (++reads === 1) { textStarted(); await deferred; } return {}; },
+        async getTextContent() { reads++; if (reads === 1) { textStarted(); await deferred; } if (reads === 3) { evictionTextStarted(); await evictedText; } return {}; },
         async getAnnotations() { return [{ subtype: 'Link', rect: [1, 2, 3, 4], url: 'https://example.com' }]; }
       } };
     const surface = Object.assign(Object.create(PdfSurface.prototype), { root: doc.querySelector('#root'), scroller, entries: [entry],
       paintedEntries: new Set(), closed: false, currentPage: 1, renderQueue: Promise.resolve(),
       pageInput: doc.createElement('input'), previous: doc.createElement('button'), next: doc.createElement('button'),
-      library: { TextLayer: class { private readonly options: { container: HTMLElement }; constructor(options: { container: HTMLElement }) { this.options = options; } async render() { this.options.container.textContent = 'Page text'; } } },
+      library: { TextLayer: class { private readonly options: { container: HTMLElement }; constructor(options: { container: HTMLElement }) { this.options = options; } async render() { this.options.container.textContent = 'Page text'; } cancel() {} } },
       highlight() {}, updateLineButton() {}, fail(error: unknown) { throw error; } }) as { paintVisible(): void; renderQueue: Promise<void> };
     surface.paintVisible();
     await started;
@@ -196,6 +198,13 @@ test('a page scrolled away during text loading can render its text and links on 
     assert.equal(text.textContent, 'Page text');
     assert.equal(links.querySelectorAll('a').length, 1);
     assert.equal(entry.painted, 1);
+    entry.version++; surface.paintVisible(); await evictionStarted;
+    scroller.scrollTop = 3000; surface.paintVisible();
+    assert.equal(entry.canvas.width, 0, 'eviction releases the old bitmap');
+    scroller.scrollTop = 0; surface.paintVisible();
+    releaseEvictedText(); await surface.renderQueue;
+    assert(entry.canvas.width > 0, 'returning after eviction restores the bitmap');
+    assert.equal(entry.painted, entry.version);
   } finally { dom.window.close(); }
 });
 test('manual scans of a long PDF run in 100-page sections from the current page', async () => {

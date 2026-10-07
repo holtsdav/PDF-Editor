@@ -350,6 +350,9 @@ export class PdfSurface extends Component {
     if (this.activeRender && outside(this.activeRender)) this.activeRender.rendering?.cancel();
     for (const entry of this.paintedEntries) {
       if (!outside(entry) || Math.abs(entry.native.div.offsetTop - top) <= height * 3) continue;
+      // Invalidate work awaiting text or annotations before clearing its bitmap.
+      entry.version++;
+      if (entry !== this.activeRender) entry.rendering?.cancel();
       entry.textTask?.cancel(); entry.textTask = undefined;
       entry.canvas.width = 0; entry.canvas.height = 0; entry.painted = -1;
       entry.text.replaceChildren(); entry.links.replaceChildren(); this.paintedEntries.delete(entry);
