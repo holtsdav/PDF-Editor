@@ -268,7 +268,6 @@ export class PdfSurface extends Component {
     const win = this.root.ownerDocument.defaultView!;
     const reset = () => {
       if (this.floatingHost) {
-        this.root.insertBefore(this.navigation, this.toolbarSpacer);
         this.root.insertBefore(this.tools, this.toolbarSpacer);
         this.floatingHost.remove(); this.floatingHost = undefined;
       }
@@ -276,25 +275,37 @@ export class PdfSurface extends Component {
     };
     if (!this.root.isConnected || !this.sessions.preferences.floatingToolbar) { reset(); return; }
     let clip = { top: 0, bottom: win.innerHeight, left: 0, right: win.innerWidth };
-    for (let parent = this.root.parentElement; parent; parent = parent.parentElement) {
-      const overflow = win.getComputedStyle(parent).overflowY;
-      if (!/(auto|scroll|overlay)/.test(overflow) || parent.scrollHeight <= parent.clientHeight) continue;
-      const rect = parent.getBoundingClientRect();
-      clip = { top: Math.max(clip.top, rect.top), bottom: Math.min(clip.bottom, rect.bottom),
-        left: Math.max(clip.left, rect.left), right: Math.min(clip.right, rect.right) };
-      break;
+    // Dock to the pane's visible content, not an embed wrapper or a note
+    // scroller whose top can sit well below the actual top of the pane.
+    const pane = this.native.element.closest<HTMLElement>('.view-content');
+    if (pane) {
+      const bounds = pane.getBoundingClientRect();
+      clip = { top: Math.max(clip.top, bounds.top), bottom: Math.min(clip.bottom, bounds.bottom),
+        left: Math.max(clip.left, bounds.left), right: Math.min(clip.right, bounds.right) };
+    } else {
+      const noteScroller = this.native.element.closest<HTMLElement>('.cm-scroller, .markdown-preview-view');
+      for (let parent = noteScroller ?? this.native.element.parentElement; parent; parent = parent.parentElement) {
+        const overflow = win.getComputedStyle(parent).overflowY;
+        if (!/(auto|scroll|overlay)/.test(overflow) || parent.scrollHeight <= parent.clientHeight) continue;
+        const bounds = parent.getBoundingClientRect();
+        clip = { top: Math.max(clip.top, bounds.top), bottom: Math.min(clip.bottom, bounds.bottom),
+          left: Math.max(clip.left, bounds.left), right: Math.min(clip.right, bounds.right) };
+        break;
+      }
     }
     const rect = this.root.getBoundingClientRect();
-    const top = clip.top + this.sessions.preferences.toolbarTopOffset;
-    const height = this.navigation.offsetHeight + this.tools.offsetHeight;
+    const top = clip.top;
+    const height = this.tools.offsetHeight;
     const left = Math.max(rect.left, clip.left), right = Math.min(rect.right, clip.right);
-    if (rect.top >= top || rect.bottom <= top + height || clip.bottom <= top + height || right - left < 200 || height < 20) { reset(); return; }
+    // Keep the PDF header in its normal place. Float only the editing tools
+    // once their natural position reaches the top of the note.
+    if (rect.top + this.navigation.offsetHeight >= clip.top || rect.bottom <= top + height || clip.bottom <= top + height || right - left < 200 || height < 20) { reset(); return; }
     this.toolbarSpacer.hidden = false; this.toolbarSpacer.style.height = `${height}px`;
     this.root.classList.add('is-floating-toolbar');
     if (!this.floatingHost) {
       this.floatingHost = this.root.ownerDocument.createElement('div');
       this.floatingHost.className = 'pfs-floating-toolbar';
-      this.floatingHost.append(this.navigation, this.tools);
+      this.floatingHost.append(this.tools);
       this.root.ownerDocument.body.append(this.floatingHost);
     }
     Object.assign(this.floatingHost.style, { top: `${top}px`, left: `${left}px`, width: `${right - left}px` });

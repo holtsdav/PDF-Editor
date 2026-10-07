@@ -93,29 +93,42 @@ test('one scan detects every PDF page, including offscreen pages, with bounded s
     assert.equal(f.surface.lineButton.getAttribute('aria-pressed'), 'false');
   } finally { f.dispose(); }
 });
-test('floating controls stay within the visible note and leave when the PDF scrolls away', () => {
-  const dom = new JSDOM('<body><div id="note"><div id="pdf"><div id="nav"></div><div id="tools"></div><div id="spacer" hidden></div></div></div></body>');
+test('floating editing tools dock at the pane top and leave when the PDF scrolls away', () => {
+  const dom = new JSDOM('<body><div id="pane" class="view-content"><div id="note" class="cm-scroller"><div id="wrapper"><div id="host"><div id="pdf"><div id="nav"></div><div id="tools"></div><div id="spacer" hidden></div></div></div></div></div></div></body>');
   try {
-    const doc = dom.window.document, note = doc.querySelector<HTMLElement>('#note')!, root = doc.querySelector<HTMLElement>('#pdf')!;
+    const doc = dom.window.document, pane = doc.querySelector<HTMLElement>('#pane')!, note = doc.querySelector<HTMLElement>('#note')!, wrapper = doc.querySelector<HTMLElement>('#wrapper')!, host = doc.querySelector<HTMLElement>('#host')!, root = doc.querySelector<HTMLElement>('#pdf')!;
     const navigation = doc.querySelector<HTMLElement>('#nav')!, tools = doc.querySelector<HTMLElement>('#tools')!;
     const toolbarSpacer = doc.querySelector<HTMLElement>('#spacer')!;
     note.style.overflowY = 'auto';
     Object.defineProperties(note, { scrollHeight: { value: 1600 }, clientHeight: { value: 600 } });
+    host.style.overflowY = 'auto';
+    Object.defineProperties(host, { scrollHeight: { value: 1200 }, clientHeight: { value: 500 } });
+    wrapper.style.overflowY = 'auto';
+    Object.defineProperties(wrapper, { scrollHeight: { value: 1100 }, clientHeight: { value: 500 } });
     Object.defineProperties(navigation, { offsetHeight: { value: 42 } });
     Object.defineProperties(tools, { offsetHeight: { value: 44 } });
-    note.getBoundingClientRect = () => ({ top: 100, bottom: 700, left: 50, right: 650, width: 600, height: 600 } as DOMRect);
-    let bottom = 550;
-    root.getBoundingClientRect = () => ({ top: -250, bottom, left: 70, right: 630, width: 560, height: bottom + 250 } as DOMRect);
-    const preferences = { floatingToolbar: true, toolbarTopOffset: 12 };
-    const surface = Object.assign(Object.create(PdfSurface.prototype), { root, navigation, tools, toolbarSpacer, sessions: { preferences } }) as { updateFloatingToolbar(): void };
+    pane.getBoundingClientRect = () => ({ top: 100, bottom: 700, left: 50, right: 650, width: 600, height: 600 } as DOMRect);
+    note.getBoundingClientRect = () => ({ top: 220, bottom: 700, left: 50, right: 650, width: 600, height: 480 } as DOMRect);
+    host.getBoundingClientRect = () => ({ top: 320, bottom: 820, left: 60, right: 640, width: 580, height: 500 } as DOMRect);
+    wrapper.getBoundingClientRect = () => ({ top: 300, bottom: 800, left: 60, right: 640, width: 580, height: 500 } as DOMRect);
+    let top = 75, bottom = 550;
+    root.getBoundingClientRect = () => ({ top, bottom, left: 70, right: 630, width: 560, height: bottom - top } as DOMRect);
+    const preferences = { floatingToolbar: true, toolbarTopOffset: 96 };
+    const surface = Object.assign(Object.create(PdfSurface.prototype), { root, navigation, tools, toolbarSpacer, native: { element: host }, sessions: { preferences } }) as { updateFloatingToolbar(): void };
     surface.updateFloatingToolbar();
+    assert.equal(doc.querySelector('.pfs-floating-toolbar'), null, 'the tools stay inline while their natural position is visible');
+    assert.equal(toolbarSpacer.hidden, true);
+    top = -250; surface.updateFloatingToolbar();
     assert.equal(root.classList.contains('is-floating-toolbar'), true);
     const floatingHost = doc.querySelector<HTMLElement>('body > .pfs-floating-toolbar')!;
-    assert.equal(floatingHost.style.top, '112px'); assert.equal(floatingHost.style.left, '70px');
+    assert.equal(floatingHost.style.top, '100px'); assert.equal(floatingHost.style.left, '70px');
     assert.equal(floatingHost.style.width, '560px');
-    assert.deepEqual([...floatingHost.children], [navigation, tools]);
-    assert.equal(toolbarSpacer.hidden, false); assert.equal(toolbarSpacer.style.height, '86px');
-    bottom = 180; surface.updateFloatingToolbar();
+    assert.deepEqual([...floatingHost.children], [tools]);
+    assert.equal(navigation.parentElement, root);
+    assert.equal(toolbarSpacer.hidden, false); assert.equal(toolbarSpacer.style.height, '44px');
+    preferences.toolbarTopOffset = 0; surface.updateFloatingToolbar();
+    assert.equal(floatingHost.style.top, '100px', 'the inline offset does not push floating controls into the PDF');
+    bottom = 140; surface.updateFloatingToolbar();
     assert.equal(root.classList.contains('is-floating-toolbar'), false); assert.equal(toolbarSpacer.hidden, true);
     assert.equal(doc.querySelector('.pfs-floating-toolbar'), null);
     assert.deepEqual([...root.children], [navigation, tools, toolbarSpacer]);

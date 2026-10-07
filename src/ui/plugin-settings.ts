@@ -9,7 +9,7 @@ export class PdfSettingsTab extends PluginSettingTab {
 
   display(): void {
     const { containerEl } = this; containerEl.empty();
-    new Setting(containerEl).setName('PDF toolbar top offset').setDesc('Move the PDF header and tools down if another plugin uses the top of the view. 0 px keeps the default position.').addSlider(slider => slider
+    new Setting(containerEl).setName('PDF toolbar top offset').setDesc('Move the PDF header and tools down inside the PDF. Floating tools stay at the top of the note.').addSlider(slider => slider
       .setLimits(0, MAX_TOOLBAR_TOP_OFFSET, 1)
       .setValue(this.sessions.preferences.toolbarTopOffset)
       .setDynamicTooltip()
@@ -17,7 +17,7 @@ export class PdfSettingsTab extends PluginSettingTab {
         try { await this.sessions.updatePreferences({ ...this.sessions.preferences, toolbarTopOffset: value }); }
         catch (error) { new Notice(`Could not save settings: ${String(error)}`); }
       }));
-    this.toggle('floatingToolbar', 'Floating PDF toolbar', 'Keep the PDF controls visible while scrolling through a note, until the PDF leaves the screen. You can also switch this from the PDF options menu.');
+    this.toggle('floatingToolbar', 'Floating PDF toolbar', 'Keep the editing tools visible at the top of a note while its PDF is on screen. You can also switch this from the PDF options menu.');
     new Setting(containerEl).setName('Answer lines').setHeading();
     this.toggle('autoDetectLines', 'Detect answer lines on PDF open', 'Scan for blank answer lines when a PDF opens. For larger PDFs, use the scan button beside Add text box to scan up to 100 pages at a time.');
     new Setting(containerEl).setName('Automatic detection page limit').setDesc('Only scan automatically when the PDF has this many pages or fewer. Manual scans can cover larger PDFs in 100-page sections.').addSlider(slider => slider
