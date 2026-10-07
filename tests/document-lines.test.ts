@@ -93,6 +93,30 @@ test('one scan detects every PDF page, including offscreen pages, with bounded s
     assert.equal(f.surface.lineButton.getAttribute('aria-pressed'), 'false');
   } finally { f.dispose(); }
 });
+test('floating controls stay within the visible note and leave when the PDF scrolls away', () => {
+  const dom = new JSDOM('<body><div id="note"><div id="pdf"><div id="nav"></div><div id="tools"></div><div id="spacer" hidden></div></div></div></body>');
+  try {
+    const doc = dom.window.document, note = doc.querySelector<HTMLElement>('#note')!, root = doc.querySelector<HTMLElement>('#pdf')!;
+    const navigation = doc.querySelector<HTMLElement>('#nav')!, tools = doc.querySelector<HTMLElement>('#tools')!;
+    const toolbarSpacer = doc.querySelector<HTMLElement>('#spacer')!;
+    note.style.overflowY = 'auto';
+    Object.defineProperties(note, { scrollHeight: { value: 1600 }, clientHeight: { value: 600 } });
+    Object.defineProperties(navigation, { offsetHeight: { value: 42 } });
+    Object.defineProperties(tools, { offsetHeight: { value: 44 } });
+    note.getBoundingClientRect = () => ({ top: 100, bottom: 700, left: 50, right: 650, width: 600, height: 600 } as DOMRect);
+    let bottom = 550;
+    root.getBoundingClientRect = () => ({ top: -250, bottom, left: 70, right: 630, width: 560, height: bottom + 250 } as DOMRect);
+    const preferences = { floatingToolbar: true, toolbarTopOffset: 12 };
+    const surface = Object.assign(Object.create(PdfSurface.prototype), { root, navigation, tools, toolbarSpacer, sessions: { preferences } }) as { updateFloatingToolbar(): void };
+    surface.updateFloatingToolbar();
+    assert.equal(root.classList.contains('is-floating-toolbar'), true);
+    assert.equal(navigation.style.top, '112px'); assert.equal(tools.style.top, '154px');
+    assert.equal(navigation.style.left, '70px'); assert.equal(navigation.style.width, '560px');
+    assert.equal(toolbarSpacer.hidden, false); assert.equal(toolbarSpacer.style.height, '86px');
+    bottom = 180; surface.updateFloatingToolbar();
+    assert.equal(root.classList.contains('is-floating-toolbar'), false); assert.equal(toolbarSpacer.hidden, true);
+  } finally { dom.window.close(); }
+});
 test('manual scans of a long PDF run in 100-page sections from the current page', async () => {
   const f = fixture(Array(205).fill(0));
   try {

@@ -64,6 +64,8 @@ export class PdfSurface extends Component {
   private title: HTMLButtonElement;
   private titleInput: HTMLInputElement;
   private renaming = false;
+  private floatingFrame?: number;
+  private toolbarSpacer: HTMLElement;
 
   constructor(app: App, native: NativePdf, sessions: VaultSessions, state?: ReturnType<TextEditor['captureState']>, private autoDetectOnOpen = true) {
     super(); this.app = app; this.native = native; this.sessions = sessions; this.state = state;
@@ -73,6 +75,7 @@ export class PdfSurface extends Component {
     const applyToolbarOffset = () => {
       this.root.style.setProperty('--pfs-toolbar-top-offset', `${this.sessions.preferences.toolbarTopOffset}px`);
       this.layout();
+      this.queueFloatingToolbar();
     };
     applyToolbarOffset();
     this.register(sessions.subscribePreferences(applyToolbarOffset));
@@ -106,6 +109,7 @@ export class PdfSurface extends Component {
     this.button(this.navigation, 'Rotate clockwise', 'rotate-cw', () => { this.rotation = (this.rotation + 90) % 360; this.layout(); });
     this.button(this.navigation, 'Find in PDF', 'search', () => this.showSearch());
     this.tools = this.root.createDiv({ cls: 'pfs-tools-host' });
+    this.toolbarSpacer = this.root.createDiv({ cls: 'pfs-toolbar-spacer' }); this.toolbarSpacer.hidden = true;
     this.lineButton = this.button(doc.createElement('div'), 'Detect answer lines in PDF', 'scan-line', () => {
       this.answerLineActions().run();
     });
@@ -128,10 +132,14 @@ export class PdfSurface extends Component {
     // Hide native chrome synchronously, before session/PDF.js loading yields.
     native.element.classList.add('pfs-integrated');
     this.registerDomEvent(this.scroller, 'scroll', () => this.requestVisible(), { passive: true });
+    this.registerDomEvent(doc, 'scroll', () => this.queueFloatingToolbar(), true);
+    this.registerDomEvent(doc.defaultView!, 'resize', () => this.queueFloatingToolbar());
     this.registerDomEvent(this.root, 'keydown', event => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f') { event.preventDefault(); event.stopPropagation(); this.showSearch(); }
     }, true);
-    const resize = new doc.defaultView!.ResizeObserver(() => this.layout()); resize.observe(this.scroller); this.register(() => resize.disconnect());
+    const resize = new doc.defaultView!.ResizeObserver(() => { this.layout(); this.queueFloatingToolbar(); });
+    resize.observe(this.scroller); resize.observe(this.root); this.register(() => resize.disconnect());
+    this.queueFloatingToolbar();
     void this.open().catch(error => this.fail(error));
   }
   get file(): TFile { return this.native.file; }
@@ -247,6 +255,41 @@ export class PdfSurface extends Component {
     if (changed) { this.editor?.refresh(); if (old) this.scroller.scrollTop = old.native.div.offsetTop + fraction * old.native.viewport.height; }
     this.zoomButton.textContent = this.scale === 'width' ? 'Fit width' : `${Math.round(this.scale * 100)}%`;
     this.refreshSuggestions(); this.requestVisible();
+    this.queueFloatingToolbar();
+  }
+  private queueFloatingToolbar(): void {
+    if (this.floatingFrame !== undefined || this.closed) return;
+    this.floatingFrame = this.root.ownerDocument.defaultView!.requestAnimationFrame(() => {
+      this.floatingFrame = undefined; this.updateFloatingToolbar();
+    });
+  }
+  private updateFloatingToolbar(): void {
+    const win = this.root.ownerDocument.defaultView!;
+    const reset = () => {
+      this.root.classList.remove('is-floating-toolbar'); this.toolbarSpacer.hidden = true;
+      for (const element of [this.navigation, this.tools]) {
+        element.style.removeProperty('top'); element.style.removeProperty('left'); element.style.removeProperty('width');
+      }
+    };
+    if (!this.root.isConnected || !this.sessions.preferences.floatingToolbar) { reset(); return; }
+    let clip = { top: 0, bottom: win.innerHeight, left: 0, right: win.innerWidth };
+    for (let parent = this.root.parentElement; parent; parent = parent.parentElement) {
+      const overflow = win.getComputedStyle(parent).overflowY;
+      if (!/(auto|scroll|overlay)/.test(overflow) || parent.scrollHeight <= parent.clientHeight) continue;
+      const rect = parent.getBoundingClientRect();
+      clip = { top: Math.max(clip.top, rect.top), bottom: Math.min(clip.bottom, rect.bottom),
+        left: Math.max(clip.left, rect.left), right: Math.min(clip.right, rect.right) };
+      break;
+    }
+    const rect = this.root.getBoundingClientRect();
+    const top = clip.top + this.sessions.preferences.toolbarTopOffset;
+    const height = this.navigation.offsetHeight + this.tools.offsetHeight;
+    const left = Math.max(rect.left, clip.left), right = Math.min(rect.right, clip.right);
+    if (rect.top >= top || rect.bottom <= top + height || clip.bottom <= top + height || right - left < 200 || height < 20) { reset(); return; }
+    this.toolbarSpacer.hidden = false; this.toolbarSpacer.style.height = `${height}px`;
+    this.root.classList.add('is-floating-toolbar');
+    Object.assign(this.navigation.style, { top: `${top}px`, left: `${left}px`, width: `${right - left}px` });
+    Object.assign(this.tools.style, { top: `${top + this.navigation.offsetHeight}px`, left: `${left}px`, width: `${right - left}px` });
   }
   private zoom(delta: number): void { this.scale = Math.max(0.35, Math.min(3, (typeof this.scale === 'number' ? this.scale : this.entries[this.currentPage - 1]?.native.viewport.scale ?? 1) + delta)); this.layout(); }
   private requestVisible(): void {
@@ -482,6 +525,7 @@ export class PdfSurface extends Component {
     this.cancelLineScan(); this.clearSuggestions();
     this.closed = true; this.generation++; this.searchGeneration++;
     if (this.frame !== undefined) this.root.ownerDocument.defaultView!.cancelAnimationFrame(this.frame);
+    if (this.floatingFrame !== undefined) this.root.ownerDocument.defaultView!.cancelAnimationFrame(this.floatingFrame);
     if (this.editor) this.removeChild(this.editor);
     for (const entry of this.entries) { entry.version++; entry.rendering?.cancel(); entry.textTask?.cancel(); }
     if (this.task) void this.task.destroy().catch(() => {});

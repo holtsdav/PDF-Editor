@@ -52,6 +52,7 @@ export class ObjectSelection extends Component {
   get active(): boolean { return !!this.gesture || this.objects.length > 0; }
   has(kind: PdfObject['kind'], id: string): boolean { return this.objects.some(object => object.kind === kind && object.id === id); }
   clear(): void { if (this.objects.length) this.set([]); }
+  selectObjects(objects: PdfObject[]): void { this.cancel(); this.set(objects); }
   private set(objects: PdfObject[]): void {
     const unique = [...new Map(objects.map(object => [key(object), object])).values()];
     const claims = unique.filter(object => object.kind === 'text').map(object => this.session.beginTextEdit(object.id));

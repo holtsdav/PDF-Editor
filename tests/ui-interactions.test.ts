@@ -350,6 +350,48 @@ test('clicking an adjacent suggestion turns an existing detected answer into one
     assert.equal(saved.ruled?.rows, 3);
   } finally { f.dispose(); }
 });
+test('a saved two-row answer extends onto the next detected dotted line', async () => {
+  const f = await fixture();
+  try {
+    const field = f.session.add(1, [76.66, 677.27, 469.99, 722.6], 12, true, 0, { spacing: 27.33, rows: 2 });
+    f.session.setValue(field.name, 'Existing answer');
+    const remaining = [
+      { page: 1, rect: [77.33, 677.27, 470.66, 695.27] as [number, number, number, number] },
+      { page: 1, rect: [76.66, 647.94, 467.32, 665.94] as [number, number, number, number] }
+    ];
+    f.editor.setAnswerLines(remaining); f.editor.addSuggestedField(1, remaining[1]!.rect);
+    assert.equal(f.session.snapshot.fields.length, 1);
+    assert.equal(field.value, 'Existing answer');
+    assert.equal(field.ruled?.rows, 3);
+    assert.equal(field.widgets[0]!.rect[3], 722.6);
+    f.session.undoStroke(); assert.equal(f.session.snapshot.fields[0]!.ruled?.rows, 2);
+    f.session.redoStroke(); await f.session.save();
+    assert.equal((await readTextPdf(f.bytes())).fields[0]!.ruled?.rows, 3);
+  } finally { f.dispose(); }
+});
+test('selected PDF elements copy, paste and duplicate without intercepting text editing', async () => {
+  const f = await fixture();
+  try {
+    const field = f.session.add(1, [80, 580, 240, 610], 12, true); f.session.setValue(field.name, 'Copy me'); f.editor.refresh();
+    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!; frame.focus();
+    const values = new Map<string, string>();
+    const clipboardData = { setData(type: string, value: string) { values.set(type, value); }, getData(type: string) { return values.get(type) ?? ''; } };
+    const copy = new f.doc.defaultView!.Event('copy', { bubbles: true, cancelable: true });
+    Object.defineProperty(copy, 'clipboardData', { value: clipboardData }); frame.dispatchEvent(copy);
+    assert.equal(copy.defaultPrevented, true);
+    const paste = new f.doc.defaultView!.Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, 'clipboardData', { value: clipboardData }); frame.dispatchEvent(paste);
+    assert.equal(paste.defaultPrevented, true); assert.equal(f.session.snapshot.fields.length, 2);
+    assert.equal(f.session.snapshot.fields[1]!.value, 'Copy me');
+    const duplicate = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'd', metaKey: true, bubbles: true, cancelable: true });
+    frame.dispatchEvent(duplicate); assert.equal(duplicate.defaultPrevented, true);
+    assert.equal(f.session.snapshot.fields.length, 3);
+    const input = frame.querySelector<HTMLInputElement | HTMLTextAreaElement>('[data-pdf-field]')!;
+    const nativeCopy = new f.doc.defaultView!.Event('copy', { bubbles: true, cancelable: true });
+    Object.defineProperty(nativeCopy, 'clipboardData', { value: clipboardData }); input.dispatchEvent(nativeCopy);
+    assert.equal(nativeCopy.defaultPrevented, false);
+  } finally { f.dispose(); }
+});
 test('rounded browser scroll measurements do not append an unnecessary ruled row', async () => {
   const f = await fixture();
   try {

@@ -5,7 +5,7 @@ import { pdfRectangle, screenRectangle } from '../compat/native-pdf';
 import type { Rect, TextField } from '../pdf/text-engine';
 import type { BackupKind } from '../pdf/recovery';
 import { usePdfFont } from './pdf-font';
-import type { TextSession } from '../pdf/text-session';
+import type { CopiedPdfObject, PdfObject, TextSession } from '../pdf/text-session';
 import type { VaultSessions } from '../pdf/vault-sessions';
 import { growBox, rotatedHandle, transformBox } from '../pdf/box-geometry';
 import type { ResizeHandle } from '../pdf/box-geometry';
@@ -22,6 +22,8 @@ import { labelOverlay } from './overlay-label';
 
 
 interface AnswerLine { page: number; rect: Rect }
+const objectClipboardType = 'application/x-pdf-editor-objects';
+let copiedObjects: { token: string; objects: CopiedPdfObject[] } | undefined;
 
 interface FieldControl {
   frame: HTMLElement; input: HTMLInputElement | HTMLTextAreaElement;
@@ -168,6 +170,15 @@ export class TextEditor extends Component {
         }
         return;
       }
+      if (event.key.toLowerCase() === 'd' && !event.shiftKey && !this.isTextTarget(target)) {
+        const objects = this.selectedObjects();
+        if (objects.length && this.session) {
+          event.preventDefault(); event.stopImmediatePropagation();
+          try { this.selectCreated(this.session.pasteObjects(this.session.copyObjects(objects))); this.scheduleSave(); }
+          catch (error) { this.showError(error); }
+          return;
+        }
+      }
       if (event.key.toLowerCase() === 's') {
         event.preventDefault(); event.stopImmediatePropagation(); void this.save();
       }
@@ -175,6 +186,25 @@ export class TextEditor extends Component {
         && !(target instanceof doc.defaultView!.HTMLInputElement || target instanceof doc.defaultView!.HTMLTextAreaElement)) {
         event.preventDefault(); event.stopImmediatePropagation(); if (event.shiftKey) this.session?.redoStroke(); else this.session?.undoStroke(); this.selectedStroke = undefined; this.scheduleSave();
       }
+    }, true);
+    this.registerDomEvent(doc.defaultView!, 'copy', event => {
+      if (!this.shortcutTarget(event.target) || this.isTextTarget(event.target) || doc.getSelection()?.toString()) return;
+      const objects = this.selectedObjects();
+      if (!objects.length || !this.session || !event.clipboardData) return;
+      try {
+        const token = globalThis.crypto.randomUUID(), data = this.session.copyObjects(objects);
+        event.clipboardData.setData(objectClipboardType, token);
+        event.clipboardData.setData('text/plain', data.filter(item => item.kind === 'text').map(item => item.value).join('\n') || 'PDF Editor elements');
+        copiedObjects = { token, objects: data };
+        event.preventDefault(); event.stopImmediatePropagation();
+      } catch (error) { this.showError(error); }
+    }, true);
+    this.registerDomEvent(doc.defaultView!, 'paste', event => {
+      if (!this.shortcutTarget(event.target) || this.isTextTarget(event.target) || !this.session || !event.clipboardData
+        || event.clipboardData.getData(objectClipboardType) !== copiedObjects?.token) return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      try { this.selectCreated(this.session.pasteObjects(copiedObjects.objects)); this.scheduleSave(); }
+      catch (error) { this.showError(error); }
     }, true);
     this.updateStatus();
     void this.openSession().then(() => { this.updateStatus(); this.refresh(); }).catch(error => {
@@ -261,16 +291,48 @@ export class TextEditor extends Component {
   private adoptAdjacentAnswer(line: AnswerLine): TextField | undefined {
     if (!this.session || !this.sessions.preferences.flowAnswerLines) return;
     for (const anchor of this.session.snapshot.fields) {
-      if (!anchor.owned || anchor.readOnly || anchor.ruled || anchor.widgets.length !== 1 || !this.answerFields.has(anchor.name)) continue;
+      if (!anchor.owned || anchor.readOnly || anchor.widgets.length !== 1) continue;
       const widget = anchor.widgets[0]!;
-      const anchorLine = this.answerLines.find(candidate => candidate.page === line.page && this.answerWidget(anchor, candidate) >= 0
-        && candidate.rect.every((edge, i) => Math.abs(widget.rect[i]! - edge) <= (i % 2 === 0 ? 6 : 3)));
-      if (!anchorLine) continue;
-      const block = ruledAnswerBlock(this.answerLines, line, candidate => this.session!.snapshot.fields.some(field => field !== anchor && this.answerWidget(field, candidate) >= 0));
-      if (!block || anchorLine.rect[1] < block.rect[1] - 1 || anchorLine.rect[3] > block.rect[3] + 1) continue;
-      if (this.session.adoptRuledBlock(anchor.name, block.rect, block.layout)) return anchor;
+      if (widget.page !== line.page || widget.rotation !== 0) continue;
+      const rows = anchor.ruled?.rows ?? 1;
+      if (rows > 500) continue;
+      const height = widget.rect[3] - widget.rect[1] - (rows - 1) * (anchor.ruled?.spacing ?? 0);
+      if (!anchor.ruled && (widget.rect[2] - widget.rect[0] < 100 || height > 35)) continue;
+      const anchors: AnswerLine[] = Array.from({ length: rows }, (_, i) => ({ page: line.page,
+        rect: [widget.rect[0], widget.rect[3] - height - i * (anchor.ruled?.spacing ?? 0), widget.rect[2], widget.rect[3] - i * (anchor.ruled?.spacing ?? 0)] }));
+      const candidates = [...this.answerLines.filter(candidate => candidate.page === line.page && this.answerWidget(anchor, candidate) < 0), ...anchors];
+      const block = ruledAnswerBlock(candidates, line, candidate => this.session!.snapshot.fields.some(field => field !== anchor && this.answerWidget(field, candidate) >= 0));
+      if (!block || block.layout.rows <= rows || Math.abs(block.rect[3] - widget.rect[3]) > 3) continue;
+      const rect: Rect = [widget.rect[0], block.rect[1], widget.rect[2], widget.rect[3]];
+      if (this.session.adoptRuledBlock(anchor.name, rect, block.layout)) return anchor;
     }
     return;
+  }
+  private isTextTarget(target: EventTarget | null): boolean {
+    const element = target instanceof this.native.element.ownerDocument.defaultView!.Element ? target : undefined;
+    return !!element?.closest('input, textarea, [contenteditable="true"]');
+  }
+  private shortcutTarget(target: EventTarget | null): boolean {
+    const doc = this.native.element.ownerDocument;
+    return target instanceof doc.defaultView!.Node && (this.native.element.contains(target)
+      || target === doc.body && !!this.selection?.active);
+  }
+  private selectedObjects(): PdfObject[] {
+    if (this.selection?.objects.length) return [...this.selection.objects];
+    if (this.selected && this.session?.snapshot.fields.some(field => field.name === this.selected && field.owned && !field.readOnly)) return [{ kind: 'text', id: this.selected }];
+    if (this.selectedStroke && this.session?.snapshot.strokes.some(stroke => stroke.id === this.selectedStroke && !stroke.readOnly)) return [{ kind: 'ink', id: this.selectedStroke }];
+    return [];
+  }
+  private selectCreated(objects: PdfObject[]): void {
+    if (!objects.length) return;
+    this.selected = undefined; this.selectedStroke = undefined;
+    if (objects.length > 1) this.selection?.selectObjects(objects);
+    else {
+      this.selection?.clear();
+      if (objects[0]!.kind === 'text') this.selected = objects[0]!.id;
+      else this.selectedStroke = objects[0]!.id;
+    }
+    this.updateStatus(); this.refresh();
   }
   addSuggestedField(page: number, rect: Rect, scroll = false): void {
     if (!this.session || this.session.replacing || this.session.status === 'conflict') return;
@@ -406,6 +468,10 @@ export class TextEditor extends Component {
     const file = this.native.file;
     const original = this.sessions.backupFor(file); const recovery = this.sessions.backupFor(file, 'recovery');
     const blocked = (this.session?.status === 'conflict' || this.session?.replacing) || this.session?.status === 'saving';
+    menu.addItem(item => item.setTitle('Floating toolbar').setIcon('pin').setChecked(this.sessions.preferences.floatingToolbar)
+      .onClick(() => { void this.sessions.updatePreferences({ ...this.sessions.preferences, floatingToolbar: !this.sessions.preferences.floatingToolbar })
+        .catch(error => this.showError(error)); }));
+    menu.addSeparator();
     menu.addItem(item => item.setTitle('Reload PDF').setIcon('refresh-cw').setDisabled(!this.session).onClick(() => this.requestReload()));
     menu.addSeparator();
     menu.addItem(item => item.setTitle('Recovery copies…').setIcon('shield-check').onClick(() => { const modal = new RecoveryInfo(this.app, this.sessions, file); this.register(() => modal.close()); modal.open(); }));

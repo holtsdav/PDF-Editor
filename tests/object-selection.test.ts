@@ -55,3 +55,20 @@ test('duplicate selection members move once and one undo restores a large mixed 
   f.session.moveObjects([...objects, ...objects], [5, 7]); assert.equal(notifications, 1);
   f.session.undoStroke(); assert.deepEqual(f.session.snapshot, before); unsubscribe();
 });
+test('copy and paste create independent text and ink with one undo step', async () => {
+  const f = await fixture();
+  const copied = f.session.copyObjects(f.objects);
+  const created = f.session.pasteObjects(copied);
+  assert.equal(created.length, 2);
+  assert.notEqual(created[0]!.id, f.text.name); assert.notEqual(created[1]!.id, f.ink.id);
+  assert.equal(f.session.snapshot.fields.find(field => field.name === created[0]!.id)?.value, f.text.value);
+  assert.deepEqual(f.session.snapshot.fields.find(field => field.name === created[0]!.id)?.widgets[0]?.rect, [92, 568, 192, 598]);
+  assert.deepEqual(f.session.snapshot.strokes.find(stroke => stroke.id === created[1]!.id)?.points, f.ink.points.map(([x, y]) => [x + 12, y - 12]));
+  await f.session.save();
+  const saved = await readTextPdf(f.bytes());
+  assert.equal(saved.fields.length, 3); assert.equal(saved.strokes.length, 2);
+  f.session.undoStroke();
+  assert.equal(f.session.snapshot.fields.length, 2); assert.equal(f.session.snapshot.strokes.length, 1);
+  f.session.redoStroke();
+  assert.equal(f.session.snapshot.fields.length, 3); assert.equal(f.session.snapshot.strokes.length, 2);
+});
