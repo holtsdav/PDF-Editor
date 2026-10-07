@@ -443,6 +443,11 @@ test('floating toolbar actions retain a selected group until the action runs', a
     assert.equal(f.doc.querySelectorAll('.is-multi-selected').length, 2);
     const host = f.doc.createElement('div'); host.className = 'pfs-floating-toolbar';
     host.append(f.doc.querySelector('#tools')!); f.doc.body.append(host);
+    const search = host.appendChild(f.doc.createElement('input')); search.focus();
+    assert.equal(f.doc.querySelectorAll('.is-multi-selected').length, 0, 'a floated input releases the PDF group scope');
+    f.pointer(frames[0]!, 'pointerdown', 100, 200, true);
+    f.pointer(frames[1]!, 'pointerdown', 250, 200, true);
+    assert.equal(f.doc.querySelectorAll('.is-multi-selected').length, 2);
     const remove = host.querySelector<HTMLButtonElement>('button[aria-label^="Remove 2 selected objects"]')!;
     f.pointer(remove, 'pointerdown'); remove.focus(); remove.click();
     assert.equal(f.session.snapshot.fields.length, 0);

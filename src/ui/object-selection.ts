@@ -45,7 +45,7 @@ export class ObjectSelection extends Component {
     }, true);
     this.registerDomEvent(doc, 'focusin', event => {
       const target = event.target;
-      if (target instanceof doc.defaultView!.Element && (!this.withinEditor(target) || (root.contains(target) && target.matches('input, textarea')))) this.clear();
+      if (target instanceof doc.defaultView!.Element && (!this.withinEditor(target) || target.matches('input, textarea'))) this.clear();
     });
     this.registerDomEvent(doc.defaultView!, 'keydown', event => this.keyDown(event), true);
     this.register(() => { this.cancel(); this.clear(); for (const entry of this.pages.values()) entry.dispose(); this.pages.clear(); });
