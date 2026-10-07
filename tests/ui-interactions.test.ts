@@ -64,7 +64,8 @@ async function fixture(pageCount = 1) {
     hasPointerCapture(this: HTMLElement, id: number) { return this.dataset.capture === String(id); },
     releasePointerCapture(this: HTMLElement) { delete this.dataset.capture; }
   });
-  const native = { identity: {}, element: doc.querySelector('#editor')!, file: {}, toolbarHost: () => doc.querySelector('#tools')!, pages: () => Array.from({ length: pageCount }, (_, i) => ({ div: doc.querySelector(i ? '#page' + (i + 1) : '#page')!, number: i + 1, annotationElements: () => [], viewport: {
+  const scanButton = doc.createElement('button'); scanButton.setAttribute('aria-label', 'Detect answer lines in PDF');
+  const native = { identity: {}, element: doc.querySelector('#editor')!, file: {}, toolbarHost: () => doc.querySelector('#tools')!, answerLineButton: () => scanButton, pages: () => Array.from({ length: pageCount }, (_, i) => ({ div: doc.querySelector(i ? '#page' + (i + 1) : '#page')!, number: i + 1, annotationElements: () => [], viewport: {
     width: 600, height: 800, scale: 1, rotation: 0, convertToPdfPoint: (x: number, y: number) => [x, 800 - y], convertToViewportRectangle: (r: number[]) => [r[0]!, 800 - r[1]!, r[2]!, 800 - r[3]!]
   } })) } as unknown as EditorSurface;
   const sessions = { get: async () => session, preferences: loadToolPreferences({ holdShapes: true }), updatePreferences: async () => {} } as unknown as VaultSessions;
@@ -81,6 +82,16 @@ async function fixture(pageCount = 1) {
   const dispose = () => { (editor as Editor & { unload(): void }).unload(); dom.window.close(); };
   return { doc, session, editor, sessions, pointer, tool, dispose, bytes: () => bytes };
 }
+
+test('answer-line scan button sits beside Add text box in the editing toolbar', async () => {
+  const f = await fixture();
+  try {
+    const labels = [...f.doc.querySelectorAll<HTMLButtonElement>('.pdf-form-studio-toolbar > button')].map(button => button.getAttribute('aria-label'));
+    const text = labels.findIndex(label => label?.startsWith('Add text box'));
+    assert.equal(labels[text + 1], 'Detect answer lines in PDF');
+    assert(labels[text + 2]?.startsWith('Highlighter'));
+  } finally { f.dispose(); }
+});
 
 test('a newly placed empty box can move, resize and switch to Select before typing; leaving it deletes it', async () => {
   const f = await fixture();

@@ -23,12 +23,13 @@ await mkdir(new URL('../tmp/ui-tests/', import.meta.url), { recursive: true }); 
 const { PdfSurface } = await import(moduleUrl.href);
 interface Entry { page: { getOperatorList?: () => Promise<OperatorList> }; native: { div: HTMLElement; number: number; viewport: object }; candidates?: Rect[]; suggestions?: HTMLElement }
 interface Harness {
-  detectLines(): Promise<void>; cancelLineScan(): void; clearSuggestions(): void; refreshSuggestions(): void;
+  detectLines(targets?: Entry[]): Promise<void>; cancelLineScan(): void; clearSuggestions(): void; refreshSuggestions(): void;
+  answerLineActions(): { title: string; run(): void; clear?: () => void };
   dismissRemovedAnswer(field: { widgets: { page: number; rect: Rect }[] }): void;
-  generation: number; closed: boolean; entries: Entry[]; lineScan?: object; message: HTMLElement; lineButton: HTMLButtonElement;
+  generation: number; closed: boolean; currentPage: number; entries: Entry[]; lineScan?: object; message: HTMLElement;
 }
 function fixture(lines = [1, 2, 0, 1]) {
-  const dom = new JSDOM('<body><div id="root"></div><button id="detect"></button><div id="message"></div></body>');
+  const dom = new JSDOM('<body><div id="root"></div><div id="message"></div></body>');
   const doc = dom.window.document, root = doc.querySelector<HTMLElement>('#root')!;
   let active = 0, peak = 0, cancellations = 0;
   const fields: { widgets: { page: number; rect: Rect }[] }[] = [];
@@ -72,7 +73,7 @@ function fixture(lines = [1, 2, 0, 1]) {
   });
   const surface = Object.assign(Object.create(PdfSurface.prototype), { root, entries, pdf: {}, editor: { setAnswerLines() {}, addSuggestedField(page: number, rect: Rect) { chosen.push({ page, rect }); } },
     session: { snapshot: { fields } }, generation: 1, closed: false, currentPage: lines.length,
-    lineButton: doc.querySelector('#detect'), message: doc.querySelector('#message'), dismissedLines: new Set<string>() }) as Harness;
+    message: doc.querySelector('#message'), dismissedLines: new Set<string>(), scannedEntries: new Set<Entry>() }) as Harness;
   return { surface, fields, chosen, hold, started: (page: number) => starts[page - 1]!.promise, visited, canvases, peak: () => peak, cancellations: () => cancellations, fail: (page: number) => { failPage = page; }, dispose: () => { surface.cancelLineScan(); surface.clearSuggestions(); dom.window.close(); } };
 }
 test('one scan detects every PDF page, including offscreen pages, with bounded sequential rasters', async () => {
@@ -87,6 +88,28 @@ test('one scan detects every PDF page, including offscreen pages, with bounded s
     await f.surface.detectLines(); assert(f.surface.entries.every(entry => !entry.candidates && !entry.suggestions)); assert.equal(f.visited.length, 4);
   } finally { f.dispose(); }
 });
+test('manual scans of a long PDF run in 100-page sections from the current page', async () => {
+  const f = fixture(Array(205).fill(0));
+  try {
+    const realScan = f.surface.detectLines.bind(f.surface);
+    await assert.rejects(realScan(f.surface.entries), /limited to 100 pages/);
+    const ranges: number[][] = [];
+    f.surface.detectLines = async targets => { ranges.push(targets!.map(entry => entry.native.number)); };
+    f.surface.currentPage = 1; f.surface.answerLineActions().run();
+    f.surface.currentPage = 101; f.surface.answerLineActions().run();
+    f.surface.currentPage = 201; f.surface.answerLineActions().run();
+    assert.deepEqual(ranges.map(range => [range[0], range.at(-1), range.length]), [[1, 100, 100], [101, 200, 100], [201, 205, 5]]);
+  } finally { f.dispose(); }
+});
+test('scanning another section keeps suggestions from earlier pages', async () => {
+  const f = fixture([1, 1, 0]);
+  try {
+    await f.surface.detectLines([f.surface.entries[0]!]);
+    await f.surface.detectLines([f.surface.entries[1]!]);
+    assert.equal(f.surface.entries[0]!.candidates?.length, 1);
+    assert.equal(f.surface.entries[1]!.candidates?.length, 1);
+  } finally { f.dispose(); }
+});
 test('scan progress is cancellable and partial suggestions are removed', { timeout: 5000 }, async () => {
   const f = fixture(); const releaseFirst = f.hold(1), release = f.hold(2);
   try {
@@ -94,19 +117,19 @@ test('scan progress is cancellable and partial suggestions are removed', { timeo
     assert.deepEqual(f.visited, [1]); assert.match(f.surface.message.textContent!, /page 1 of 4/);
     // Progress is synchronized with rendering, independent of runner speed.
     releaseFirst(); await f.started(2);
-    assert.match(f.surface.message.textContent!, /page 2 of 4/); assert.equal(f.surface.lineButton.getAttribute('aria-label'), 'Cancel answer-line detection');
-    assert.equal(f.surface.lineButton.disabled, false); assert.equal(f.surface.entries[0]!.candidates?.length, 1);
+    assert.match(f.surface.message.textContent!, /page 2 of 4/); assert.equal(f.surface.answerLineActions().title, 'Cancel answer-line scan');
+    assert.equal(f.surface.entries[0]!.candidates?.length, 1);
     await f.surface.detectLines(); await scanning; release();
     assert.deepEqual(f.visited, [1, 2]); assert.equal(f.cancellations(), 1);
     assert(f.surface.entries.every(entry => !entry.candidates)); assert.equal(f.surface.message.textContent, '');
-    assert.equal(f.surface.lineButton.getAttribute('aria-busy'), null);
+    assert.equal(f.surface.lineScan, undefined);
   } finally { releaseFirst(); release(); f.dispose(); }
 });
 test('cancelled old scans cannot overwrite a restarted scan or its controls', async () => {
   const f = fixture([1, 1]), release = f.hold(1);
   try {
     const old = f.surface.detectLines(); await f.surface.detectLines(); const next = f.surface.detectLines();
-    await old; assert.equal(f.surface.lineButton.getAttribute('aria-busy'), 'true'); release(); await next;
+    await old; assert.equal(f.surface.answerLineActions().title, 'Cancel answer-line scan'); release(); await next;
     assert.deepEqual(f.visited, [1, 1, 2]); assert.equal(f.surface.message.textContent, '');
   } finally { release(); f.dispose(); }
 });
@@ -122,7 +145,7 @@ test('a page render failure clears partial suggestions, leaves retry enabled and
   const f = fixture(); f.fail(2);
   try {
     await assert.rejects(f.surface.detectLines(), /Page render failed/);
-    assert(f.surface.entries.every(entry => !entry.candidates)); assert.equal(f.surface.lineButton.disabled, false); assert.equal(f.surface.lineScan, undefined);
+    assert(f.surface.entries.every(entry => !entry.candidates)); assert.equal(f.surface.answerLineActions().title, 'Detect answer lines in PDF'); assert.equal(f.surface.lineScan, undefined);
     f.fail(0); await f.surface.detectLines(); assert.equal(f.surface.entries[3]!.candidates?.length, 1);
   } finally { f.dispose(); }
 });

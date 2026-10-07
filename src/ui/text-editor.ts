@@ -95,7 +95,10 @@ export class TextEditor extends Component {
     for (const [tool, label, icon] of [
       ['select', 'Select — drag blank space for objects; drag printed text to select text', 'mouse-pointer-2'], ['text', 'Add text box — click or drag on the PDF', 'type'],
       ['marker', 'Highlighter — draw and hold for a straight line', 'highlighter'], ['scribble', 'Pen — draw', 'pencil'], ['eraser', 'Eraser — drag over marks to remove them', 'eraser']
-    ] as const) this.tools.set(tool, button(this.toolbar, label, icon, () => { if (this.tool === tool) this.closePopover(); else this.setTool(tool); }));
+    ] as const) {
+      this.tools.set(tool, button(this.toolbar, label, icon, () => { if (this.tool === tool) this.closePopover(); else this.setTool(tool); }));
+      if (tool === 'text') this.toolbar.append(this.native.answerLineButton());
+    }
     this.editControls = doc.createElement('div'); this.editControls.className = 'pdf-form-studio-edit-controls'; this.toolbar.append(this.editControls);
     this.propertiesButton = button(this.editControls, 'Tool settings', 'sliders-horizontal', () => this.openProperties());
     this.propertiesButton.classList.add('pfs-properties-button');

@@ -4,7 +4,7 @@
 
 - [x] Recovery storage size and folder access in Settings, with an explicit reset that refuses open views and pending drafts.
 - [x] Non-overwriting export of a verified pending draft, available from a command even if the source PDF cannot open.
-- [x] Configurable 1–100-page threshold for automatic line detection, default 25; manual full-document detection remains available.
+- [x] Configurable 1–100-page threshold for automatic line detection, default 25; the toolbar scan button covers up to 100 pages from the current page per action, including sections of longer PDFs.
 - [x] Fast scrolling checks nearby page shells, cancels distant rendering, and releases distant bitmap/text layers. Long page setup yields periodically.
 - [ ] Verify folder opening, cleanup, recovery export and long-PDF scrolling in the final Obsidian build on supported platforms.
 - [ ] Resolve or document the external-writer race and finish public release review.

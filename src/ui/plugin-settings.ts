@@ -18,8 +18,8 @@ export class PdfSettingsTab extends PluginSettingTab {
         catch (error) { new Notice(`Could not save settings: ${String(error)}`); }
       }));
     new Setting(containerEl).setName('Answer lines').setHeading();
-    this.toggle('autoDetectLines', 'Detect answer lines on PDF open', 'Scan a PDF once when it opens, up to the page limit below. Larger PDFs can still be scanned manually. No fields are added until you click a suggestion.');
-    new Setting(containerEl).setName('Automatic detection page limit').setDesc('Skip automatic line detection when a PDF has more pages than this. The toolbar button can still scan all pages manually.').addSlider(slider => slider
+    this.toggle('autoDetectLines', 'Detect answer lines on PDF open', 'Scan for blank answer lines when a PDF opens. For larger PDFs, use the scan button beside Add text box to scan up to 100 pages at a time.');
+    new Setting(containerEl).setName('Automatic detection page limit').setDesc('Only scan automatically when the PDF has this many pages or fewer. Manual scans can cover larger PDFs in 100-page sections.').addSlider(slider => slider
       .setLimits(1, MAX_AUTO_DETECT_PAGES, 1)
       .setValue(this.sessions.preferences.autoDetectPageLimit)
       .setDynamicTooltip()
@@ -29,9 +29,9 @@ export class PdfSettingsTab extends PluginSettingTab {
       }));
     this.toggle('flowAnswerLines', 'Wrap across consecutive answer lines', 'Treat closely spaced, aligned blank lines as one answer block. Text wraps along the printed rules. Applies to new answers; existing answers stay as they are.');
     new Setting(containerEl).setName('PDF backups').setHeading();
-    this.toggle('keepOriginalBackups', 'Keep a copy of each PDF you edit', 'Because PDF Editor is in beta, it can save a separate copy before your first change to a PDF is saved. You can restore that earlier version if needed. Turning this off stops new copies. Existing copies remain.');
+    this.toggle('keepOriginalBackups', 'Keep one backup of each PDF you edit', 'While PDF Editor is in beta, it keeps one copy of a PDF as it was before your first saved change. Later edits do not replace that copy. You can restore it from the PDF menu. Turning this off stops new backups; existing backups stay.');
     const usage = new Setting(containerEl).setName('Backup folder')
-      .setDesc('See where your PDF copies are stored.');
+      .setDesc('Open the folder where backups are stored.');
     const usageText = containerEl.createEl('p', { text: 'Calculating backup storage…' });
     void this.sessions.recoveryUsage().then(value => {
       if (usageText.isConnected) usageText.textContent = `${this.formatBytes(value.bytes)} used · ${value.indexedPdfs} ${value.indexedPdfs === 1 ? 'PDF' : 'PDFs'} backed up`;
@@ -40,7 +40,7 @@ export class PdfSettingsTab extends PluginSettingTab {
       void this.openRecoveryFolder().catch(error => new Notice(`Could not open recovery folder: ${String(error)}`));
     }));
     new Setting(containerEl).setName('Delete backups')
-      .setDesc('Remove these copies to free space. The PDFs in your vault stay where they are.')
+      .setDesc('Delete all backup copies saved by PDF Editor to free space. Your PDFs stay in your vault.')
       .addButton(button => button.setButtonText('Delete backups…').setWarning().onClick(() => this.confirmClearRecovery()));
   }
 

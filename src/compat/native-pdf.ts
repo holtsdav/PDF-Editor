@@ -20,6 +20,7 @@ export interface NativePdf {
 export interface EditorSurface extends NativePdf {
   pages(): NativePage[];
   toolbarHost(): HTMLElement;
+  answerLineButton(): HTMLButtonElement;
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -63,8 +64,8 @@ export function findNativePdfs(app: App): NativePdf[] {
 /** Discover inserted/replaced hosts before the next paint, including pop-outs. */
 export function watchNativePdfs(app: App, changed: () => void): () => void {
   const observers = new Map<Document, MutationObserver>();
-  const observe = (doc: Document): void => {
-    if (observers.has(doc) || !doc.body || !doc.defaultView) return;
+  const observe = (doc: Document | null | undefined): void => {
+    if (!doc || observers.has(doc) || !doc.body || !doc.defaultView) return;
     const observer = new doc.defaultView.MutationObserver(records => {
       // Editor rendering/typing cannot cause discovery to observe itself.
       if (records.some(mutation => !(mutation.target.nodeType === 1 ? mutation.target as Element : mutation.target.parentElement)?.closest('.pfs-surface')
@@ -73,7 +74,7 @@ export function watchNativePdfs(app: App, changed: () => void): () => void {
     observer.observe(doc.body, { childList: true, subtree: true }); observers.set(doc, observer);
   };
   const refresh = (): void => {
-    observe(app.workspace.rootSplit.doc);
+    observe(app.workspace.rootSplit?.doc);
     app.workspace.iterateAllLeaves(leaf => observe(leaf.view.containerEl.ownerDocument));
   };
   const events = [

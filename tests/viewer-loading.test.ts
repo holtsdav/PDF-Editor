@@ -72,6 +72,15 @@ test('host insertion is discovered before the next paint; editor updates are ign
   } finally { stop(); f.dom.window.close(); }
 });
 
+test('observer startup tolerates a vault window before its root document is ready', async () => {
+  const f = fixture(); let calls = 0;
+  Object.assign(f.app.workspace.rootSplit, { doc: null });
+  const stop = watchNativePdfs(f.app, () => { calls++; });
+  try {
+    f.attach(); await Promise.resolve(); assert.equal(calls, 1);
+  } finally { stop(); f.dom.window.close(); }
+});
+
 test('new pop-out documents are observed and closing one disconnects its observer', async () => {
   const f = fixture(), popout = new JSDOM('<body></body>'); let calls = 0;
   const stop = watchNativePdfs(f.app, () => { calls++; });
@@ -85,6 +94,7 @@ test('new pop-out documents are observed and closing one disconnects its observe
 
 test('opening hides native chrome immediately and a failed session restores the native viewer', async () => {
   const f = fixture(); f.attach(); const style = f.doc.createElement('style'); style.textContent = css; f.doc.head.append(style);
+  const stale = f.doc.createElement('div'); stale.className = 'pfs-surface'; f.element.append(stale);
   let reject!: (error: Error) => void, released = 0;
   const pending = new Promise((_, no) => { reject = no; });
   const preferences = { toolbarTopOffset: 48 }; let preferenceChanged: () => void = () => {}, unsubscribed = false;
@@ -93,6 +103,7 @@ test('opening hides native chrome immediately and a failed session restores the 
     subscribePreferences: (listener: () => void) => { preferenceChanged = listener; return () => { unsubscribed = true; }; }
   });
   try {
+    assert.equal(stale.isConnected, false); assert.equal(f.element.querySelectorAll('.pfs-surface').length, 1);
     assert.equal(f.element.querySelector<HTMLElement>('.pfs-surface')?.style.getPropertyValue('--pfs-toolbar-top-offset'), '48px');
     preferences.toolbarTopOffset = 96; preferenceChanged();
     assert.equal(f.element.querySelector<HTMLElement>('.pfs-surface')?.style.getPropertyValue('--pfs-toolbar-top-offset'), '96px');
