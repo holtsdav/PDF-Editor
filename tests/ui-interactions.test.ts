@@ -570,6 +570,29 @@ test('selected PDF owns Obsidian shortcut scope until focus leaves the embed', a
     assert.equal(f.scopes.length, 0);
   } finally { f.dispose(); }
 });
+test('another PDF toolbar releases the first embed shortcut scope while its own popover retains it', async () => {
+  const f = await fixture(1, true);
+  try {
+    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
+    f.session.setValue(field.name, 'First PDF'); f.editor.refresh();
+    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
+    frame.focus(); assert.equal(f.scopes.length, 1);
+    f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
+    assert(f.doc.querySelector('.pfs-tool-popover'));
+    assert.equal(f.scopes.length, 1, 'opening this PDF toolbar popover keeps its selection');
+    f.doc.querySelector<HTMLButtonElement>('.pfs-tool-popover [aria-label="Close tool settings"]')!.click();
+    frame.focus(); assert.equal(f.scopes.length, 1);
+
+    const otherToolbar = f.doc.createElement('div'); otherToolbar.className = 'pdf-form-studio-toolbar';
+    const otherButton = f.doc.createElement('button'); otherToolbar.append(otherButton); f.doc.body.append(otherToolbar);
+    f.pointer(otherButton, 'pointerdown');
+    assert.equal(f.scopes.length, 0, 'pointer input in another PDF toolbar releases the first scope');
+    frame.focus(); assert.equal(f.scopes.length, 1);
+    otherButton.focus();
+    assert.equal(f.scopes.length, 0, 'keyboard focus in another PDF toolbar releases the first scope');
+    assert.equal(f.session.snapshot.fields.length, 1);
+  } finally { f.dispose(); }
+});
 test('a selected PDF never claims shortcuts from another Obsidian window', async () => {
   const f = await fixture(1, true);
   const foreign = new JSDOM('<body><div id="note"></div></body>', { pretendToBeVisual: true });

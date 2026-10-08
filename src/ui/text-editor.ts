@@ -79,6 +79,7 @@ export class TextEditor extends Component {
   private selection?: ObjectSelection;
   private objectScope?: Scope;
   private objectScopeActive = false;
+  private openingPopover = false;
   private activeBox?: string;
   private answerLines: AnswerLine[] = [];
   private answerFields = new Set<string>();
@@ -138,9 +139,10 @@ export class TextEditor extends Component {
     this.registerDomEvent(doc, 'pointerdown', event => {
       if (this.focused && event.target !== this.focused.input) this.focused = undefined;
       const target = event.target;
-      if (target instanceof doc.defaultView!.Element && !target.closest('.pdf-form-studio-toolbar, .pfs-tool-popover')
-        && target.closest('.pdf-form-studio-box')?.querySelector<HTMLElement>('[data-pdf-field]')?.dataset.pdfField !== this.activeBox) this.endTextEditing();
-      if (target instanceof doc.defaultView!.Element && !target.closest('.pdf-form-studio-box, .pdf-form-studio-ink-control, .pdf-form-studio-toolbar, .pfs-tool-popover')) {
+      if (!(target instanceof doc.defaultView!.Element)) return;
+      const inPdf = this.native.element.contains(target), ownControl = this.ownsControl(target);
+      if (!ownControl && (!inPdf || target.closest('.pdf-form-studio-box')?.querySelector<HTMLElement>('[data-pdf-field]')?.dataset.pdfField !== this.activeBox)) this.endTextEditing();
+      if (!ownControl && (!inPdf || !target.closest('.pdf-form-studio-box, .pdf-form-studio-ink-control'))) {
         this.selected = undefined; this.selectedStroke = undefined; this.updateStatus(); this.refresh();
         const active = doc.activeElement;
         if (active instanceof doc.defaultView!.HTMLElement && [...this.layers.values()].some(entry => entry.layer.contains(active))) active.blur();
@@ -150,8 +152,8 @@ export class TextEditor extends Component {
       // Keyboard-opened dialogs also move focus deliberately. Never restore
       // a PDF input over the quick switcher, command palette or another note.
       if (this.focused && event.target !== this.focused.input) this.focused = undefined;
-      if (event.target instanceof doc.defaultView!.Element && !this.native.element.contains(event.target) && !event.target.closest('.pfs-tool-popover, .pdf-form-studio-toolbar')) this.endTextEditing();
-      if (event.target instanceof doc.defaultView!.Element && !this.native.element.contains(event.target) && !event.target.closest('.pfs-tool-popover, .pdf-form-studio-toolbar')) {
+      if (event.target instanceof doc.defaultView!.Element && !this.native.element.contains(event.target) && !this.ownsControl(event.target)) {
+        this.endTextEditing();
         this.selected = undefined; this.selectedStroke = undefined; this.updateStatus(); this.refresh();
       }
       if (event.target instanceof doc.defaultView!.HTMLElement && this.toolbar.contains(event.target) && this.session) {
@@ -520,6 +522,10 @@ export class TextEditor extends Component {
     const host = this.native.toolbarHost().parentElement;
     return host?.classList.contains('pfs-floating-toolbar') ? host : undefined;
   }
+  private ownsControl(target: Element): boolean {
+    return this.toolbar.contains(target) || !!this.popover?.element.contains(target)
+      || this.openingPopover && !!target.closest('.pfs-tool-popover');
+  }
   private shortcutTarget(target: EventTarget | null): boolean {
     const doc = this.native.element.ownerDocument;
     return target instanceof doc.defaultView!.Node && (this.native.element.contains(target)
@@ -613,17 +619,20 @@ export class TextEditor extends Component {
     if (this.tool === 'marker' || this.tool === 'scribble') { this.openBrushMenu(this.tool, this.propertiesButton); return; }
     const field = this.session?.snapshot.fields.find(field => field.name === this.selected);
     if (!field && this.tool !== 'text') return;
-    this.popover = this.addChild(new ToolPopover(this.propertiesButton, {
+    this.openingPopover = true;
+    try { this.popover = this.addChild(new ToolPopover(this.propertiesButton, {
       title: 'Text', color: field?.color ?? this.textColor,
       changeColor: color => { this.textColor = color; this.rememberPreferences(); this.formatSelected({ color }); this.updateStatus(); },
       text: { font: field?.fontFamily ?? this.textFamily, size: field?.fontSize ?? this.fontSize,
         change: (fontFamily, fontSize) => { this.textFamily = fontFamily; this.fontSize = fontSize; this.rememberPreferences(); this.formatSelected({ fontFamily, fontSize }); this.updateStatus(); } },
       close: () => this.closePopover()
-    })); this.updateStatus(); this.propertiesButton.setAttribute('aria-expanded', 'true');
+    })); } finally { this.openingPopover = false; }
+    this.updateStatus(); this.propertiesButton.setAttribute('aria-expanded', 'true');
   }
   private openBrushMenu(kind: 'marker' | 'scribble', anchor: HTMLElement): void {
     this.closePopover();
-    this.popover = this.addChild(new ToolPopover(anchor, {
+    this.openingPopover = true;
+    try { this.popover = this.addChild(new ToolPopover(anchor, {
       title: kind === 'marker' ? 'Highlighter' : 'Pen', color: kind === 'marker' ? this.markerColor : this.penColor,
       changeColor: color => { if (kind === 'marker') this.markerColor = color; else this.penColor = color; this.rememberPreferences(); this.updateStatus(); },
       widths: { values: kind === 'marker' ? [8, 14, 22, 30] : [1, 2, 4, 6], value: kind === 'marker' ? this.markerWidth : this.penWidth,
@@ -631,7 +640,8 @@ export class TextEditor extends Component {
       toggles: kind === 'marker' ? [{ label: 'Hold for straight line', description: 'Pause at the end before lifting.', value: this.holdHighlighter, change: value => { this.holdHighlighter = value; this.rememberPreferences(); } }]
         : [{ label: 'Smooth ink', description: 'Reduce wobble while keeping your handwriting.', value: this.smoothPen, change: value => { this.smoothPen = value; this.rememberPreferences(); } },
           { label: 'Draw & hold shapes', description: 'Lines, rectangles, triangles, circles, ellipses and arrows. Keep holding and drag to resize.', value: this.holdShapes, change: value => { this.holdShapes = value; this.rememberPreferences(); } }]
-    })); this.updateStatus(); this.propertiesButton.setAttribute('aria-expanded', 'true');
+    })); } finally { this.openingPopover = false; }
+    this.updateStatus(); this.propertiesButton.setAttribute('aria-expanded', 'true');
   }
 
   private removeSelection(): void {
