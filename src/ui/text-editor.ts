@@ -24,7 +24,7 @@ import { labelOverlay } from './overlay-label';
 interface AnswerLine { page: number; rect: Rect }
 const objectClipboardType = 'application/x-pdf-editor-objects';
 const webObjectClipboardType = `web ${objectClipboardType}`;
-interface ObjectCopy { token: string; objects: CopiedPdfObject[]; text: string; custom: boolean; write?: Promise<void> }
+interface ObjectCopy { token: string; objects: CopiedPdfObject[]; text: string; custom: boolean; blurred?: boolean; write?: Promise<void> }
 let copiedObjects: ObjectCopy | undefined;
 function objectClipboardHtml(doc: Document, text: string, token: string): string {
   const span = doc.createElement('span'); span.dataset.pdfEditorObjects = token;
@@ -236,10 +236,10 @@ export class TextEditor extends Component {
       } catch (error) { this.showError(error); }
     }, true);
     this.registerDomEvent(doc.defaultView!, 'cut', () => { copiedObjects = undefined; }, true);
-    // A copy in another application cannot dispatch a DOM event here. When
-    // Obsidian loses focus, cached PDF objects must no longer be pasteable.
+    // Switching windows does not replace the clipboard. Retain the copy so a
+    // matching clipboard token can authorize an object paste after returning.
     this.registerDomEvent(doc.defaultView!, 'blur', () => {
-      copiedObjects = undefined;
+      if (copiedObjects) copiedObjects.blurred = true;
       if (!this.selected && !this.selectedStroke && !this.selection?.objects.length) return;
       this.selected = undefined; this.selectedStroke = undefined;
       this.selection?.clear(); this.updateStatus(); this.refresh();
@@ -493,7 +493,7 @@ export class TextEditor extends Component {
       if (answer) { pasteCurrentText(value); return; }
       if (this.loaded && this.session === session && this.sameShortcutSelection(target, objects, focused)) this.pastePlainTextBox(value, objects);
     };
-    if (!clipboard?.readText && !clipboard?.read) { paste(); return true; }
+    if (!clipboard?.readText && !clipboard?.read) { if (!copy.blurred) paste(); return true; }
     void (async () => {
       // Clipboard writes and reads can be unavailable in some Obsidian
       // contexts. The window-blur guard still invalidates their fallback.
@@ -505,6 +505,11 @@ export class TextEditor extends Component {
           if (copiedObjects !== copy) return;
           if (matches) { paste(); return; }
         } catch { /* Without a readable token, do not paste a cached PDF object. */ }
+        copiedObjects = undefined;
+        try { if (clipboard.readText) pasteExternalText(await clipboard.readText()); } catch { /* No readable text to insert. */ }
+        return;
+      }
+      if (copy.blurred) {
         copiedObjects = undefined;
         try { if (clipboard.readText) pasteExternalText(await clipboard.readText()); } catch { /* No readable text to insert. */ }
         return;
@@ -579,7 +584,8 @@ export class TextEditor extends Component {
       if (top - height < bounds[1]) top = anchor.rect[3] + 12 + height;
       top = Math.max(bounds[1] + height, Math.min(bounds[3], top));
       const rect: Rect = [x, top - height, x + width, top];
-      const text: CopiedPdfObject = { kind: 'text', page: anchor.page, rect, rotation: 0, value,
+      const rotation = this.native.pages().find(page => page.number === anchor.page)?.viewport.rotation ?? 0;
+      const text: CopiedPdfObject = { kind: 'text', page: anchor.page, rect, rotation, value,
         fontSize: this.fontSize, fontFamily: this.textFamily, color: [...this.textColor], multiline: true };
       this.selectCreated(this.session.pasteObjects([text], [0, 0])); this.scheduleSave();
     } catch (error) { this.showError(error); }

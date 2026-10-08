@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { setTimeout as pause } from 'node:timers/promises';
 import { build } from 'esbuild';
 import { JSDOM } from 'jsdom';
-import { PDFDocument } from 'pdf-lib';
+import { PDFDocument, degrees } from 'pdf-lib';
 import { TextSession } from '../src/pdf/text-session.ts';
 import { readTextPdf } from '../src/pdf/text-engine.ts';
 import { loadToolPreferences } from '../src/pdf/tool-preferences.ts';
@@ -46,8 +46,8 @@ const { TextEditor } = await import(moduleUrl.href) as { TextEditor: typeof Edit
 const font = new Uint8Array(await readFile(new URL('../assets/fonts/NotoSans-Regular.ttf', import.meta.url)));
 
 interface MockScope { handlers: { key: string; func(event: KeyboardEvent): unknown }[] }
-async function fixture(pageCount = 1, withKeymap = false) {
-  const pdf = await PDFDocument.create(); for (let i = 0; i < pageCount; i++) pdf.addPage([600, 800]); let bytes = await pdf.save();
+async function fixture(pageCount = 1, withKeymap = false, rotation = 0) {
+  const pdf = await PDFDocument.create(); for (let i = 0; i < pageCount; i++) pdf.addPage([600, 800]).setRotation(degrees(rotation)); let bytes = await pdf.save();
   const session = await TextSession.open({ read: async () => bytes, write: async value => { bytes = value; }, backup: async () => 'original.pdf' }, font);
   const dom = new JSDOM(`<body><div id="editor"><div id="tools"></div>${Array.from({ length: pageCount }, (_, i) => `<div id="${i ? 'page' + (i + 1) : 'page'}"></div>`).join('')}</div><button id="outside">Outside</button></body>`, { pretendToBeVisual: true });
   const doc = dom.window.document;
@@ -72,7 +72,7 @@ async function fixture(pageCount = 1, withKeymap = false) {
   });
   const scanButton = doc.createElement('button'); scanButton.setAttribute('aria-label', 'Detect answer lines in PDF');
   const native = { identity: {}, element: doc.querySelector('#editor')!, file: {}, toolbarHost: () => doc.querySelector('#tools')!, answerLineButton: () => scanButton, pages: () => Array.from({ length: pageCount }, (_, i) => ({ div: doc.querySelector(i ? '#page' + (i + 1) : '#page')!, number: i + 1, annotationElements: () => [], viewport: {
-    width: 600, height: 800, scale: 1, rotation: 0, convertToPdfPoint: (x: number, y: number) => [x, 800 - y], convertToViewportRectangle: (r: number[]) => [r[0]!, 800 - r[1]!, r[2]!, 800 - r[3]!]
+    width: 600, height: 800, scale: 1, rotation, convertToPdfPoint: (x: number, y: number) => [x, 800 - y], convertToViewportRectangle: (r: number[]) => [r[0]!, 800 - r[1]!, r[2]!, 800 - r[3]!]
   } })) } as unknown as EditorSurface;
   const sessions = { get: async () => session, preferences: loadToolPreferences({ holdShapes: true }), updatePreferences: async () => {} } as unknown as VaultSessions;
   const scopes: MockScope[] = [];
@@ -634,6 +634,39 @@ test('Live Preview scope copies and pastes a selected PDF box through the system
     assert.equal(f.clipboard.text, 'Copy me');
   } finally { f.dispose(); }
 });
+test('switching windows retains a PDF copy when its clipboard token still matches', async () => {
+  const f = await fixture(1, true);
+  try {
+    const view = f.doc.defaultView!;
+    class FakeClipboardItem {
+      readonly types: string[];
+      private readonly values: Record<string, Blob>;
+      constructor(values: Record<string, Blob>) { this.values = values; this.types = Object.keys(values); }
+      async getType(type: string) { return this.values[type]!; }
+    }
+    Object.defineProperty(view, 'ClipboardItem', { value: FakeClipboardItem });
+    let items: FakeClipboardItem[] = [];
+    Object.defineProperty(view.navigator, 'clipboard', { configurable: true, value: {
+      write: async (value: FakeClipboardItem[]) => { items = value; },
+      read: async () => items,
+      readText: async () => 'Copied before switch'
+    } });
+    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
+    f.session.setValue(field.name, 'Copied before switch'); f.editor.refresh();
+    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
+    frame.focus();
+    const shortcut = (key: string) => f.doc.activeElement!.dispatchEvent(new view.KeyboardEvent('keydown', {
+      key, metaKey: true, bubbles: true, cancelable: true
+    }));
+    shortcut('c'); await pause(0);
+    view.dispatchEvent(new view.Event('blur'));
+    assert.equal(f.scopes.length, 0);
+    f.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); frame.focus();
+    shortcut('v'); await pause(0);
+    assert.equal(f.session.snapshot.fields.length, 2);
+    assert.equal(f.session.snapshot.fields[1]!.widgets[0]!.rect[2] - f.session.snapshot.fields[1]!.widgets[0]!.rect[0], 160);
+  } finally { f.dispose(); }
+});
 test('changed system clipboard text creates a new box instead of pasting a stale PDF object', async () => {
   const f = await fixture(1, true);
   try {
@@ -690,6 +723,24 @@ test('a native plain-text paste onto a selected PDF element creates an editable 
     assert.equal(f.session.snapshot.fields.length, 2);
     assert.equal(f.session.snapshot.fields[0]!.value, 'Existing');
     assert.equal(f.session.snapshot.fields[1]!.value, 'Pasted note text');
+  } finally { f.dispose(); }
+});
+test('plain text pasted beside a selected element follows a rotated PDF page', async () => {
+  const f = await fixture(1, false, 90);
+  try {
+    const field = f.session.add(1, [80, 580, 240, 610], 12, true, 90);
+    f.session.setValue(field.name, 'Existing'); f.editor.refresh();
+    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
+    frame.focus();
+    const paste = new f.doc.defaultView!.Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, 'clipboardData', { value: { getData(type: string) { return type === 'text/plain' ? 'Pasted upright' : ''; } } });
+    frame.dispatchEvent(paste);
+    assert.equal(paste.defaultPrevented, true);
+    assert.equal(f.session.snapshot.fields[1]!.widgets[0]!.rotation, 90);
+    await f.session.save();
+    const saved = await readTextPdf(f.bytes());
+    assert.equal(saved.fields[1]!.widgets[0]!.rotation, 90);
+    assert.equal(saved.fields[1]!.value, 'Pasted upright');
   } finally { f.dispose(); }
 });
 test('identical clipboard text without the PDF copy token becomes a new text box', async () => {
