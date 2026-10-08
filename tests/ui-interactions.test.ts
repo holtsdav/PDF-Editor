@@ -459,6 +459,24 @@ test('selected drawing shortcuts use a keyboard target in an embedded PDF', asyn
     assert.notDeepEqual(f.session.snapshot.strokes.find(stroke => stroke.id === selected.id)!.points, before);
   } finally { f.dispose(); }
 });
+test('deleting a selected drawing releases its keyboard interaction so autosave can finish', async () => {
+  const f = await fixture();
+  try {
+    f.session.addStroke(1, 'scribble', [[80, 500], [120, 520]], 2); f.editor.refresh();
+    const drawing = f.doc.querySelector<SVGGElement>('.pdf-form-studio-ink-control')!;
+    f.pointer(drawing, 'pointerdown', 100, 290);
+    f.pointer(f.doc.querySelector('.pdf-form-studio-layer')!, 'pointerup', 100, 290);
+    const proxy = f.doc.activeElement as HTMLTextAreaElement;
+    assert.equal(proxy.getAttribute('aria-label'), 'Selected PDF drawing');
+    const remove = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'Delete', bubbles: true, cancelable: true });
+    proxy.dispatchEvent(remove);
+    assert.equal(remove.defaultPrevented, true);
+    assert.equal(f.session.snapshot.strokes.length, 0);
+    assert.notEqual(f.doc.activeElement, proxy);
+    await Promise.race([f.session.saveWhenIdle(), pause(1000).then(() => { throw new Error('Autosave remained blocked by the drawing proxy.'); })]);
+    assert.equal(f.session.status, 'saved');
+  } finally { f.dispose(); }
+});
 test('selected text and drawing proxies keep Undo, Redo and tool shortcuts', async () => {
   const f = await fixture();
   try {

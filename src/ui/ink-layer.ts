@@ -113,6 +113,7 @@ export class InkLayer extends Component {
       control.outline.setAttribute('width', String(Math.abs(p[2]! - p[0]!))); control.outline.setAttribute('height', String(Math.abs(p[3]! - p[1]!)));
       control.outline.classList.toggle('is-selected', stroke.id === this.options.selected());
     }
+    if (this.layer.ownerDocument.activeElement === this.shortcutProxy && !ids.has(this.options.selected() ?? '')) this.shortcutProxy.blur();
     if (this.svg.lastElementChild !== this.preview) this.svg.append(this.preview);
   }
   private mount(stroke: InkStroke): InkControl {
@@ -139,7 +140,7 @@ export class InkLayer extends Component {
   private keySelected(event: KeyboardEvent, id: string): void {
     if (!['Delete', 'Backspace', 'Escape', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
     event.stopPropagation(); event.preventDefault();
-    if (event.key === 'Delete' || event.key === 'Backspace') { this.options.remove(id); return; }
+    if (event.key === 'Delete' || event.key === 'Backspace') { this.shortcutProxy.blur(); this.options.remove(id); return; }
     if (event.key === 'Escape') { this.cancel(); this.shortcutProxy.blur(); this.options.select(); return; }
     const direction: Record<string, Point> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] };
     const delta = direction[event.key]!;
