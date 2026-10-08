@@ -651,6 +651,31 @@ test('changed system clipboard text creates a new box instead of pasting a stale
     assert.equal(f.clipboard.text, 'Copied from another source');
   } finally { f.dispose(); }
 });
+test('a delayed PDF paste is canceled when another object is selected', async () => {
+  const f = await fixture(1, true);
+  try {
+    const first = f.session.add(1, [80, 580, 240, 610], 12, true);
+    const second = f.session.add(1, [80, 520, 240, 550], 12, true);
+    f.session.setValue(first.name, 'First'); f.session.setValue(second.name, 'Second'); f.editor.refresh();
+    let text = '';
+    let finishRead: ((value: string) => void) | undefined;
+    Object.defineProperty(f.doc.defaultView!.navigator, 'clipboard', { configurable: true, value: {
+      writeText: async (value: string) => { text = value; },
+      readText: () => new Promise<string>(resolve => { finishRead = resolve; })
+    } });
+    const frames = f.doc.querySelectorAll<HTMLElement>('.pdf-form-studio-box');
+    frames[0]!.focus();
+    const shortcut = (key: string) => f.doc.activeElement!.dispatchEvent(new f.doc.defaultView!.KeyboardEvent('keydown', {
+      key, metaKey: true, bubbles: true, cancelable: true
+    }));
+    shortcut('c'); await pause(0);
+    shortcut('v'); await pause(0);
+    assert(finishRead);
+    frames[1]!.focus();
+    finishRead(text); await pause(0);
+    assert.equal(f.session.snapshot.fields.length, 2);
+  } finally { f.dispose(); }
+});
 test('a native plain-text paste onto a selected PDF element creates an editable box', async () => {
   const f = await fixture();
   try {

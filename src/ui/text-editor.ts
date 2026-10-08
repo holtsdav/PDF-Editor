@@ -240,11 +240,12 @@ export class TextEditor extends Component {
     this.registerDomEvent(doc.defaultView!, 'paste', event => {
       if (!this.shortcutTarget(event.target) || (this.isTextTarget(event.target) && !this.shortcutField(event.target)) || !this.session || !event.clipboardData) return;
       const target = event.target, objects = this.shortcutObjects(target), copy = copiedObjects, session = this.session;
+      const focused = doc.activeElement;
       if (!objects.length) return;
       const text = event.clipboardData.getData('text/plain');
       const nativeToken = event.clipboardData.getData(objectClipboardType) || event.clipboardData.getData(webObjectClipboardType);
       const pasteCopy = () => {
-        if (!copy || copiedObjects !== copy || !this.loaded || this.session !== session || !this.shortcutObjects(target).length) return;
+        if (!copy || copiedObjects !== copy || !this.loaded || this.session !== session || !this.sameShortcutSelection(target, objects, focused)) return;
         try { this.selectCreated(session.pasteObjects(copy.objects)); this.scheduleSave(); }
         catch (error) { this.showError(error); }
       };
@@ -252,7 +253,7 @@ export class TextEditor extends Component {
         event.preventDefault(); event.stopImmediatePropagation(); pasteCopy(); return;
       }
       const pasteText = () => {
-        if (!this.loaded || this.session !== session || !this.shortcutObjects(target).length) return;
+        if (!this.loaded || this.session !== session || !this.sameShortcutSelection(target, objects, focused)) return;
         if (this.isTextTarget(target)) return;
         this.pastePlainTextBox(text, objects);
       };
@@ -273,8 +274,10 @@ export class TextEditor extends Component {
               .map(async item => (await item.getType(webObjectClipboardType)).text()));
             if (tokens.includes(copy.token)) { pasteCopy(); return; }
           } catch { /* An unreadable token cannot authorize an object paste. */ }
+          if (copiedObjects !== copy) return;
           if (copiedObjects === copy) copiedObjects = undefined;
           if (answer && caret && answer.isConnected && answer.ownerDocument.activeElement === answer
+            && this.sameShortcutSelection(target, objects, focused)
             && answer.value === caret.value && answer.selectionStart === caret.start && answer.selectionEnd === caret.end) {
             answer.setRangeText(text, caret.start, caret.end, 'end');
             answer.dispatchEvent(new doc.defaultView!.Event('input', { bubbles: true }));
@@ -467,13 +470,15 @@ export class TextEditor extends Component {
     }
     const copy = copiedObjects, session = this.session;
     if (!copy) return false;
+    const focused = this.native.element.ownerDocument.activeElement;
     const paste = () => {
-      if (copiedObjects !== copy || !this.loaded || this.session !== session || !this.shortcutObjects(target).length) return;
+      if (copiedObjects !== copy || !this.loaded || this.session !== session || !this.sameShortcutSelection(target, objects, focused)) return;
       try { this.selectCreated(session.pasteObjects(copy.objects)); this.scheduleSave(); }
       catch (error) { this.showError(error); }
     };
     const pasteCurrentText = (value: string) => {
       if (!answer || !caret || !this.loaded || this.session !== session || !answer.isConnected || answer.readOnly
+        || !this.sameShortcutSelection(target, objects, focused)
         || answer.ownerDocument.activeElement !== answer || answer.value !== caret.value
         || answer.selectionStart !== caret.start || answer.selectionEnd !== caret.end) return;
       answer.setRangeText(value, caret.start, caret.end, 'end');
@@ -481,7 +486,7 @@ export class TextEditor extends Component {
     };
     const pasteExternalText = (value: string) => {
       if (answer) { pasteCurrentText(value); return; }
-      if (this.loaded && this.session === session && this.shortcutObjects(target).length) this.pastePlainTextBox(value, objects);
+      if (this.loaded && this.session === session && this.sameShortcutSelection(target, objects, focused)) this.pastePlainTextBox(value, objects);
     };
     if (!clipboard?.readText && !clipboard?.read) { paste(); return true; }
     void (async () => {
@@ -537,6 +542,12 @@ export class TextEditor extends Component {
     if (this.selected && this.session?.snapshot.fields.some(field => field.name === this.selected && field.owned && !field.readOnly)) return [{ kind: 'text', id: this.selected }];
     if (this.selectedStroke && this.session?.snapshot.strokes.some(stroke => stroke.id === this.selectedStroke && !stroke.readOnly)) return [{ kind: 'ink', id: this.selectedStroke }];
     return [];
+  }
+  private sameShortcutSelection(target: EventTarget | null, objects: PdfObject[], focused: Element | null): boolean {
+    const view = this.native.element.ownerDocument.defaultView!;
+    if (!(target instanceof view.Node) || !target.isConnected || this.native.element.ownerDocument.activeElement !== focused) return false;
+    const current = this.shortcutObjects(target);
+    return current.length === objects.length && current.every((object, index) => object.kind === objects[index]!.kind && object.id === objects[index]!.id);
   }
   private pastePlainTextBox(value: string, objects: PdfObject[]): void {
     if (!value.trim() || !this.session || !objects.length || !this.session.canEditObjects) return;
