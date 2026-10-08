@@ -237,18 +237,51 @@ export class TextEditor extends Component {
     });
     this.registerDomEvent(doc.defaultView!, 'paste', event => {
       if (!this.shortcutTarget(event.target) || (this.isTextTarget(event.target) && !this.shortcutField(event.target)) || !this.session || !event.clipboardData) return;
-      if (event.clipboardData.getData(objectClipboardType) !== copiedObjects?.token) {
-        copiedObjects = undefined;
-        const text = event.clipboardData.getData('text/plain');
-        const objects = this.shortcutObjects(event.target);
-        if (!this.isTextTarget(event.target) && text && objects.length) {
-          event.preventDefault(); event.stopImmediatePropagation(); this.pastePlainTextBox(text, objects);
-        }
+      const target = event.target, objects = this.shortcutObjects(target), copy = copiedObjects, session = this.session;
+      if (!objects.length) return;
+      const text = event.clipboardData.getData('text/plain');
+      const nativeToken = event.clipboardData.getData(objectClipboardType) || event.clipboardData.getData(webObjectClipboardType);
+      const pasteCopy = () => {
+        if (!copy || copiedObjects !== copy || !this.loaded || this.session !== session || !this.shortcutObjects(target).length) return;
+        try { this.selectCreated(session.pasteObjects(copy.objects)); this.scheduleSave(); }
+        catch (error) { this.showError(error); }
+      };
+      if (copy && nativeToken === copy.token) {
+        event.preventDefault(); event.stopImmediatePropagation(); pasteCopy(); return;
+      }
+      const pasteText = () => {
+        if (!this.loaded || this.session !== session || !this.shortcutObjects(target).length) return;
+        if (this.isTextTarget(target)) return;
+        this.pastePlainTextBox(text, objects);
+      };
+      const clipboard = doc.defaultView!.navigator.clipboard;
+      if (copy?.custom && clipboard?.read) {
+        // Menu and context-menu paste can deliver only a filtered DataTransfer.
+        // The async clipboard still carries our web custom format.
+        event.preventDefault(); event.stopImmediatePropagation();
+        const answer = target instanceof doc.defaultView!.HTMLInputElement || target instanceof doc.defaultView!.HTMLTextAreaElement
+          ? this.shortcutField(target) ? target : undefined : undefined;
+        const caret = answer && answer.selectionStart !== null && answer.selectionEnd !== null
+          ? { value: answer.value, start: answer.selectionStart, end: answer.selectionEnd } : undefined;
+        void (async () => {
+          if (copy.write) await copy.write;
+          try {
+            const items = await clipboard.read();
+            const tokens = await Promise.all(items.filter(item => item.types.includes(webObjectClipboardType))
+              .map(async item => (await item.getType(webObjectClipboardType)).text()));
+            if (tokens.includes(copy.token)) { pasteCopy(); return; }
+          } catch { /* An unreadable token cannot authorize an object paste. */ }
+          if (copiedObjects === copy) copiedObjects = undefined;
+          if (answer && caret && answer.isConnected && answer.ownerDocument.activeElement === answer
+            && answer.value === caret.value && answer.selectionStart === caret.start && answer.selectionEnd === caret.end) {
+            answer.setRangeText(text, caret.start, caret.end, 'end');
+            answer.dispatchEvent(new doc.defaultView!.Event('input', { bubbles: true }));
+          } else pasteText();
+        })();
         return;
       }
-      event.preventDefault(); event.stopImmediatePropagation();
-      try { this.selectCreated(this.session.pasteObjects(copiedObjects.objects)); this.scheduleSave(); }
-      catch (error) { this.showError(error); }
+      copiedObjects = undefined;
+      if (!this.isTextTarget(target) && text) { event.preventDefault(); event.stopImmediatePropagation(); pasteText(); }
     }, true);
     this.updateStatus();
     void this.openSession().then(() => { this.updateStatus(); this.refresh(); }).catch(error => {
