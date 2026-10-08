@@ -1,4 +1,4 @@
-import { Component, Menu, Modal, Notice, setIcon, setTooltip } from 'obsidian';
+import { Component, Menu, Modal, Notice, Scope, setIcon, setTooltip } from 'obsidian';
 import type { App } from 'obsidian';
 import type { NativePage, NativePdf, EditorSurface } from '../compat/native-pdf';
 import { pdfRectangle, screenRectangle } from '../compat/native-pdf';
@@ -23,7 +23,14 @@ import { labelOverlay } from './overlay-label';
 
 interface AnswerLine { page: number; rect: Rect }
 const objectClipboardType = 'application/x-pdf-editor-objects';
-let copiedObjects: { token: string; objects: CopiedPdfObject[] } | undefined;
+const webObjectClipboardType = `web ${objectClipboardType}`;
+interface ObjectCopy { token: string; objects: CopiedPdfObject[]; text: string; custom: boolean; blurred?: boolean; write?: Promise<void> }
+let copiedObjects: ObjectCopy | undefined;
+function objectClipboardHtml(doc: Document, text: string, token: string): string {
+  const span = doc.createElement('span'); span.dataset.pdfEditorObjects = token;
+  span.style.whiteSpace = 'pre-wrap'; span.textContent = text;
+  return span.outerHTML;
+}
 
 interface FieldControl {
   frame: HTMLElement; input: HTMLInputElement | HTMLTextAreaElement;
@@ -75,6 +82,9 @@ export class TextEditor extends Component {
   private composing = new Set<HTMLInputElement | HTMLTextAreaElement>();
   private editing?: string;
   private selection?: ObjectSelection;
+  private objectScope?: Scope;
+  private objectScopeActive = false;
+  private openingPopover = false;
   private activeBox?: string;
   private answerLines: AnswerLine[] = [];
   private answerFields = new Set<string>();
@@ -86,6 +96,14 @@ export class TextEditor extends Component {
     if (state) { this.textFamily = state.textFamily; this.textColor = state.textColor; this.tool = state.tool; this.fontSize = state.fontSize; this.markerWidth = state.markerWidth; this.penWidth = state.penWidth; this.markerColor = state.markerColor; this.penColor = state.penColor;
       this.selected = state.selected; this.selectedStroke = state.selectedStroke; this.focused = state.focused; }
     const doc = native.element.ownerDocument;
+    if (app.keymap) {
+      const scope = this.objectScope = new Scope(app.scope);
+      for (const key of ['c', 'v', 'd']) scope.register(['Mod'], key, event => {
+        if (this.claimScopedShortcut(key, event)) return false;
+        return undefined;
+      });
+      this.register(() => { if (this.objectScopeActive) app.keymap.popScope(scope); });
+    }
     this.register(usePdfFont(doc));
     native.element.classList.add('pdf-form-studio-view');
     this.toolbar = doc.createElement('div'); this.toolbar.className = 'pdf-form-studio-toolbar';
@@ -126,9 +144,10 @@ export class TextEditor extends Component {
     this.registerDomEvent(doc, 'pointerdown', event => {
       if (this.focused && event.target !== this.focused.input) this.focused = undefined;
       const target = event.target;
-      if (target instanceof doc.defaultView!.Element && !target.closest('.pdf-form-studio-toolbar, .pfs-tool-popover')
-        && target.closest('.pdf-form-studio-box')?.querySelector<HTMLElement>('[data-pdf-field]')?.dataset.pdfField !== this.activeBox) this.endTextEditing();
-      if (target instanceof doc.defaultView!.Element && !target.closest('.pdf-form-studio-box, .pdf-form-studio-ink-control, .pdf-form-studio-toolbar, .pfs-tool-popover')) {
+      if (!(target instanceof doc.defaultView!.Element)) return;
+      const inPdf = this.native.element.contains(target), ownControl = this.ownsControl(target);
+      if (!ownControl && (!inPdf || target.closest('.pdf-form-studio-box')?.querySelector<HTMLElement>('[data-pdf-field]')?.dataset.pdfField !== this.activeBox)) this.endTextEditing();
+      if (!ownControl && (!inPdf || !target.closest('.pdf-form-studio-box, .pdf-form-studio-ink-control'))) {
         this.selected = undefined; this.selectedStroke = undefined; this.updateStatus(); this.refresh();
         const active = doc.activeElement;
         if (active instanceof doc.defaultView!.HTMLElement && [...this.layers.values()].some(entry => entry.layer.contains(active))) active.blur();
@@ -138,7 +157,10 @@ export class TextEditor extends Component {
       // Keyboard-opened dialogs also move focus deliberately. Never restore
       // a PDF input over the quick switcher, command palette or another note.
       if (this.focused && event.target !== this.focused.input) this.focused = undefined;
-      if (event.target instanceof doc.defaultView!.Element && !this.native.element.contains(event.target) && !event.target.closest('.pfs-tool-popover, .pdf-form-studio-toolbar')) this.endTextEditing();
+      if (event.target instanceof doc.defaultView!.Element && !this.native.element.contains(event.target) && !this.ownsControl(event.target)) {
+        this.endTextEditing();
+        this.selected = undefined; this.selectedStroke = undefined; this.updateStatus(); this.refresh();
+      }
       if (event.target instanceof doc.defaultView!.HTMLElement && this.toolbar.contains(event.target) && this.session) {
         this.releaseFocus(); this.focusInteraction = { input: event.target, release: this.session.beginInteraction() };
       }
@@ -151,7 +173,9 @@ export class TextEditor extends Component {
     // Claim Save at the window capture phase, scoped to this editor's controls.
     this.registerDomEvent(doc.defaultView!, 'keydown', event => {
       const target = event.target;
-      if (!this.shortcutTarget(target) && !(target === doc.body && event.key === 'Escape' && this.tool !== 'select')) return;
+      const objectKey = (event.metaKey || event.ctrlKey) && ['c', 'v', 'd'].includes(event.key.toLowerCase());
+      if (!this.shortcutTarget(target) && !(objectKey && this.objectShortcutActive())
+        && !(target === doc.body && event.key === 'Escape' && this.tool !== 'select')) return;
       if (event.key === 'Tab' && !event.metaKey && !event.ctrlKey && !event.altKey && target instanceof doc.defaultView!.HTMLElement
         && target.dataset.pdfField && !event.isComposing && this.navigateAnswerLine(target.dataset.pdfField, event.shiftKey ? -1 : 1)) {
         event.preventDefault(); event.stopImmediatePropagation(); return;
@@ -164,47 +188,109 @@ export class TextEditor extends Component {
         this.updateStatus(); this.refresh(); return;
       }
       if (!(event.metaKey || event.ctrlKey)) {
-        if (!(target instanceof doc.defaultView!.HTMLInputElement || target instanceof doc.defaultView!.HTMLTextAreaElement) && !event.altKey) {
+        if (!this.isTextTarget(target) && !event.altKey) {
           const shortcut: Record<string, EditorTool> = { v: 'select', t: 'text', p: 'scribble', h: 'marker', e: 'eraser' };
           const tool = shortcut[event.key.toLowerCase()]; if (tool) { event.preventDefault(); event.stopPropagation(); this.setTool(tool); }
         }
         return;
       }
-      if (event.key.toLowerCase() === 'd' && !event.shiftKey && !this.isTextTarget(target)) {
-        const objects = this.selectedObjects();
+      if (event.key.toLowerCase() === 'd' && !event.shiftKey) {
+        const objects = this.shortcutObjects(target);
         if (objects.length && this.session) {
           event.preventDefault(); event.stopImmediatePropagation();
+          if (event.repeat) return;
           try { this.selectCreated(this.session.pasteObjects(this.session.copyObjects(objects))); this.scheduleSave(); }
           catch (error) { this.showError(error); }
           return;
         }
       }
+      if ((event.key.toLowerCase() === 'c' || event.key.toLowerCase() === 'v') && !event.shiftKey && !event.altKey
+        && this.shortcutObjects(target).length && (!doc.getSelection()?.toString()
+          || target instanceof doc.defaultView!.HTMLElement && target.classList.contains('pdf-form-studio-shortcut-proxy'))) {
+        this.claimScopedShortcut(event.key.toLowerCase(), event);
+        return;
+      }
       if (event.key.toLowerCase() === 's') {
         event.preventDefault(); event.stopImmediatePropagation(); void this.save();
       }
       if (event.key.toLowerCase() === 'z' && (event.shiftKey ? this.session?.canRedoStroke : this.session?.canUndoStroke)
-        && !(target instanceof doc.defaultView!.HTMLInputElement || target instanceof doc.defaultView!.HTMLTextAreaElement)) {
+        && !this.isTextTarget(target)) {
         event.preventDefault(); event.stopImmediatePropagation(); if (event.shiftKey) this.session?.redoStroke(); else this.session?.undoStroke(); this.selectedStroke = undefined; this.scheduleSave();
       }
     }, true);
     this.registerDomEvent(doc.defaultView!, 'copy', event => {
-      if (!this.shortcutTarget(event.target) || this.isTextTarget(event.target) || doc.getSelection()?.toString()) return;
-      const objects = this.selectedObjects();
-      if (!objects.length || !this.session || !event.clipboardData) return;
+      const target = event.target;
+      if (!(target instanceof doc.defaultView!.Element) || !target.closest('.pdf-form-studio-view')) { copiedObjects = undefined; return; }
+      if (!this.shortcutTarget(target)) return;
+      if (doc.getSelection()?.toString()) { copiedObjects = undefined; return; }
+      const objects = this.shortcutObjects(target);
+      if (!objects.length || !this.session || !event.clipboardData) { copiedObjects = undefined; return; }
       try {
         const token = globalThis.crypto.randomUUID(), data = this.session.copyObjects(objects);
+        const text = data.filter(item => item.kind === 'text').map(item => item.value).join('\n') || 'PDF Editor elements';
         event.clipboardData.setData(objectClipboardType, token);
-        event.clipboardData.setData('text/plain', data.filter(item => item.kind === 'text').map(item => item.value).join('\n') || 'PDF Editor elements');
-        copiedObjects = { token, objects: data };
+        event.clipboardData.setData('text/plain', text);
+        event.clipboardData.setData('text/html', objectClipboardHtml(doc, text, token));
+        copiedObjects = { token, objects: data, text, custom: true };
         event.preventDefault(); event.stopImmediatePropagation();
       } catch (error) { this.showError(error); }
     }, true);
+    this.registerDomEvent(doc.defaultView!, 'cut', () => { copiedObjects = undefined; }, true);
+    // Switching windows does not replace the clipboard. Retain the copy so a
+    // matching clipboard token can authorize an object paste after returning.
+    this.registerDomEvent(doc.defaultView!, 'blur', () => {
+      if (copiedObjects) copiedObjects.blurred = true;
+      if (!this.selected && !this.selectedStroke && !this.selection?.objects.length) return;
+      this.selected = undefined; this.selectedStroke = undefined;
+      this.selection?.clear(); this.updateStatus(); this.refresh();
+    });
     this.registerDomEvent(doc.defaultView!, 'paste', event => {
-      if (!this.shortcutTarget(event.target) || this.isTextTarget(event.target) || !this.session || !event.clipboardData
-        || event.clipboardData.getData(objectClipboardType) !== copiedObjects?.token) return;
-      event.preventDefault(); event.stopImmediatePropagation();
-      try { this.selectCreated(this.session.pasteObjects(copiedObjects.objects)); this.scheduleSave(); }
-      catch (error) { this.showError(error); }
+      if (!this.shortcutTarget(event.target) || (this.isTextTarget(event.target) && !this.shortcutField(event.target)) || !this.session || !event.clipboardData) return;
+      const target = event.target, objects = this.shortcutObjects(target), copy = copiedObjects, session = this.session;
+      const focused = doc.activeElement;
+      if (!objects.length) return;
+      const text = event.clipboardData.getData('text/plain');
+      const nativeToken = event.clipboardData.getData(objectClipboardType) || event.clipboardData.getData(webObjectClipboardType);
+      const pasteCopy = () => {
+        if (!copy || copiedObjects !== copy || !this.loaded || this.session !== session || !this.sameShortcutSelection(target, objects, focused)) return;
+        try { this.selectCreated(session.pasteObjects(copy.objects)); this.scheduleSave(); }
+        catch (error) { this.showError(error); }
+      };
+      if (copy && nativeToken === copy.token) {
+        event.preventDefault(); event.stopImmediatePropagation(); pasteCopy(); return;
+      }
+      const pasteText = () => {
+        if (!this.loaded || this.session !== session || !this.sameShortcutSelection(target, objects, focused)) return;
+        if (this.isTextTarget(target)) return;
+        this.pastePlainTextBox(text, objects);
+      };
+      const clipboard = doc.defaultView!.navigator.clipboard;
+      if ((copy?.custom || copy?.write) && typeof clipboard?.read === 'function') {
+        // Menu and context-menu paste can deliver only a filtered DataTransfer.
+        // The async clipboard still carries our web custom format.
+        event.preventDefault(); event.stopImmediatePropagation();
+        const answer = target instanceof doc.defaultView!.HTMLInputElement || target instanceof doc.defaultView!.HTMLTextAreaElement
+          ? this.shortcutField(target) ? target : undefined : undefined;
+        const caret = answer && answer.selectionStart !== null && answer.selectionEnd !== null
+          ? { value: answer.value, start: answer.selectionStart, end: answer.selectionEnd } : undefined;
+        void (async () => {
+          if (copy.write) await copy.write;
+          if (copy.custom) try {
+            if (await this.clipboardHasObjectToken(clipboard, copy.token)) { pasteCopy(); return; }
+          } catch { /* An unreadable token cannot authorize an object paste. */ }
+          if (copiedObjects !== copy) return;
+          if (copiedObjects === copy) copiedObjects = undefined;
+          if (answer && caret && answer.isConnected && answer.ownerDocument.activeElement === answer
+            && this.sameShortcutSelection(target, objects, focused)
+            && answer.value === caret.value && answer.selectionStart === caret.start && answer.selectionEnd === caret.end) {
+            answer.setRangeText(text, caret.start, caret.end, 'end');
+            answer.dispatchEvent(new doc.defaultView!.Event('input', { bubbles: true }));
+          } else pasteText();
+        })();
+        return;
+      }
+      copiedObjects = undefined;
+      if (!this.isTextTarget(target) && text) { event.preventDefault(); event.stopImmediatePropagation(); pasteText(); }
     }, true);
     this.updateStatus();
     void this.openSession().then(() => { this.updateStatus(); this.refresh(); }).catch(error => {
@@ -227,6 +313,7 @@ export class TextEditor extends Component {
     this.selection = this.addChild(new ObjectSelection(session, this.native.element, {
       enabled: () => this.tool === 'select', changed: () => { this.updateStatus(); this.refresh(); }, save: () => this.scheduleSave(), error: error => this.showError(error),
       floatingToolbar: () => this.floatingToolbarHost(),
+      shortcut: (key, event) => this.claimScopedShortcut(key, event),
       endTyping: () => { this.selected = undefined; this.selectedStroke = undefined; this.focused = undefined; this.endTextEditing(); }
     }, this.app));
     this.unsubscribe = session.subscribe(() => { this.updateStatus(); this.refresh(); });
@@ -311,11 +398,146 @@ export class TextEditor extends Component {
   }
   private isTextTarget(target: EventTarget | null): boolean {
     const element = target instanceof this.native.element.ownerDocument.defaultView!.Element ? target : undefined;
-    return !!element?.closest('input, textarea, [contenteditable="true"]');
+    return !!element && !element.classList.contains('pdf-form-studio-shortcut-proxy')
+      && !!element.closest('input, textarea, [contenteditable="true"]');
+  }
+  /** A caret in an owned PDF answer selects the box; highlighted text keeps native clipboard behavior. */
+  private shortcutField(target: EventTarget | null): string | undefined {
+    const view = this.native.element.ownerDocument.defaultView!;
+    if (!(target instanceof view.HTMLInputElement || target instanceof view.HTMLTextAreaElement)
+      || target.selectionStart !== target.selectionEnd) return;
+    const name = target.dataset.pdfField;
+    return name && this.session?.snapshot.fields.some(field => field.name === name && field.owned && !field.readOnly && field.widgets.length === 1)
+      ? name : undefined;
+  }
+  private shortcutObjects(target: EventTarget | null): PdfObject[] {
+    // Obsidian shares keymap scopes across pop-out windows. Never let a
+    // selected PDF consume a shortcut dispatched by another document.
+    if (!(target instanceof this.native.element.ownerDocument.defaultView!.Node)) return [];
+    const field = this.shortcutField(target);
+    if (field) return [{ kind: 'text', id: field }];
+    if (target instanceof this.native.element.ownerDocument.defaultView!.HTMLElement && target.classList.contains('pdf-form-studio-shortcut-proxy')) return this.selectedObjects();
+    if (this.isTextTarget(target)) {
+      const node = target instanceof this.native.element.ownerDocument.defaultView!.Node ? target : undefined;
+      // Live Preview can keep its note editor as the keyboard target even
+      // while the PDF selection owns the active Obsidian shortcut scope.
+      return node && !this.native.element.contains(node) && this.objectShortcutActive() ? this.selectedObjects() : [];
+    }
+    return this.selectedObjects();
+  }
+  private objectShortcutActive(): boolean {
+    return this.objectScopeActive || !!this.selection?.objects.length;
+  }
+  private claimScopedShortcut(key: string, event: KeyboardEvent): boolean {
+    const objects = this.shortcutObjects(event.target);
+    if (!this.loaded || !this.session || !objects.length || event.shiftKey || event.altKey || event.isComposing) return false;
+    const target = event.target;
+    const inPdf = target instanceof this.native.element.ownerDocument.defaultView!.Node && this.native.element.contains(target);
+    if (inPdf && this.isTextTarget(target) && !this.shortcutField(target)) return false;
+    if (key === 'd') {
+      event.preventDefault(); event.stopImmediatePropagation();
+      if (!event.repeat) try { this.selectCreated(this.session.pasteObjects(this.session.copyObjects(objects))); this.scheduleSave(); }
+      catch (error) { this.showError(error); }
+      return true;
+    }
+    if (key === 'v' && !copiedObjects) return false;
+    const view = this.native.element.ownerDocument.defaultView!;
+    const answer = key === 'v' && (target instanceof view.HTMLInputElement || target instanceof view.HTMLTextAreaElement)
+      && this.shortcutField(target) ? target : undefined;
+    const caret = answer && answer.selectionStart !== null && answer.selectionEnd !== null
+      ? { value: answer.value, start: answer.selectionStart, end: answer.selectionEnd } : undefined;
+    // Obsidian's Live Preview keymap consumes these keys before the browser
+    // dispatches copy/paste events for an embedded PDF. Use the system
+    // clipboard directly while this PDF owns the active shortcut scope.
+    event.preventDefault(); event.stopImmediatePropagation();
+    const clipboard = this.native.element.ownerDocument.defaultView?.navigator.clipboard;
+    if (key === 'c') {
+      try {
+        const data = this.session.copyObjects(objects);
+        const text = data.filter(item => item.kind === 'text').map(item => item.value).join('\n') || 'PDF Editor elements';
+        const copy: ObjectCopy = { token: globalThis.crypto.randomUUID(), objects: data, text, custom: false };
+        copiedObjects = copy;
+        // A web custom format carries an opaque identity without changing the
+        // plain text seen when this answer is pasted into another application.
+        const writePlainText = async () => { try { await clipboard?.writeText?.(text); } catch { /* Internal copy still works in restricted contexts. */ } };
+        if (clipboard?.write && typeof view.ClipboardItem === 'function') {
+          try {
+            const item = new view.ClipboardItem({
+              'text/plain': new Blob([text], { type: 'text/plain' }),
+              'text/html': new Blob([objectClipboardHtml(this.native.element.ownerDocument, text, copy.token)], { type: 'text/html' }),
+              [webObjectClipboardType]: new Blob([copy.token], { type: objectClipboardType })
+            });
+            copy.write = clipboard.write([item]).then(() => { copy.custom = true; }, writePlainText);
+          } catch { copy.write = writePlainText(); }
+        } else copy.write = writePlainText();
+      } catch (error) { this.showError(error); }
+      return true;
+    }
+    const copy = copiedObjects, session = this.session;
+    if (!copy) return false;
+    const focused = this.native.element.ownerDocument.activeElement;
+    const paste = () => {
+      if (copiedObjects !== copy || !this.loaded || this.session !== session || !this.sameShortcutSelection(target, objects, focused)) return;
+      try { this.selectCreated(session.pasteObjects(copy.objects)); this.scheduleSave(); }
+      catch (error) { this.showError(error); }
+    };
+    const pasteCurrentText = (value: string) => {
+      if (!answer || !caret || !this.loaded || this.session !== session || !answer.isConnected || answer.readOnly
+        || !this.sameShortcutSelection(target, objects, focused)
+        || answer.ownerDocument.activeElement !== answer || answer.value !== caret.value
+        || answer.selectionStart !== caret.start || answer.selectionEnd !== caret.end) return;
+      answer.setRangeText(value, caret.start, caret.end, 'end');
+      answer.dispatchEvent(new view.Event('input', { bubbles: true }));
+    };
+    const pasteExternalText = (value: string) => {
+      if (answer) { pasteCurrentText(value); return; }
+      if (this.loaded && this.session === session && this.sameShortcutSelection(target, objects, focused)) this.pastePlainTextBox(value, objects);
+    };
+    if (!clipboard?.readText && !clipboard?.read) { if (!copy.blurred) paste(); return true; }
+    void (async () => {
+      // Clipboard writes and reads can be unavailable in some Obsidian
+      // contexts. The window-blur guard still invalidates their fallback.
+      if (copy.write) await copy.write;
+      if (copiedObjects !== copy) return;
+      if (copy.custom && typeof clipboard.read === 'function') {
+        try {
+          const matches = await this.clipboardHasObjectToken(clipboard, copy.token);
+          if (copiedObjects !== copy) return;
+          if (matches) { paste(); return; }
+        } catch { /* Without a readable token, do not paste a cached PDF object. */ }
+        copiedObjects = undefined;
+        try { if (clipboard.readText) pasteExternalText(await clipboard.readText()); } catch { /* No readable text to insert. */ }
+        return;
+      }
+      if (copy.blurred) {
+        copiedObjects = undefined;
+        try { if (clipboard.readText) pasteExternalText(await clipboard.readText()); } catch { /* No readable text to insert. */ }
+        return;
+      }
+      if (!clipboard.readText) { paste(); return; }
+      try {
+        const current = await clipboard.readText();
+        if (copiedObjects !== copy) return;
+        if (current !== copy.text) { copiedObjects = undefined; pasteExternalText(current); return; }
+      } catch { /* A same-window copy remains usable when read permission is denied. */ }
+      paste();
+    })();
+    return true;
+  }
+  private syncObjectScope(): void {
+    if (!this.objectScope) return;
+    const active = !!this.session && !this.selection?.objects.length && !!(this.selected || this.selectedStroke);
+    if (active === this.objectScopeActive) return;
+    this.objectScopeActive = active;
+    if (active) this.app.keymap.pushScope(this.objectScope); else this.app.keymap.popScope(this.objectScope);
   }
   private floatingToolbarHost(): HTMLElement | undefined {
     const host = this.native.toolbarHost().parentElement;
     return host?.classList.contains('pfs-floating-toolbar') ? host : undefined;
+  }
+  private ownsControl(target: Element): boolean {
+    return this.toolbar.contains(target) || !!this.popover?.element.contains(target)
+      || this.openingPopover && !!target.closest('.pfs-tool-popover');
   }
   private shortcutTarget(target: EventTarget | null): boolean {
     const doc = this.native.element.ownerDocument;
@@ -329,9 +551,49 @@ export class TextEditor extends Component {
     if (this.selectedStroke && this.session?.snapshot.strokes.some(stroke => stroke.id === this.selectedStroke && !stroke.readOnly)) return [{ kind: 'ink', id: this.selectedStroke }];
     return [];
   }
+  private sameShortcutSelection(target: EventTarget | null, objects: PdfObject[], focused: Element | null): boolean {
+    const view = this.native.element.ownerDocument.defaultView!;
+    if (!(target instanceof view.Node) || !target.isConnected || this.native.element.ownerDocument.activeElement !== focused) return false;
+    const current = this.shortcutObjects(target);
+    return current.length === objects.length && current.every((object, index) => object.kind === objects[index]!.kind && object.id === objects[index]!.id);
+  }
+  private async clipboardHasObjectToken(clipboard: Clipboard, token: string): Promise<boolean> {
+    const view = this.native.element.ownerDocument.defaultView!;
+    for (const item of await clipboard.read()) {
+      if (item.types.includes(webObjectClipboardType) && await (await item.getType(webObjectClipboardType)).text() === token) return true;
+      if (item.types.includes('text/html')) {
+        const html = await (await item.getType('text/html')).text();
+        if (new view.DOMParser().parseFromString(html, 'text/html').querySelector('[data-pdf-editor-objects]')
+          ?.getAttribute('data-pdf-editor-objects') === token) return true;
+      }
+    }
+    return false;
+  }
+  private pastePlainTextBox(value: string, objects: PdfObject[]): void {
+    if (!value.trim() || !this.session || !objects.length || !this.session.canEditObjects) return;
+    try {
+      const anchor = this.session.copyObjects(objects)[0];
+      if (!anchor) return;
+      const bounds = this.session.snapshot.pages[anchor.page - 1]!;
+      const width = Math.min(300, bounds[2] - bounds[0]);
+      const charactersPerRow = Math.max(1, Math.floor((width - 8) / (this.fontSize * 0.6)));
+      const rows = value.split(/\r\n?|\n/).reduce((sum, line) => sum + Math.max(1, Math.ceil(line.length / charactersPerRow)), 0);
+      const height = Math.min(bounds[3] - bounds[1], Math.max(this.fontSize * 1.4 + 8, rows * this.fontSize * 1.4 + 8));
+      const x = Math.max(bounds[0], Math.min(bounds[2] - width, anchor.rect[0]));
+      let top = anchor.rect[1] - 12;
+      if (top - height < bounds[1]) top = anchor.rect[3] + 12 + height;
+      top = Math.max(bounds[1] + height, Math.min(bounds[3], top));
+      const rect: Rect = [x, top - height, x + width, top];
+      const rotation = this.native.pages().find(page => page.number === anchor.page)?.viewport.rotation ?? 0;
+      const text: CopiedPdfObject = { kind: 'text', page: anchor.page, rect, rotation, value,
+        fontSize: this.fontSize, fontFamily: this.textFamily, color: [...this.textColor], multiline: true };
+      this.selectCreated(this.session.pasteObjects([text], [0, 0])); this.scheduleSave();
+    } catch (error) { this.showError(error); }
+  }
   private clearBrowserSelection(): void { this.native.element.ownerDocument.getSelection()?.removeAllRanges(); }
   private selectCreated(objects: PdfObject[]): void {
     if (!objects.length) return;
+    this.endTextEditing();
     this.clearBrowserSelection();
     this.selected = undefined; this.selectedStroke = undefined;
     if (objects.length > 1) this.selection?.selectObjects(objects);
@@ -341,6 +603,9 @@ export class TextEditor extends Component {
       else this.selectedStroke = objects[0]!.id;
     }
     this.updateStatus(); this.refresh();
+    if (objects.length === 1 && objects[0]!.kind === 'text') {
+      for (const entry of this.layers.values()) entry.controls.get(`${objects[0]!.id}:0`)?.frame.focus({ preventScroll: true });
+    }
   }
   addSuggestedField(page: number, rect: Rect, scroll = false): void {
     if (!this.session || this.session.replacing || this.session.status === 'conflict') return;
@@ -386,17 +651,20 @@ export class TextEditor extends Component {
     if (this.tool === 'marker' || this.tool === 'scribble') { this.openBrushMenu(this.tool, this.propertiesButton); return; }
     const field = this.session?.snapshot.fields.find(field => field.name === this.selected);
     if (!field && this.tool !== 'text') return;
-    this.popover = this.addChild(new ToolPopover(this.propertiesButton, {
+    this.openingPopover = true;
+    try { this.popover = this.addChild(new ToolPopover(this.propertiesButton, {
       title: 'Text', color: field?.color ?? this.textColor,
       changeColor: color => { this.textColor = color; this.rememberPreferences(); this.formatSelected({ color }); this.updateStatus(); },
       text: { font: field?.fontFamily ?? this.textFamily, size: field?.fontSize ?? this.fontSize,
         change: (fontFamily, fontSize) => { this.textFamily = fontFamily; this.fontSize = fontSize; this.rememberPreferences(); this.formatSelected({ fontFamily, fontSize }); this.updateStatus(); } },
       close: () => this.closePopover()
-    })); this.updateStatus(); this.propertiesButton.setAttribute('aria-expanded', 'true');
+    })); } finally { this.openingPopover = false; }
+    this.updateStatus(); this.propertiesButton.setAttribute('aria-expanded', 'true');
   }
   private openBrushMenu(kind: 'marker' | 'scribble', anchor: HTMLElement): void {
     this.closePopover();
-    this.popover = this.addChild(new ToolPopover(anchor, {
+    this.openingPopover = true;
+    try { this.popover = this.addChild(new ToolPopover(anchor, {
       title: kind === 'marker' ? 'Highlighter' : 'Pen', color: kind === 'marker' ? this.markerColor : this.penColor,
       changeColor: color => { if (kind === 'marker') this.markerColor = color; else this.penColor = color; this.rememberPreferences(); this.updateStatus(); },
       widths: { values: kind === 'marker' ? [8, 14, 22, 30] : [1, 2, 4, 6], value: kind === 'marker' ? this.markerWidth : this.penWidth,
@@ -404,7 +672,8 @@ export class TextEditor extends Component {
       toggles: kind === 'marker' ? [{ label: 'Hold for straight line', description: 'Pause at the end before lifting.', value: this.holdHighlighter, change: value => { this.holdHighlighter = value; this.rememberPreferences(); } }]
         : [{ label: 'Smooth ink', description: 'Reduce wobble while keeping your handwriting.', value: this.smoothPen, change: value => { this.smoothPen = value; this.rememberPreferences(); } },
           { label: 'Draw & hold shapes', description: 'Lines, rectangles, triangles, circles, ellipses and arrows. Keep holding and drag to resize.', value: this.holdShapes, change: value => { this.holdShapes = value; this.rememberPreferences(); } }]
-    })); this.updateStatus(); this.propertiesButton.setAttribute('aria-expanded', 'true');
+    })); } finally { this.openingPopover = false; }
+    this.updateStatus(); this.propertiesButton.setAttribute('aria-expanded', 'true');
   }
 
   private removeSelection(): void {
@@ -425,6 +694,7 @@ export class TextEditor extends Component {
   }
 
   private updateStatus(): void {
+    this.syncObjectScope();
     const session = this.session;
     const blocked = session?.status === 'conflict' || !!session?.replacing;
     const selected = session?.snapshot.fields.find(field => field.name === this.selected);
@@ -722,6 +992,13 @@ export class TextEditor extends Component {
     const { frame, input } = control;
     const doc = frame.ownerDocument;
     frame.tabIndex = 0; frame.setAttribute('role', 'group');
+    // Live Preview does not reliably deliver Cmd shortcuts to a focused div.
+    // A read-only input receives them without entering answer-text editing.
+    const shortcutProxy = doc.createElement('textarea');
+    shortcutProxy.className = 'pdf-form-studio-shortcut-proxy'; shortcutProxy.readOnly = true; shortcutProxy.tabIndex = -1;
+    shortcutProxy.setAttribute('aria-label', 'Selected PDF text box');
+    shortcutProxy.style.cssText = 'position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;padding:0;border:0;resize:none';
+    frame.append(shortcutProxy);
     const owned = this.session!.snapshot.fields.find(field => field.name === name)!.owned;
     labelOverlay(frame, owned ? 'Text box. Click to select, drag to move, double-click or Enter to edit, Backspace to delete.' : 'Form field. Double-click or Enter to edit.');
     const labels: Record<ResizeHandle, string> = {
@@ -743,10 +1020,17 @@ export class TextEditor extends Component {
     };
     frame.addEventListener('focus', () => {
       this.activateBox(name); this.endTextEditing(name);
-      this.releaseFocus(); this.focusInteraction = { input: frame, release: this.session!.beginInteraction() }; select();
+      select(); shortcutProxy.focus({ preventScroll: true });
+    });
+    shortcutProxy.addEventListener('focus', () => {
+      this.releaseFocus(); this.focusInteraction = { input: shortcutProxy, release: this.session!.beginInteraction() };
+      select();
     });
     frame.addEventListener('blur', () => {
-      if (this.focusInteraction?.input === frame) this.releaseFocus();
+      if (this.loaded && this.session?.dirty) this.scheduleSave();
+    });
+    shortcutProxy.addEventListener('blur', () => {
+      if (this.focusInteraction?.input === shortcutProxy) this.releaseFocus();
       if (this.loaded && this.session?.dirty) this.scheduleSave();
     });
     frame.addEventListener('focusout', () => {
@@ -820,7 +1104,7 @@ export class TextEditor extends Component {
     frame.addEventListener('pointercancel', () => cancel());
     frame.addEventListener('lostpointercapture', () => { if (gesture && !frame.hasPointerCapture(gesture.pointer)) cancel(); });
     frame.addEventListener('keydown', event => {
-      if (event.target !== frame) return;
+      if (event.target !== frame && event.target !== shortcutProxy) return;
       event.stopPropagation();
       if (event.key === 'Enter') { event.preventDefault(); input.focus({ preventScroll: true }); return; }
       if (event.key === 'Escape') { event.preventDefault(); cancel(); this.selected = undefined; frame.blur(); this.updateStatus(); this.refresh(); return; }

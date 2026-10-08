@@ -37,6 +37,8 @@ export class InkLayer extends Component {
   private previewFrame?: number;
   private holdTimer?: number;
   private hint: HTMLElement;
+  private shortcutProxy: HTMLTextAreaElement;
+  private shortcutRelease?: () => void;
 
   constructor(page: NativePage, layer: HTMLElement, session: TextSession, options: InkOptions) {
     super(); this.page = page; this.layer = layer; this.session = session; this.options = options;
@@ -44,8 +46,25 @@ export class InkLayer extends Component {
     this.svg = doc.createElementNS(namespace, 'svg'); this.svg.classList.add('pdf-form-studio-ink'); layer.prepend(this.svg);
     this.preview = doc.createElementNS(namespace, 'path'); this.preview.classList.add('pdf-form-studio-stroke-preview'); this.svg.append(this.preview);
     this.hint = layer.createDiv({ cls: 'pfs-ink-hint', attr: { role: 'status' } }); this.hint.hidden = true;
+    // Live Preview can consume shortcuts before they reach a focused SVG group.
+    // Keep one keyboard target per page, regardless of the number of strokes.
+    this.shortcutProxy = doc.createElement('textarea');
+    this.shortcutProxy.className = 'pdf-form-studio-shortcut-proxy'; this.shortcutProxy.readOnly = true; this.shortcutProxy.tabIndex = -1;
+    this.shortcutProxy.setAttribute('aria-label', 'Selected PDF drawing');
+    this.shortcutProxy.style.cssText = 'position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;padding:0;border:0;resize:none';
+    layer.append(this.shortcutProxy);
+    this.registerDomEvent(this.shortcutProxy, 'focus', () => {
+      this.shortcutRelease?.(); this.shortcutRelease = this.session.beginInteraction();
+    });
+    this.registerDomEvent(this.shortcutProxy, 'blur', () => {
+      this.shortcutRelease?.(); this.shortcutRelease = undefined; this.options.changed();
+    });
+    this.registerDomEvent(this.shortcutProxy, 'keydown', event => {
+      const id = this.options.selected(); if (id) this.keySelected(event, id);
+    });
     this.register(() => {
-      this.finishPending(); for (const control of this.controls.values()) control.dispose(); this.controls.clear(); this.svg.remove(); this.hint.remove();
+      this.finishPending(); this.shortcutRelease?.(); this.shortcutRelease = undefined;
+      for (const control of this.controls.values()) control.dispose(); this.controls.clear(); this.svg.remove(); this.hint.remove(); this.shortcutProxy.remove();
       for (const element of this.hiddenNative) element.classList.remove('pdf-form-studio-hidden-ink'); this.hiddenNative.clear();
     });
     this.registerDomEvent(layer, 'pointerdown', event => this.down(event));
@@ -94,6 +113,7 @@ export class InkLayer extends Component {
       control.outline.setAttribute('width', String(Math.abs(p[2]! - p[0]!))); control.outline.setAttribute('height', String(Math.abs(p[3]! - p[1]!)));
       control.outline.classList.toggle('is-selected', stroke.id === this.options.selected());
     }
+    if (this.layer.ownerDocument.activeElement === this.shortcutProxy && !ids.has(this.options.selected() ?? '')) this.shortcutProxy.blur();
     if (this.svg.lastElementChild !== this.preview) this.svg.append(this.preview);
   }
   private mount(stroke: InkStroke): InkControl {
@@ -105,31 +125,29 @@ export class InkLayer extends Component {
     const hit = doc.createElementNS(namespace, 'path'); hit.classList.add('pdf-form-studio-stroke-hit'); hit.setAttribute('fill', 'none'); hit.setAttribute('stroke', 'transparent');
     hit.setAttribute('stroke-linecap', 'round'); hit.setAttribute('stroke-linejoin', 'round');
     const outline = doc.createElementNS(namespace, 'rect'); outline.classList.add('pdf-form-studio-stroke-outline'); group.append(visual, hit, outline); this.svg.append(group);
-    let release: (() => void) | undefined;
-    const focus = () => { release?.(); release = this.session.beginInteraction(); this.options.select(stroke.id); };
-    const blur = () => { release?.(); release = undefined; this.options.changed(); };
+    const focus = () => { this.options.select(stroke.id); this.shortcutProxy.focus({ preventScroll: true }); };
     const pointer = (event: PointerEvent) => {
       if (event.button !== 0 || this.options.tool() !== 'select' || stroke.readOnly || (this.session.status === 'conflict' || this.session.replacing)) return;
       event.preventDefault(); event.stopPropagation(); this.finishPending(); if (!this.session.beginInkAction(this)) return;
       this.gesture = { pointer: event.pointerId, tool: 'select', id: stroke.id, last: this.point(event), points: [], width: 0, color: stroke.color,
         straight: false, y: 0, signature: this.signature(), release: this.session.beginInteraction() };
-      this.options.start(); group.focus({ preventScroll: true }); this.options.select(stroke.id); this.layer.setPointerCapture(event.pointerId);
+      this.options.start(); this.options.select(stroke.id); this.shortcutProxy.focus({ preventScroll: true }); this.layer.setPointerCapture(event.pointerId);
     };
-    const key = (event: KeyboardEvent) => {
-      event.stopPropagation();
-      if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); this.options.remove(stroke.id); }
-      if (event.key === 'Escape') { event.preventDefault(); this.cancel(); group.blur(); this.options.select(); }
-      const direction: Record<string, Point> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] };
-      const delta = direction[event.key];
-      if (delta) {
-        event.preventDefault(); const [x, y] = this.screen([0, 0]); const v = this.page.viewport;
-        const a = v.convertToPdfPoint(x, y), b = v.convertToPdfPoint(x + delta[0] * v.scale, y - delta[1] * v.scale);
-        try { this.session.moveStroke(stroke.id, [(b[0]! - a[0]!) * (event.shiftKey ? 10 : 1), (b[1]! - a[1]!) * (event.shiftKey ? 10 : 1)]); this.options.changed(); }
-        catch (error) { this.options.error(error); }
-      }
-    };
-    group.addEventListener('focus', focus); group.addEventListener('blur', blur); group.addEventListener('pointerdown', pointer); group.addEventListener('keydown', key);
-    return { group, visual, hit, outline, dispose: () => { release?.(); group.removeEventListener('focus', focus); group.removeEventListener('blur', blur); group.removeEventListener('pointerdown', pointer); group.removeEventListener('keydown', key); removeLabel(); group.remove(); } };
+    const key = (event: KeyboardEvent) => this.keySelected(event, stroke.id);
+    group.addEventListener('focus', focus); group.addEventListener('pointerdown', pointer); group.addEventListener('keydown', key);
+    return { group, visual, hit, outline, dispose: () => { group.removeEventListener('focus', focus); group.removeEventListener('pointerdown', pointer); group.removeEventListener('keydown', key); removeLabel(); group.remove(); } };
+  }
+  private keySelected(event: KeyboardEvent, id: string): void {
+    if (!['Delete', 'Backspace', 'Escape', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+    event.stopPropagation(); event.preventDefault();
+    if (event.key === 'Delete' || event.key === 'Backspace') { this.shortcutProxy.blur(); this.options.remove(id); return; }
+    if (event.key === 'Escape') { this.cancel(); this.shortcutProxy.blur(); this.options.select(); return; }
+    const direction: Record<string, Point> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] };
+    const delta = direction[event.key]!;
+    const [x, y] = this.screen([0, 0]); const v = this.page.viewport;
+    const a = v.convertToPdfPoint(x, y), b = v.convertToPdfPoint(x + delta[0] * v.scale, y - delta[1] * v.scale);
+    try { this.session.moveStroke(id, [(b[0]! - a[0]!) * (event.shiftKey ? 10 : 1), (b[1]! - a[1]!) * (event.shiftKey ? 10 : 1)]); this.options.changed(); }
+    catch (error) { this.options.error(error); }
   }
   private collect(event: PointerEvent): void {
     const gesture = this.gesture; if (!gesture) return;

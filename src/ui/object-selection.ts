@@ -11,6 +11,7 @@ import type { PdfObject, TextSession } from '../pdf/text-session';
 interface Options {
   enabled(): boolean; changed(): void; save(): void; error(error: unknown): void; endTyping(): void;
   floatingToolbar(): HTMLElement | undefined;
+  shortcut(key: string, event: KeyboardEvent): boolean;
 }
 interface PageSelection { page: NativePage; layer: HTMLElement; overlay: HTMLElement; dispose(): void }
 interface Gesture {
@@ -37,6 +38,10 @@ export class ObjectSelection extends Component {
         try { if (redo) this.session.redoStroke(); else this.session.undoStroke(); this.options.save(); }
         catch (error) { this.options.error(error); }
         event.preventDefault(); event.stopImmediatePropagation(); return false;
+      });
+      for (const key of ['c', 'v', 'd']) scope.register(['Mod'], key, event => {
+        if (this.options.shortcut(key, event)) return false;
+        return undefined;
       });
     }
     this.registerDomEvent(doc, 'pointerdown', event => {
