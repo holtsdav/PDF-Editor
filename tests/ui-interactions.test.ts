@@ -609,6 +609,25 @@ test('a changed system clipboard cannot paste a stale PDF object', async () => {
     assert.equal(f.clipboard.text, 'Copied from another source');
   } finally { f.dispose(); }
 });
+test('changed clipboard text pastes into an active PDF answer instead of a stale object', async () => {
+  const f = await fixture(1, true);
+  try {
+    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
+    f.session.setValue(field.name, 'Start'); f.editor.refresh();
+    const input = f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!;
+    input.focus(); input.setSelectionRange(5, 5);
+    const shortcut = (key: string) => {
+      const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key, metaKey: true, bubbles: true, cancelable: true });
+      input.dispatchEvent(event); return event;
+    };
+    assert.equal(shortcut('c').defaultPrevented, true);
+    await pause(0); f.clipboard.text = ' from elsewhere';
+    assert.equal(shortcut('v').defaultPrevented, true);
+    await pause(0);
+    assert.equal(f.session.snapshot.fields.length, 1);
+    assert.equal(f.session.snapshot.fields[0]!.value, 'Start from elsewhere');
+  } finally { f.dispose(); }
+});
 test('copying highlighted PDF answer text clears the previous object copy', async () => {
   const f = await fixture(1, true);
   try {

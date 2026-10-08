@@ -390,6 +390,11 @@ export class TextEditor extends Component {
       return true;
     }
     if (key === 'v' && !copiedObjects) return false;
+    const view = this.native.element.ownerDocument.defaultView!;
+    const answer = key === 'v' && (target instanceof view.HTMLInputElement || target instanceof view.HTMLTextAreaElement)
+      && this.shortcutField(target) ? target : undefined;
+    const caret = answer && answer.selectionStart !== null && answer.selectionEnd !== null
+      ? { value: answer.value, start: answer.selectionStart, end: answer.selectionEnd } : undefined;
     // Obsidian's Live Preview keymap consumes these keys before the browser
     // dispatches copy/paste events for an embedded PDF. Use the system
     // clipboard directly while this PDF owns the active shortcut scope.
@@ -414,15 +419,22 @@ export class TextEditor extends Component {
       try { this.selectCreated(session.pasteObjects(copy.objects)); this.scheduleSave(); }
       catch (error) { this.showError(error); }
     };
+    const pasteCurrentText = (value: string) => {
+      if (!answer || !caret || !this.loaded || this.session !== session || !answer.isConnected || answer.readOnly
+        || answer.ownerDocument.activeElement !== answer || answer.value !== caret.value
+        || answer.selectionStart !== caret.start || answer.selectionEnd !== caret.end) return;
+      answer.setRangeText(value, caret.start, caret.end, 'end');
+      answer.dispatchEvent(new view.Event('input', { bubbles: true }));
+    };
     if (!clipboard?.readText) { paste(); return true; }
     void (async () => {
       // Clipboard writes and reads can be unavailable in some Obsidian
       // contexts. The window-blur guard still invalidates their fallback.
-      if (copy.write && !await copy.write) { paste(); return; }
+      if (copy.write) await copy.write;
       try {
         const current = await clipboard.readText();
         if (copiedObjects !== copy) return;
-        if (current !== copy.text) { copiedObjects = undefined; return; }
+        if (current !== copy.text) { copiedObjects = undefined; pasteCurrentText(current); return; }
       } catch { /* A same-window copy remains usable when read permission is denied. */ }
       paste();
     })();
