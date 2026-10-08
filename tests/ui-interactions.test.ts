@@ -705,7 +705,7 @@ test('identical clipboard text without the PDF copy token becomes a new text box
     assert.equal(f.session.snapshot.fields[2]!.value, 'Same words');
   } finally { f.dispose(); }
 });
-test('menu paste reads a copied drawing token instead of creating a fallback text box', async () => {
+test('menu paste waits for a copied drawing token instead of creating a fallback text box', async () => {
   const f = await fixture(1, true);
   try {
     const view = f.doc.defaultView!;
@@ -716,10 +716,13 @@ test('menu paste reads a copied drawing token instead of creating a fallback tex
       async getType(type: string) { return this.values[type]!; }
     }
     Object.defineProperty(view, 'ClipboardItem', { value: FakeClipboardItem });
-    let plainText = '';
+    let plainText = 'Earlier clipboard content';
     let items: FakeClipboardItem[] = [];
+    let completeWrite: (() => Promise<void>) | undefined;
     Object.defineProperty(view.navigator, 'clipboard', { configurable: true, value: {
-      write: async (value: FakeClipboardItem[]) => { items = value; plainText = await value[0]!.getType('text/plain').then(blob => blob.text()); },
+      write: (value: FakeClipboardItem[]) => new Promise<void>(resolve => {
+        completeWrite = async () => { items = value; plainText = await value[0]!.getType('text/plain').then(blob => blob.text()); resolve(); };
+      }),
       read: async () => items,
       writeText: async (value: string) => { plainText = value; },
       readText: async () => plainText
@@ -730,13 +733,14 @@ test('menu paste reads a copied drawing token instead of creating a fallback tex
     f.pointer(f.doc.querySelector('.pdf-form-studio-layer')!, 'pointerup', 100, 290);
     const proxy = f.doc.activeElement as HTMLTextAreaElement;
     proxy.dispatchEvent(new view.KeyboardEvent('keydown', { key: 'c', metaKey: true, bubbles: true, cancelable: true }));
-    await pause(0);
-    assert.equal(plainText, 'PDF Editor elements');
+    assert(completeWrite);
     const paste = new view.Event('paste', { bubbles: true, cancelable: true });
     Object.defineProperty(paste, 'clipboardData', { value: { getData(type: string) { return type === 'text/plain' ? plainText : ''; } } });
     proxy.dispatchEvent(paste);
     assert.equal(paste.defaultPrevented, true);
+    await completeWrite();
     await pause(0);
+    assert.equal(plainText, 'PDF Editor elements');
     assert.equal(f.session.snapshot.strokes.length, 2);
     assert.equal(f.session.snapshot.fields.length, 0);
     items = [new FakeClipboardItem({ 'text/plain': new Blob([plainText]) })];

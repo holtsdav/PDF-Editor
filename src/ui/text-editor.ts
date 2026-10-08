@@ -257,7 +257,7 @@ export class TextEditor extends Component {
         this.pastePlainTextBox(text, objects);
       };
       const clipboard = doc.defaultView!.navigator.clipboard;
-      if (copy?.custom && clipboard?.read) {
+      if ((copy?.custom || copy?.write) && clipboard?.read) {
         // Menu and context-menu paste can deliver only a filtered DataTransfer.
         // The async clipboard still carries our web custom format.
         event.preventDefault(); event.stopImmediatePropagation();
@@ -267,7 +267,7 @@ export class TextEditor extends Component {
           ? { value: answer.value, start: answer.selectionStart, end: answer.selectionEnd } : undefined;
         void (async () => {
           if (copy.write) await copy.write;
-          try {
+          if (copy.custom) try {
             const items = await clipboard.read();
             const tokens = await Promise.all(items.filter(item => item.types.includes(webObjectClipboardType))
               .map(async item => (await item.getType(webObjectClipboardType)).text()));
