@@ -593,7 +593,7 @@ test('Live Preview scope copies and pastes a selected PDF box through the system
     assert.equal(f.clipboard.text, 'Copy me');
   } finally { f.dispose(); }
 });
-test('a changed system clipboard cannot paste a stale PDF object', async () => {
+test('changed system clipboard text creates a new box instead of pasting a stale PDF object', async () => {
   const f = await fixture(1, true);
   try {
     const field = f.session.add(1, [80, 580, 240, 610], 12, true);
@@ -605,11 +605,28 @@ test('a changed system clipboard cannot paste a stale PDF object', async () => {
     shortcut('c'); await pause(0);
     f.clipboard.text = 'Copied from another source';
     shortcut('v'); await pause(0);
-    assert.equal(f.session.snapshot.fields.length, 1);
+    assert.equal(f.session.snapshot.fields.length, 2);
+    assert.equal(f.session.snapshot.fields[1]!.value, 'Copied from another source');
     assert.equal(f.clipboard.text, 'Copied from another source');
   } finally { f.dispose(); }
 });
-test('identical clipboard text without the PDF copy token cannot paste a stale object', async () => {
+test('a native plain-text paste onto a selected PDF element creates an editable box', async () => {
+  const f = await fixture();
+  try {
+    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
+    f.session.setValue(field.name, 'Existing'); f.editor.refresh();
+    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
+    frame.focus();
+    const paste = new f.doc.defaultView!.Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, 'clipboardData', { value: { getData(type: string) { return type === 'text/plain' ? 'Pasted note text' : ''; } } });
+    frame.dispatchEvent(paste);
+    assert.equal(paste.defaultPrevented, true);
+    assert.equal(f.session.snapshot.fields.length, 2);
+    assert.equal(f.session.snapshot.fields[0]!.value, 'Existing');
+    assert.equal(f.session.snapshot.fields[1]!.value, 'Pasted note text');
+  } finally { f.dispose(); }
+});
+test('identical clipboard text without the PDF copy token becomes a new text box', async () => {
   const f = await fixture(1, true);
   try {
     const view = f.doc.defaultView!;
@@ -643,7 +660,8 @@ test('identical clipboard text without the PDF copy token cannot paste a stale o
     // cached PDF element must not be treated as the source of that text.
     items = [new FakeClipboardItem({ 'text/plain': new Blob(['Same words']) })];
     frame.focus(); shortcut('v'); await pause(0);
-    assert.equal(f.session.snapshot.fields.length, 2);
+    assert.equal(f.session.snapshot.fields.length, 3);
+    assert.equal(f.session.snapshot.fields[2]!.value, 'Same words');
   } finally { f.dispose(); }
 });
 test('changed clipboard text pastes into an active PDF answer instead of a stale object', async () => {

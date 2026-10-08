@@ -237,7 +237,15 @@ export class TextEditor extends Component {
     });
     this.registerDomEvent(doc.defaultView!, 'paste', event => {
       if (!this.shortcutTarget(event.target) || (this.isTextTarget(event.target) && !this.shortcutField(event.target)) || !this.session || !event.clipboardData) return;
-      if (event.clipboardData.getData(objectClipboardType) !== copiedObjects?.token) { copiedObjects = undefined; return; }
+      if (event.clipboardData.getData(objectClipboardType) !== copiedObjects?.token) {
+        copiedObjects = undefined;
+        const text = event.clipboardData.getData('text/plain');
+        const objects = this.shortcutObjects(event.target);
+        if (!this.isTextTarget(event.target) && text && objects.length) {
+          event.preventDefault(); event.stopImmediatePropagation(); this.pastePlainTextBox(text, objects);
+        }
+        return;
+      }
       event.preventDefault(); event.stopImmediatePropagation();
       try { this.selectCreated(this.session.pasteObjects(copiedObjects.objects)); this.scheduleSave(); }
       catch (error) { this.showError(error); }
@@ -436,6 +444,10 @@ export class TextEditor extends Component {
       answer.setRangeText(value, caret.start, caret.end, 'end');
       answer.dispatchEvent(new view.Event('input', { bubbles: true }));
     };
+    const pasteExternalText = (value: string) => {
+      if (answer) { pasteCurrentText(value); return; }
+      if (this.loaded && this.session === session && this.shortcutObjects(target).length) this.pastePlainTextBox(value, objects);
+    };
     if (!clipboard?.readText && !clipboard?.read) { paste(); return true; }
     void (async () => {
       // Clipboard writes and reads can be unavailable in some Obsidian
@@ -451,14 +463,14 @@ export class TextEditor extends Component {
           if (tokens.includes(copy.token)) { paste(); return; }
         } catch { /* Without a readable token, do not paste a cached PDF object. */ }
         copiedObjects = undefined;
-        try { if (clipboard.readText) pasteCurrentText(await clipboard.readText()); } catch { /* No readable text to insert. */ }
+        try { if (clipboard.readText) pasteExternalText(await clipboard.readText()); } catch { /* No readable text to insert. */ }
         return;
       }
       if (!clipboard.readText) { paste(); return; }
       try {
         const current = await clipboard.readText();
         if (copiedObjects !== copy) return;
-        if (current !== copy.text) { copiedObjects = undefined; pasteCurrentText(current); return; }
+        if (current !== copy.text) { copiedObjects = undefined; pasteExternalText(current); return; }
       } catch { /* A same-window copy remains usable when read permission is denied. */ }
       paste();
     })();
@@ -486,6 +498,26 @@ export class TextEditor extends Component {
     if (this.selected && this.session?.snapshot.fields.some(field => field.name === this.selected && field.owned && !field.readOnly)) return [{ kind: 'text', id: this.selected }];
     if (this.selectedStroke && this.session?.snapshot.strokes.some(stroke => stroke.id === this.selectedStroke && !stroke.readOnly)) return [{ kind: 'ink', id: this.selectedStroke }];
     return [];
+  }
+  private pastePlainTextBox(value: string, objects: PdfObject[]): void {
+    if (!value.trim() || !this.session || !objects.length || !this.session.canEditObjects) return;
+    try {
+      const anchor = this.session.copyObjects(objects)[0];
+      if (!anchor) return;
+      const bounds = this.session.snapshot.pages[anchor.page - 1]!;
+      const width = Math.min(300, bounds[2] - bounds[0]);
+      const charactersPerRow = Math.max(1, Math.floor((width - 8) / (this.fontSize * 0.6)));
+      const rows = value.split(/\r\n?|\n/).reduce((sum, line) => sum + Math.max(1, Math.ceil(line.length / charactersPerRow)), 0);
+      const height = Math.min(bounds[3] - bounds[1], Math.max(this.fontSize * 1.4 + 8, rows * this.fontSize * 1.4 + 8));
+      const x = Math.max(bounds[0], Math.min(bounds[2] - width, anchor.rect[0]));
+      let top = anchor.rect[1] - 12;
+      if (top - height < bounds[1]) top = anchor.rect[3] + 12 + height;
+      top = Math.max(bounds[1] + height, Math.min(bounds[3], top));
+      const rect: Rect = [x, top - height, x + width, top];
+      const text: CopiedPdfObject = { kind: 'text', page: anchor.page, rect, rotation: 0, value,
+        fontSize: this.fontSize, fontFamily: this.textFamily, color: [...this.textColor], multiline: true };
+      this.selectCreated(this.session.pasteObjects([text], [0, 0])); this.scheduleSave();
+    } catch (error) { this.showError(error); }
   }
   private clearBrowserSelection(): void { this.native.element.ownerDocument.getSelection()?.removeAllRanges(); }
   private selectCreated(objects: PdfObject[]): void {
