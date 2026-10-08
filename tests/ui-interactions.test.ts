@@ -730,6 +730,37 @@ test('identical clipboard text without the PDF copy token becomes a new text box
     assert.equal(f.session.snapshot.fields[2]!.value, 'Same words');
   } finally { f.dispose(); }
 });
+test('menu copy keeps token provenance for keyboard paste with identical external text', async () => {
+  const f = await fixture(1, true);
+  try {
+    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
+    f.session.setValue(field.name, 'Yes'); f.editor.refresh();
+    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
+    frame.focus();
+    const values = new Map<string, string>();
+    const nativeCopy = new f.doc.defaultView!.Event('copy', { bubbles: true, cancelable: true });
+    Object.defineProperty(nativeCopy, 'clipboardData', { value: { setData(type: string, value: string) { values.set(type, value); } } });
+    frame.dispatchEvent(nativeCopy);
+    assert.equal(nativeCopy.defaultPrevented, true);
+    assert.match(values.get('text/html')!, /data-pdf-editor-objects/);
+    let items = [{ types: ['text/html'], getType: async () => new Blob([values.get('text/html')!]) }];
+    Object.defineProperty(f.doc.defaultView!.navigator, 'clipboard', { configurable: true, value: {
+      read: async () => items,
+      readText: async () => 'Yes'
+    } });
+    const paste = () => f.doc.activeElement!.dispatchEvent(new f.doc.defaultView!.KeyboardEvent('keydown', {
+      key: 'v', metaKey: true, bubbles: true, cancelable: true
+    }));
+    paste(); await pause(0);
+    assert.equal(f.session.snapshot.fields.length, 2);
+    assert.equal(f.session.snapshot.fields[1]!.widgets[0]!.rect[2] - f.session.snapshot.fields[1]!.widgets[0]!.rect[0], 160);
+    items = [{ types: ['text/plain'], getType: async () => new Blob(['Yes']) }];
+    paste(); await pause(0);
+    assert.equal(f.session.snapshot.fields.length, 3);
+    assert.equal(f.session.snapshot.fields[2]!.value, 'Yes');
+    assert.equal(f.session.snapshot.fields[2]!.widgets[0]!.rect[2] - f.session.snapshot.fields[2]!.widgets[0]!.rect[0], 300);
+  } finally { f.dispose(); }
+});
 test('menu paste waits for a copied drawing token instead of creating a fallback text box', async () => {
   const f = await fixture(1, true);
   try {

@@ -26,6 +26,11 @@ const objectClipboardType = 'application/x-pdf-editor-objects';
 const webObjectClipboardType = `web ${objectClipboardType}`;
 interface ObjectCopy { token: string; objects: CopiedPdfObject[]; text: string; custom: boolean; write?: Promise<void> }
 let copiedObjects: ObjectCopy | undefined;
+function objectClipboardHtml(doc: Document, text: string, token: string): string {
+  const span = doc.createElement('span'); span.dataset.pdfEditorObjects = token;
+  span.style.whiteSpace = 'pre-wrap'; span.textContent = text;
+  return span.outerHTML;
+}
 
 interface FieldControl {
   frame: HTMLElement; input: HTMLInputElement | HTMLTextAreaElement;
@@ -222,9 +227,11 @@ export class TextEditor extends Component {
       if (!objects.length || !this.session || !event.clipboardData) { copiedObjects = undefined; return; }
       try {
         const token = globalThis.crypto.randomUUID(), data = this.session.copyObjects(objects);
+        const text = data.filter(item => item.kind === 'text').map(item => item.value).join('\n') || 'PDF Editor elements';
         event.clipboardData.setData(objectClipboardType, token);
-        event.clipboardData.setData('text/plain', data.filter(item => item.kind === 'text').map(item => item.value).join('\n') || 'PDF Editor elements');
-        copiedObjects = { token, objects: data, text: data.filter(item => item.kind === 'text').map(item => item.value).join('\n') || 'PDF Editor elements', custom: false };
+        event.clipboardData.setData('text/plain', text);
+        event.clipboardData.setData('text/html', objectClipboardHtml(doc, text, token));
+        copiedObjects = { token, objects: data, text, custom: true };
         event.preventDefault(); event.stopImmediatePropagation();
       } catch (error) { this.showError(error); }
     }, true);
@@ -258,7 +265,7 @@ export class TextEditor extends Component {
         this.pastePlainTextBox(text, objects);
       };
       const clipboard = doc.defaultView!.navigator.clipboard;
-      if ((copy?.custom || copy?.write) && clipboard?.read) {
+      if ((copy?.custom || copy?.write) && typeof clipboard?.read === 'function') {
         // Menu and context-menu paste can deliver only a filtered DataTransfer.
         // The async clipboard still carries our web custom format.
         event.preventDefault(); event.stopImmediatePropagation();
@@ -269,10 +276,7 @@ export class TextEditor extends Component {
         void (async () => {
           if (copy.write) await copy.write;
           if (copy.custom) try {
-            const items = await clipboard.read();
-            const tokens = await Promise.all(items.filter(item => item.types.includes(webObjectClipboardType))
-              .map(async item => (await item.getType(webObjectClipboardType)).text()));
-            if (tokens.includes(copy.token)) { pasteCopy(); return; }
+            if (await this.clipboardHasObjectToken(clipboard, copy.token)) { pasteCopy(); return; }
           } catch { /* An unreadable token cannot authorize an object paste. */ }
           if (copiedObjects !== copy) return;
           if (copiedObjects === copy) copiedObjects = undefined;
@@ -460,6 +464,7 @@ export class TextEditor extends Component {
           try {
             const item = new view.ClipboardItem({
               'text/plain': new Blob([text], { type: 'text/plain' }),
+              'text/html': new Blob([objectClipboardHtml(this.native.element.ownerDocument, text, copy.token)], { type: 'text/html' }),
               [webObjectClipboardType]: new Blob([copy.token], { type: objectClipboardType })
             });
             copy.write = clipboard.write([item]).then(() => { copy.custom = true; }, writePlainText);
@@ -494,13 +499,11 @@ export class TextEditor extends Component {
       // contexts. The window-blur guard still invalidates their fallback.
       if (copy.write) await copy.write;
       if (copiedObjects !== copy) return;
-      if (copy.custom && clipboard.read) {
+      if (copy.custom && typeof clipboard.read === 'function') {
         try {
-          const items = await clipboard.read();
-          const tokens = await Promise.all(items.filter(item => item.types.includes(webObjectClipboardType))
-            .map(async item => (await item.getType(webObjectClipboardType)).text()));
+          const matches = await this.clipboardHasObjectToken(clipboard, copy.token);
           if (copiedObjects !== copy) return;
-          if (tokens.includes(copy.token)) { paste(); return; }
+          if (matches) { paste(); return; }
         } catch { /* Without a readable token, do not paste a cached PDF object. */ }
         copiedObjects = undefined;
         try { if (clipboard.readText) pasteExternalText(await clipboard.readText()); } catch { /* No readable text to insert. */ }
@@ -548,6 +551,18 @@ export class TextEditor extends Component {
     if (!(target instanceof view.Node) || !target.isConnected || this.native.element.ownerDocument.activeElement !== focused) return false;
     const current = this.shortcutObjects(target);
     return current.length === objects.length && current.every((object, index) => object.kind === objects[index]!.kind && object.id === objects[index]!.id);
+  }
+  private async clipboardHasObjectToken(clipboard: Clipboard, token: string): Promise<boolean> {
+    const view = this.native.element.ownerDocument.defaultView!;
+    for (const item of await clipboard.read()) {
+      if (item.types.includes(webObjectClipboardType) && await (await item.getType(webObjectClipboardType)).text() === token) return true;
+      if (item.types.includes('text/html')) {
+        const html = await (await item.getType('text/html')).text();
+        if (new view.DOMParser().parseFromString(html, 'text/html').querySelector('[data-pdf-editor-objects]')
+          ?.getAttribute('data-pdf-editor-objects') === token) return true;
+      }
+    }
+    return false;
   }
   private pastePlainTextBox(value: string, objects: PdfObject[]): void {
     if (!value.trim() || !this.session || !objects.length || !this.session.canEditObjects) return;
