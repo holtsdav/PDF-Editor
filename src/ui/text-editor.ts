@@ -216,7 +216,7 @@ export class TextEditor extends Component {
       if (!this.shortcutTarget(target)) return;
       if (doc.getSelection()?.toString()) { copiedObjects = undefined; return; }
       const objects = this.shortcutObjects(target);
-      if (!objects.length || !this.session || !event.clipboardData) return;
+      if (!objects.length || !this.session || !event.clipboardData) { copiedObjects = undefined; return; }
       try {
         const token = globalThis.crypto.randomUUID(), data = this.session.copyObjects(objects);
         event.clipboardData.setData(objectClipboardType, token);

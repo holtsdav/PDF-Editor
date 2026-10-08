@@ -572,6 +572,27 @@ test('a changed system clipboard cannot paste a stale PDF object', async () => {
     assert.equal(f.clipboard.text, 'Copied from another source');
   } finally { f.dispose(); }
 });
+test('copying highlighted PDF answer text clears the previous object copy', async () => {
+  const f = await fixture(1, true);
+  try {
+    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
+    f.session.setValue(field.name, 'Answer text'); f.editor.refresh();
+    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
+    frame.focus();
+    f.doc.activeElement!.dispatchEvent(new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'c', metaKey: true, bubbles: true, cancelable: true }));
+    const input = frame.querySelector<HTMLTextAreaElement>('[data-pdf-field]')!;
+    input.focus(); input.setSelectionRange(0, 6);
+    const nativeCopy = new f.doc.defaultView!.Event('copy', { bubbles: true, cancelable: true });
+    Object.defineProperty(nativeCopy, 'clipboardData', { value: { setData() {} } });
+    input.dispatchEvent(nativeCopy);
+    assert.equal(nativeCopy.defaultPrevented, false);
+    input.setSelectionRange(6, 6);
+    const paste = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'v', metaKey: true, bubbles: true, cancelable: true });
+    input.dispatchEvent(paste);
+    assert.equal(paste.defaultPrevented, false);
+    assert.equal(f.session.snapshot.fields.length, 1);
+  } finally { f.dispose(); }
+});
 test('Live Preview note keyboard target still uses the selected PDF box', async () => {
   const f = await fixture(1, true);
   try {
