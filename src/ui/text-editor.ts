@@ -228,7 +228,12 @@ export class TextEditor extends Component {
     this.registerDomEvent(doc.defaultView!, 'cut', () => { copiedObjects = undefined; }, true);
     // A copy in another application cannot dispatch a DOM event here. When
     // Obsidian loses focus, cached PDF objects must no longer be pasteable.
-    this.registerDomEvent(doc.defaultView!, 'blur', () => { copiedObjects = undefined; });
+    this.registerDomEvent(doc.defaultView!, 'blur', () => {
+      copiedObjects = undefined;
+      if (!this.selected && !this.selectedStroke && !this.selection?.objects.length) return;
+      this.selected = undefined; this.selectedStroke = undefined;
+      this.selection?.clear(); this.updateStatus(); this.refresh();
+    });
     this.registerDomEvent(doc.defaultView!, 'paste', event => {
       if (!this.shortcutTarget(event.target) || (this.isTextTarget(event.target) && !this.shortcutField(event.target)) || !this.session || !event.clipboardData) return;
       if (event.clipboardData.getData(objectClipboardType) !== copiedObjects?.token) { copiedObjects = undefined; return; }
@@ -354,6 +359,9 @@ export class TextEditor extends Component {
       ? name : undefined;
   }
   private shortcutObjects(target: EventTarget | null): PdfObject[] {
+    // Obsidian shares keymap scopes across pop-out windows. Never let a
+    // selected PDF consume a shortcut dispatched by another document.
+    if (!(target instanceof this.native.element.ownerDocument.defaultView!.Node)) return [];
     const field = this.shortcutField(target);
     if (field) return [{ kind: 'text', id: field }];
     if (target instanceof this.native.element.ownerDocument.defaultView!.HTMLElement && target.classList.contains('pdf-form-studio-shortcut-proxy')) return this.selectedObjects();

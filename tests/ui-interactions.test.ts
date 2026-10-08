@@ -515,6 +515,26 @@ test('selected PDF owns Obsidian shortcut scope until focus leaves the embed', a
     assert.equal(f.scopes.length, 0);
   } finally { f.dispose(); }
 });
+test('a selected PDF never claims shortcuts from another Obsidian window', async () => {
+  const f = await fixture(1, true);
+  const foreign = new JSDOM('<body><div id="note"></div></body>', { pretendToBeVisual: true });
+  try {
+    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
+    f.session.setValue(field.name, 'Original'); f.editor.refresh();
+    f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!.focus();
+    assert.equal(f.scopes.length, 1);
+    for (const key of ['c', 'v', 'd']) {
+      const handler = f.scopes[0]!.handlers.find(item => item.key === key)!;
+      const event = new foreign.window.KeyboardEvent('keydown', { key, metaKey: true, cancelable: true });
+      Object.defineProperty(event, 'target', { value: foreign.window.document.querySelector('#note') });
+      assert.equal(handler.func(event as unknown as KeyboardEvent), undefined);
+      assert.equal(event.defaultPrevented, false);
+    }
+    assert.equal(f.session.snapshot.fields.length, 1);
+    f.doc.defaultView!.dispatchEvent(new f.doc.defaultView!.Event('blur'));
+    assert.equal(f.scopes.length, 0);
+  } finally { foreign.window.close(); f.dispose(); }
+});
 test('Live Preview scope copies and pastes a selected PDF box through the system clipboard', async () => {
   const f = await fixture(1, true);
   try {
