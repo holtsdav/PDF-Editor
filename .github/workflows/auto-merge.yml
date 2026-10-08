@@ -2,7 +2,7 @@ name: Enable auto-merge
 
 on:
   pull_request_target:
-    types: [opened, ready_for_review, synchronize]
+    types: [opened, ready_for_review, synchronize, edited]
 
 permissions:
   contents: write
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   enable:
-    if: github.event.pull_request.base.ref == 'main' && !github.event.pull_request.draft
+    if: github.event.pull_request.base.ref == 'main' && !github.event.pull_request.draft && (github.event.action != 'edited' || github.event.changes.base)
     runs-on: ubuntu-latest
     steps:
       - name: Enable squash auto-merge
