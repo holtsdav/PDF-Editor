@@ -459,6 +459,43 @@ test('selected drawing shortcuts use a keyboard target in an embedded PDF', asyn
     assert.notDeepEqual(f.session.snapshot.strokes.find(stroke => stroke.id === selected.id)!.points, before);
   } finally { f.dispose(); }
 });
+test('selected text and drawing proxies keep Undo, Redo and tool shortcuts', async () => {
+  const f = await fixture();
+  try {
+    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
+    f.session.setValue(field.name, 'Undo me');
+    const before = [...field.widgets[0]!.rect];
+    f.session.moveObjects([{ kind: 'text', id: field.name }], [10, 0]); f.editor.refresh();
+    f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!.focus();
+    const shortcut = (target: Element, key: string, metaKey = false, shiftKey = false) => {
+      const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key, metaKey, shiftKey, bubbles: true, cancelable: true });
+      target.dispatchEvent(event); assert.equal(event.defaultPrevented, true, `${key} should work on the selected object`);
+    };
+    const textProxy = f.doc.activeElement!;
+    shortcut(textProxy, 'z', true);
+    assert.deepEqual(f.session.snapshot.fields.find(item => item.name === field.name)?.widgets[0]?.rect, before);
+    f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!.focus();
+    shortcut(f.doc.activeElement!, 'z', true, true);
+    assert.equal(f.session.snapshot.fields.find(item => item.name === field.name)?.widgets[0]?.rect[0], before[0]! + 10);
+    f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!.focus();
+    shortcut(f.doc.activeElement!, 'p');
+    assert.equal(f.doc.querySelector<HTMLButtonElement>('button[aria-label^="Pen"]')!.getAttribute('aria-pressed'), 'true');
+
+    f.tool('Select');
+    f.session.addStroke(1, 'scribble', [[80, 500], [120, 520]], 2); f.editor.refresh();
+    const drawing = f.doc.querySelector<SVGGElement>('.pdf-form-studio-ink-control')!;
+    f.pointer(drawing, 'pointerdown', 100, 290);
+    f.pointer(f.doc.querySelector('.pdf-form-studio-layer')!, 'pointerup', 100, 290);
+    const drawingProxy = f.doc.activeElement!;
+    assert.equal(drawingProxy.getAttribute('aria-label'), 'Selected PDF drawing');
+    shortcut(drawingProxy, 'z', true);
+    assert.equal(f.session.snapshot.strokes.length, 0);
+    shortcut(drawingProxy, 'z', true, true);
+    assert.equal(f.session.snapshot.strokes.length, 1);
+    shortcut(drawingProxy, 'h');
+    assert.equal(f.doc.querySelector<HTMLButtonElement>('button[aria-label^="Highlighter"]')!.getAttribute('aria-pressed'), 'true');
+  } finally { f.dispose(); }
+});
 test('PDF answer shortcuts work with a caret while highlighted text retains native editing', async () => {
   const f = await fixture();
   try {

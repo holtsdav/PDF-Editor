@@ -180,7 +180,7 @@ export class TextEditor extends Component {
         this.updateStatus(); this.refresh(); return;
       }
       if (!(event.metaKey || event.ctrlKey)) {
-        if (!(target instanceof doc.defaultView!.HTMLInputElement || target instanceof doc.defaultView!.HTMLTextAreaElement) && !event.altKey) {
+        if (!this.isTextTarget(target) && !event.altKey) {
           const shortcut: Record<string, EditorTool> = { v: 'select', t: 'text', p: 'scribble', h: 'marker', e: 'eraser' };
           const tool = shortcut[event.key.toLowerCase()]; if (tool) { event.preventDefault(); event.stopPropagation(); this.setTool(tool); }
         }
@@ -206,7 +206,7 @@ export class TextEditor extends Component {
         event.preventDefault(); event.stopImmediatePropagation(); void this.save();
       }
       if (event.key.toLowerCase() === 'z' && (event.shiftKey ? this.session?.canRedoStroke : this.session?.canUndoStroke)
-        && !(target instanceof doc.defaultView!.HTMLInputElement || target instanceof doc.defaultView!.HTMLTextAreaElement)) {
+        && !this.isTextTarget(target)) {
         event.preventDefault(); event.stopImmediatePropagation(); if (event.shiftKey) this.session?.redoStroke(); else this.session?.undoStroke(); this.selectedStroke = undefined; this.scheduleSave();
       }
     }, true);
@@ -347,7 +347,8 @@ export class TextEditor extends Component {
   }
   private isTextTarget(target: EventTarget | null): boolean {
     const element = target instanceof this.native.element.ownerDocument.defaultView!.Element ? target : undefined;
-    return !!element?.closest('input, textarea, [contenteditable="true"]');
+    return !!element && !element.classList.contains('pdf-form-studio-shortcut-proxy')
+      && !!element.closest('input, textarea, [contenteditable="true"]');
   }
   /** A caret in an owned PDF answer selects the box; highlighted text keeps native clipboard behavior. */
   private shortcutField(target: EventTarget | null): string | undefined {
@@ -381,8 +382,7 @@ export class TextEditor extends Component {
     if (!this.loaded || !this.session || !objects.length || event.shiftKey || event.altKey || event.isComposing) return false;
     const target = event.target;
     const inPdf = target instanceof this.native.element.ownerDocument.defaultView!.Node && this.native.element.contains(target);
-    if (inPdf && this.isTextTarget(target) && !this.shortcutField(target)
-      && !(target instanceof this.native.element.ownerDocument.defaultView!.HTMLElement && target.classList.contains('pdf-form-studio-shortcut-proxy'))) return false;
+    if (inPdf && this.isTextTarget(target) && !this.shortcutField(target)) return false;
     if (key === 'd') {
       event.preventDefault(); event.stopImmediatePropagation();
       if (!event.repeat) try { this.selectCreated(this.session.pasteObjects(this.session.copyObjects(objects))); this.scheduleSave(); }
