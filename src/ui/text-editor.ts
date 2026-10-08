@@ -23,7 +23,8 @@ import { labelOverlay } from './overlay-label';
 
 interface AnswerLine { page: number; rect: Rect }
 const objectClipboardType = 'application/x-pdf-editor-objects';
-let copiedObjects: { token: string; objects: CopiedPdfObject[]; text: string } | undefined;
+interface ObjectCopy { token: string; objects: CopiedPdfObject[]; text: string; write?: Promise<boolean> }
+let copiedObjects: ObjectCopy | undefined;
 
 interface FieldControl {
   frame: HTMLElement; input: HTMLInputElement | HTMLTextAreaElement;
@@ -210,8 +211,11 @@ export class TextEditor extends Component {
       }
     }, true);
     this.registerDomEvent(doc.defaultView!, 'copy', event => {
-      if (!this.shortcutTarget(event.target) || doc.getSelection()?.toString()) return;
-      const objects = this.shortcutObjects(event.target);
+      const target = event.target;
+      if (!(target instanceof doc.defaultView!.Element) || !target.closest('.pdf-form-studio-view')) { copiedObjects = undefined; return; }
+      if (!this.shortcutTarget(target)) return;
+      if (doc.getSelection()?.toString()) { copiedObjects = undefined; return; }
+      const objects = this.shortcutObjects(target);
       if (!objects.length || !this.session || !event.clipboardData) return;
       try {
         const token = globalThis.crypto.randomUUID(), data = this.session.copyObjects(objects);
@@ -221,9 +225,13 @@ export class TextEditor extends Component {
         event.preventDefault(); event.stopImmediatePropagation();
       } catch (error) { this.showError(error); }
     }, true);
+    this.registerDomEvent(doc.defaultView!, 'cut', () => { copiedObjects = undefined; }, true);
+    // A copy in another application cannot dispatch a DOM event here. When
+    // Obsidian loses focus, cached PDF objects must no longer be pasteable.
+    this.registerDomEvent(doc.defaultView!, 'blur', () => { copiedObjects = undefined; });
     this.registerDomEvent(doc.defaultView!, 'paste', event => {
-      if (!this.shortcutTarget(event.target) || (this.isTextTarget(event.target) && !this.shortcutField(event.target)) || !this.session || !event.clipboardData
-        || event.clipboardData.getData(objectClipboardType) !== copiedObjects?.token) return;
+      if (!this.shortcutTarget(event.target) || (this.isTextTarget(event.target) && !this.shortcutField(event.target)) || !this.session || !event.clipboardData) return;
+      if (event.clipboardData.getData(objectClipboardType) !== copiedObjects?.token) { copiedObjects = undefined; return; }
       event.preventDefault(); event.stopImmediatePropagation();
       try { this.selectCreated(this.session.pasteObjects(copiedObjects.objects)); this.scheduleSave(); }
       catch (error) { this.showError(error); }
@@ -373,6 +381,7 @@ export class TextEditor extends Component {
       catch (error) { this.showError(error); }
       return true;
     }
+    if (key === 'v' && !copiedObjects) return false;
     // Obsidian's Live Preview keymap consumes these keys before the browser
     // dispatches copy/paste events for an embedded PDF. Use the system
     // clipboard directly while this PDF owns the active shortcut scope.
@@ -382,20 +391,33 @@ export class TextEditor extends Component {
       try {
         const data = this.session.copyObjects(objects);
         const text = data.filter(item => item.kind === 'text').map(item => item.value).join('\n') || 'PDF Editor elements';
-        copiedObjects = { token: globalThis.crypto.randomUUID(), objects: data, text };
+        const copy: ObjectCopy = { token: globalThis.crypto.randomUUID(), objects: data, text };
+        copiedObjects = copy;
         // Some Obsidian desktop contexts do not expose navigator.clipboard.
         // Keep element copy/paste usable inside the plugin in that case.
-        void clipboard?.writeText(text).catch(() => {});
+        if (clipboard?.writeText) copy.write = clipboard.writeText(text).then(() => true, () => false);
       } catch (error) { this.showError(error); }
       return true;
     }
     const copy = copiedObjects, session = this.session;
-    if (!copy) return true;
-    try {
-      if (this.loaded && this.session === session && this.shortcutObjects(event.target).length) {
-        this.selectCreated(session.pasteObjects(copy.objects)); this.scheduleSave();
-      }
-    } catch (error) { this.showError(error); }
+    if (!copy) return false;
+    const paste = () => {
+      if (copiedObjects !== copy || !this.loaded || this.session !== session || !this.shortcutObjects(target).length) return;
+      try { this.selectCreated(session.pasteObjects(copy.objects)); this.scheduleSave(); }
+      catch (error) { this.showError(error); }
+    };
+    if (!clipboard?.readText) { paste(); return true; }
+    void (async () => {
+      // Clipboard writes and reads can be unavailable in some Obsidian
+      // contexts. The window-blur guard still invalidates their fallback.
+      if (copy.write && !await copy.write) { paste(); return; }
+      try {
+        const current = await clipboard.readText();
+        if (copiedObjects !== copy) return;
+        if (current !== copy.text) { copiedObjects = undefined; return; }
+      } catch { /* A same-window copy remains usable when read permission is denied. */ }
+      paste();
+    })();
     return true;
   }
   private syncObjectScope(): void {

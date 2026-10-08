@@ -427,9 +427,9 @@ test('a selected box focuses a read-only shortcut target without entering text e
     const range = f.doc.createRange(); range.selectNodeContents(printed); f.doc.getSelection()!.addRange(range);
     const copy = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'c', metaKey: true, bubbles: true, cancelable: true });
     selectedProxy.dispatchEvent(copy); assert.equal(copy.defaultPrevented, true);
-    f.doc.body.dispatchEvent(new f.doc.defaultView!.Event('copy', { bubbles: true }));
     const paste = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'v', metaKey: true, bubbles: true, cancelable: true });
     selectedProxy.dispatchEvent(paste); assert.equal(paste.defaultPrevented, true);
+    await pause(0);
     assert.equal(f.session.snapshot.fields.length, 3);
   } finally { f.dispose(); }
 });
@@ -448,6 +448,7 @@ test('selected drawing shortcuts use a keyboard target in an embedded PDF', asyn
       const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key, metaKey: true, bubbles: true, cancelable: true });
       f.doc.activeElement!.dispatchEvent(event);
       assert.equal(event.defaultPrevented, true, `⌘${key.toUpperCase()} should be handled for a drawing`);
+      await pause(0);
     }
     assert.equal(f.session.snapshot.strokes.length, 3);
     const selected = f.session.snapshot.strokes.at(-1)!;
@@ -535,6 +536,22 @@ test('Live Preview scope copies and pastes a selected PDF box through the system
     assert.equal(f.clipboard.text, 'Copy me');
   } finally { f.dispose(); }
 });
+test('a changed system clipboard cannot paste a stale PDF object', async () => {
+  const f = await fixture(1, true);
+  try {
+    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
+    f.session.setValue(field.name, 'Old PDF copy'); f.editor.refresh();
+    f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!.focus();
+    const shortcut = (key: string) => f.doc.activeElement!.dispatchEvent(new f.doc.defaultView!.KeyboardEvent('keydown', {
+      key, metaKey: true, bubbles: true, cancelable: true
+    }));
+    shortcut('c'); await pause(0);
+    f.clipboard.text = 'Copied from another source';
+    shortcut('v'); await pause(0);
+    assert.equal(f.session.snapshot.fields.length, 1);
+    assert.equal(f.clipboard.text, 'Copied from another source');
+  } finally { f.dispose(); }
+});
 test('Live Preview note keyboard target still uses the selected PDF box', async () => {
   const f = await fixture(1, true);
   try {
@@ -586,6 +603,22 @@ test('PDF element shortcuts still work when Obsidian has no Clipboard API', asyn
       frame.dispatchEvent(event); assert(event.defaultPrevented);
     }
     await pause(0); assert.equal(f.session.snapshot.fields.length, 2);
+  } finally { f.dispose(); }
+});
+test('leaving Obsidian invalidates an internal PDF copy without Clipboard API', async () => {
+  const f = await fixture(1, true);
+  try {
+    Object.defineProperty(f.doc.defaultView!.navigator, 'clipboard', { value: undefined });
+    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
+    f.session.setValue(field.name, 'Old PDF copy'); f.editor.refresh();
+    f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!.focus();
+    const shortcut = (key: string) => f.doc.activeElement!.dispatchEvent(new f.doc.defaultView!.KeyboardEvent('keydown', {
+      key, metaKey: true, bubbles: true, cancelable: true
+    }));
+    shortcut('c');
+    f.doc.defaultView!.dispatchEvent(new f.doc.defaultView!.Event('blur'));
+    shortcut('v'); await pause(0);
+    assert.equal(f.session.snapshot.fields.length, 1);
   } finally { f.dispose(); }
 });
 test('selecting an ink mark clears old printed-text selection before object copy', async () => {
