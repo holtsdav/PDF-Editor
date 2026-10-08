@@ -26,7 +26,7 @@ const built = await build({ entryPoints: ['src/ui/text-editor.ts'], bundle: true
       removeChild(child) { child.unload(); this.children = this.children.filter(c => c !== child); }
       unload() { this.onunload?.(); for (const child of this.children) child.unload(); for (const fn of this.cleanups.splice(0).reverse()) fn(); }
     }
-    export class Scope { register() {} }
+    export class Scope { constructor(parent) { this.parent = parent; this.handlers = []; } register(modifiers, key, func) { const handler = { modifiers, key, func }; this.handlers.push(handler); return handler; } }
     export class Menu { hide() {} }
     export class Modal extends Component {}
     export class Notice { constructor(text) { throw new Error(text); } }
@@ -45,11 +45,17 @@ await writeFile(moduleUrl, built.outputFiles[0]!.text);
 const { TextEditor } = await import(moduleUrl.href) as { TextEditor: typeof Editor };
 const font = new Uint8Array(await readFile(new URL('../assets/fonts/NotoSans-Regular.ttf', import.meta.url)));
 
-async function fixture(pageCount = 1) {
+interface MockScope { handlers: { key: string; func(event: KeyboardEvent): unknown }[] }
+async function fixture(pageCount = 1, withKeymap = false) {
   const pdf = await PDFDocument.create(); for (let i = 0; i < pageCount; i++) pdf.addPage([600, 800]); let bytes = await pdf.save();
   const session = await TextSession.open({ read: async () => bytes, write: async value => { bytes = value; }, backup: async () => 'original.pdf' }, font);
   const dom = new JSDOM(`<body><div id="editor"><div id="tools"></div>${Array.from({ length: pageCount }, (_, i) => `<div id="${i ? 'page' + (i + 1) : 'page'}"></div>`).join('')}</div><button id="outside">Outside</button></body>`, { pretendToBeVisual: true });
   const doc = dom.window.document;
+  let clipboardText = '';
+  Object.defineProperty(dom.window.navigator, 'clipboard', { configurable: true, value: {
+    writeText: async (text: string) => { clipboardText = text; },
+    readText: async () => clipboardText
+  } });
   const create = function(this: HTMLElement, tag: string, options: { cls?: string; text?: string; attr?: Record<string, string> } = {}) {
     const el = doc.createElement(tag); if (options.cls) el.className = options.cls; if (options.text) el.textContent = options.text;
     for (const [key, value] of Object.entries(options.attr ?? {})) el.setAttribute(key, value); this.append(el); return el;
@@ -69,7 +75,12 @@ async function fixture(pageCount = 1) {
     width: 600, height: 800, scale: 1, rotation: 0, convertToPdfPoint: (x: number, y: number) => [x, 800 - y], convertToViewportRectangle: (r: number[]) => [r[0]!, 800 - r[1]!, r[2]!, 800 - r[3]!]
   } })) } as unknown as EditorSurface;
   const sessions = { get: async () => session, preferences: loadToolPreferences({ holdShapes: true }), updatePreferences: async () => {} } as unknown as VaultSessions;
-  const editor = new TextEditor({} as App, native, sessions);
+  const scopes: MockScope[] = [];
+  const app = withKeymap ? { scope: {}, keymap: {
+    pushScope(scope: MockScope) { scopes.push(scope); },
+    popScope(scope: MockScope) { const index = scopes.lastIndexOf(scope); if (index >= 0) scopes.splice(index, 1); }
+  } } : {};
+  const editor = new TextEditor(app as unknown as App, native, sessions);
   await pause(0);
   const pointer = (target: Element, name: string, x = 0, y = 0, shiftKey = false) => {
     const event = new dom.window.MouseEvent(name, { bubbles: true, clientX: x, clientY: y, button: 0, shiftKey, cancelable: true });
@@ -80,7 +91,8 @@ async function fixture(pageCount = 1) {
     pointer(button, 'pointerdown'); button.focus(); button.click();
   };
   const dispose = () => { (editor as Editor & { unload(): void }).unload(); dom.window.close(); };
-  return { doc, session, editor, sessions, pointer, tool, dispose, bytes: () => bytes };
+  return { doc, session, editor, sessions, scopes, pointer, tool, dispose, bytes: () => bytes,
+    clipboard: { get text() { return clipboardText; }, set text(value: string) { clipboardText = value; } } };
 }
 
 test('answer-line scan button sits beside Add text box in the editing toolbar', async () => {
@@ -144,7 +156,7 @@ test('keyboard unfocus removes an empty box, while typed text survives leaving a
     const outside = f.doc.querySelector<HTMLButtonElement>('#outside')!; outside.focus(); await pause(0);
     assert.equal(f.session.snapshot.fields.length, 0);
     f.editor.addSuggestedField(1, [80, 600, 340, 620]);
-    const input = f.doc.querySelector<HTMLTextAreaElement>('textarea')!;
+    const input = f.doc.querySelector<HTMLTextAreaElement>('textarea[data-pdf-field]')!;
     input.value = 'Filled answer'; input.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true })); outside.focus(); await pause(0);
     await f.session.save(); assert.equal((await readTextPdf(f.bytes())).fields[0]!.value, 'Filled answer');
   } finally { f.dispose(); }
@@ -387,9 +399,193 @@ test('selected PDF elements copy, paste and duplicate without intercepting text 
     frame.dispatchEvent(duplicate); assert.equal(duplicate.defaultPrevented, true);
     assert.equal(f.session.snapshot.fields.length, 3);
     const input = frame.querySelector<HTMLInputElement | HTMLTextAreaElement>('[data-pdf-field]')!;
+    input.setSelectionRange(0, 4);
     const nativeCopy = new f.doc.defaultView!.Event('copy', { bubbles: true, cancelable: true });
     Object.defineProperty(nativeCopy, 'clipboardData', { value: clipboardData }); input.dispatchEvent(nativeCopy);
     assert.equal(nativeCopy.defaultPrevented, false);
+  } finally { f.dispose(); }
+});
+test('a selected box focuses a read-only shortcut target without entering text editing', async () => {
+  const f = await fixture();
+  try {
+    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
+    f.session.setValue(field.name, 'Keep this'); f.editor.refresh();
+    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
+    frame.focus();
+    const proxy = frame.querySelector<HTMLTextAreaElement>('.pdf-form-studio-shortcut-proxy')!;
+    assert.equal(f.doc.activeElement, proxy);
+    assert.equal(proxy.readOnly, true);
+    assert.equal(frame.classList.contains('is-editing'), false);
+    const duplicate = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'd', metaKey: true, bubbles: true, cancelable: true });
+    proxy.dispatchEvent(duplicate);
+    assert.equal(duplicate.defaultPrevented, true);
+    assert.equal(f.session.snapshot.fields.length, 2);
+    assert.equal(f.session.snapshot.fields[0]!.value, 'Keep this');
+    const selectedProxy = f.doc.activeElement!;
+    assert.equal(selectedProxy.classList.contains('pdf-form-studio-shortcut-proxy'), true);
+    const printed = f.doc.createElement('span'); printed.textContent = 'Old selection'; f.doc.body.append(printed);
+    const range = f.doc.createRange(); range.selectNodeContents(printed); f.doc.getSelection()!.addRange(range);
+    const copy = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'c', metaKey: true, bubbles: true, cancelable: true });
+    selectedProxy.dispatchEvent(copy); assert.equal(copy.defaultPrevented, true);
+    f.doc.body.dispatchEvent(new f.doc.defaultView!.Event('copy', { bubbles: true }));
+    const paste = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'v', metaKey: true, bubbles: true, cancelable: true });
+    selectedProxy.dispatchEvent(paste); assert.equal(paste.defaultPrevented, true);
+    assert.equal(f.session.snapshot.fields.length, 3);
+  } finally { f.dispose(); }
+});
+test('selected drawing shortcuts use a keyboard target in an embedded PDF', async () => {
+  const f = await fixture(1, true);
+  try {
+    f.session.addStroke(1, 'scribble', [[80, 500], [120, 520]], 2); f.editor.refresh();
+    const drawing = f.doc.querySelector<SVGGElement>('.pdf-form-studio-ink-control')!;
+    f.pointer(drawing, 'pointerdown', 100, 290);
+    f.pointer(f.doc.querySelector('.pdf-form-studio-layer')!, 'pointerup', 100, 290);
+    const proxy = f.doc.activeElement as HTMLTextAreaElement;
+    assert.equal(proxy.classList.contains('pdf-form-studio-shortcut-proxy'), true);
+    assert.equal(proxy.getAttribute('aria-label'), 'Selected PDF drawing');
+    assert.equal(f.scopes.length, 1);
+    for (const key of ['c', 'v', 'd']) {
+      const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key, metaKey: true, bubbles: true, cancelable: true });
+      f.doc.activeElement!.dispatchEvent(event);
+      assert.equal(event.defaultPrevented, true, `⌘${key.toUpperCase()} should be handled for a drawing`);
+    }
+    assert.equal(f.session.snapshot.strokes.length, 3);
+    const selected = f.session.snapshot.strokes.at(-1)!;
+    const before = structuredClone(selected.points);
+    const arrow = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true });
+    f.doc.activeElement!.dispatchEvent(arrow);
+    assert.equal(arrow.defaultPrevented, true);
+    assert.notDeepEqual(f.session.snapshot.strokes.find(stroke => stroke.id === selected.id)!.points, before);
+  } finally { f.dispose(); }
+});
+test('PDF answer shortcuts work with a caret while highlighted text retains native editing', async () => {
+  const f = await fixture();
+  try {
+    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
+    f.session.setValue(field.name, 'Copy me'); f.editor.refresh();
+    const input = f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!;
+    input.focus(); input.setSelectionRange(7, 7);
+    const duplicate = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'd', metaKey: true, bubbles: true, cancelable: true });
+    input.dispatchEvent(duplicate);
+    assert.equal(duplicate.defaultPrevented, true);
+    assert.equal(f.session.snapshot.fields.length, 2);
+    assert.equal(f.doc.activeElement?.classList.contains('pdf-form-studio-shortcut-proxy'), true);
+    const held = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'd', metaKey: true, repeat: true, bubbles: true, cancelable: true });
+    f.doc.activeElement!.dispatchEvent(held);
+    assert.equal(held.defaultPrevented, true);
+    assert.equal(f.session.snapshot.fields.length, 2);
+
+    input.focus(); input.setSelectionRange(7, 7);
+    const values = new Map<string, string>();
+    const clipboardData = { setData(type: string, value: string) { values.set(type, value); }, getData(type: string) { return values.get(type) ?? ''; } };
+    const copy = new f.doc.defaultView!.Event('copy', { bubbles: true, cancelable: true });
+    Object.defineProperty(copy, 'clipboardData', { value: clipboardData }); input.dispatchEvent(copy);
+    assert.equal(copy.defaultPrevented, true);
+    const paste = new f.doc.defaultView!.Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, 'clipboardData', { value: clipboardData }); input.dispatchEvent(paste);
+    assert.equal(paste.defaultPrevented, true);
+    assert.equal(f.session.snapshot.fields.length, 3);
+
+    input.focus(); input.setSelectionRange(0, 4);
+    const textCopy = new f.doc.defaultView!.Event('copy', { bubbles: true, cancelable: true });
+    Object.defineProperty(textCopy, 'clipboardData', { value: clipboardData }); input.dispatchEvent(textCopy);
+    assert.equal(textCopy.defaultPrevented, false);
+    const textPaste = new f.doc.defaultView!.Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(textPaste, 'clipboardData', { value: clipboardData }); input.dispatchEvent(textPaste);
+    assert.equal(textPaste.defaultPrevented, false);
+  } finally { f.dispose(); }
+});
+test('selected PDF owns Obsidian shortcut scope until focus leaves the embed', async () => {
+  const f = await fixture(1, true);
+  try {
+    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
+    f.session.setValue(field.name, 'In a note'); f.editor.refresh();
+    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
+    frame.focus();
+    assert.equal(f.scopes.length, 1);
+    const handler = f.scopes[0]!.handlers.find(item => item.key === 'd')!;
+    const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'd', metaKey: true, cancelable: true });
+    Object.defineProperty(event, 'target', { value: frame });
+    assert.equal(handler.func(event), false);
+    assert.equal(event.defaultPrevented, true);
+    assert.equal(f.session.snapshot.fields.length, 2);
+    assert.equal(f.scopes.length, 1);
+    f.doc.querySelector<HTMLButtonElement>('#outside')!.focus();
+    assert.equal(f.scopes.length, 0);
+  } finally { f.dispose(); }
+});
+test('Live Preview scope copies and pastes a selected PDF box through the system clipboard', async () => {
+  const f = await fixture(1, true);
+  try {
+    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
+    f.session.setValue(field.name, 'Copy me'); f.editor.refresh();
+    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
+    frame.focus();
+    const copy = f.scopes[0]!.handlers.find(item => item.key === 'c')!;
+    const paste = f.scopes[0]!.handlers.find(item => item.key === 'v')!;
+    const key = (letter: string) => {
+      const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key: letter, metaKey: true, cancelable: true });
+      Object.defineProperty(event, 'target', { value: frame });
+      return event;
+    };
+    const copyEvent = key('c'); assert.equal(copy.func(copyEvent), false); assert(copyEvent.defaultPrevented);
+    await pause(0); assert.equal(f.clipboard.text, 'Copy me');
+    const pasteEvent = key('v'); assert.equal(paste.func(pasteEvent), false); assert(pasteEvent.defaultPrevented);
+    await pause(0); assert.equal(f.session.snapshot.fields.length, 2);
+    assert.equal(f.clipboard.text, 'Copy me');
+  } finally { f.dispose(); }
+});
+test('Live Preview note keyboard target still uses the selected PDF box', async () => {
+  const f = await fixture(1, true);
+  try {
+    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
+    f.session.setValue(field.name, 'Selected PDF'); f.editor.refresh();
+    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
+    const note = f.doc.createElement('div'); note.contentEditable = 'true'; note.tabIndex = 0;
+    f.doc.body.append(note);
+    frame.focus();
+    for (const letter of ['c', 'v', 'd']) {
+      const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key: letter, metaKey: true, bubbles: true, cancelable: true });
+      note.dispatchEvent(event);
+      assert(event.defaultPrevented, `${letter} belongs to the selected PDF box`);
+      await pause(0);
+    }
+    assert.equal(f.session.snapshot.fields.length, 3);
+    assert.equal(f.clipboard.text, 'Selected PDF');
+    note.focus();
+    const unrelated = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'd', metaKey: true, bubbles: true, cancelable: true });
+    note.dispatchEvent(unrelated);
+    assert.equal(unrelated.defaultPrevented, false);
+    assert.equal(f.session.snapshot.fields.length, 3);
+  } finally { f.dispose(); }
+});
+test('embedded PDF captures copy and paste before Live Preview handles the keydown', async () => {
+  const f = await fixture(1, true);
+  try {
+    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
+    f.session.setValue(field.name, 'From PDF'); f.editor.refresh();
+    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
+    frame.focus();
+    const key = (letter: string) => new f.doc.defaultView!.KeyboardEvent('keydown', { key: letter, metaKey: true, bubbles: true, cancelable: true });
+    const copy = key('c'); frame.dispatchEvent(copy);
+    assert(copy.defaultPrevented); await pause(0); assert.equal(f.clipboard.text, 'From PDF');
+    const paste = key('v'); frame.dispatchEvent(paste);
+    assert(paste.defaultPrevented); await pause(0); assert.equal(f.session.snapshot.fields.length, 2);
+  } finally { f.dispose(); }
+});
+test('PDF element shortcuts still work when Obsidian has no Clipboard API', async () => {
+  const f = await fixture(1, true);
+  try {
+    Object.defineProperty(f.doc.defaultView!.navigator, 'clipboard', { value: undefined });
+    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
+    f.session.setValue(field.name, 'Internal copy'); f.editor.refresh();
+    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
+    frame.focus();
+    for (const letter of ['c', 'v']) {
+      const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key: letter, metaKey: true, bubbles: true, cancelable: true });
+      frame.dispatchEvent(event); assert(event.defaultPrevented);
+    }
+    await pause(0); assert.equal(f.session.snapshot.fields.length, 2);
   } finally { f.dispose(); }
 });
 test('selecting an ink mark clears old printed-text selection before object copy', async () => {
