@@ -23,7 +23,8 @@ import { labelOverlay } from './overlay-label';
 
 interface AnswerLine { page: number; rect: Rect }
 const objectClipboardType = 'application/x-pdf-editor-objects';
-interface ObjectCopy { token: string; objects: CopiedPdfObject[]; text: string; write?: Promise<boolean> }
+const webObjectClipboardType = `web ${objectClipboardType}`;
+interface ObjectCopy { token: string; objects: CopiedPdfObject[]; text: string; custom: boolean; write?: Promise<void> }
 let copiedObjects: ObjectCopy | undefined;
 
 interface FieldControl {
@@ -221,7 +222,7 @@ export class TextEditor extends Component {
         const token = globalThis.crypto.randomUUID(), data = this.session.copyObjects(objects);
         event.clipboardData.setData(objectClipboardType, token);
         event.clipboardData.setData('text/plain', data.filter(item => item.kind === 'text').map(item => item.value).join('\n') || 'PDF Editor elements');
-        copiedObjects = { token, objects: data, text: data.filter(item => item.kind === 'text').map(item => item.value).join('\n') || 'PDF Editor elements' };
+        copiedObjects = { token, objects: data, text: data.filter(item => item.kind === 'text').map(item => item.value).join('\n') || 'PDF Editor elements', custom: false };
         event.preventDefault(); event.stopImmediatePropagation();
       } catch (error) { this.showError(error); }
     }, true);
@@ -404,11 +405,20 @@ export class TextEditor extends Component {
       try {
         const data = this.session.copyObjects(objects);
         const text = data.filter(item => item.kind === 'text').map(item => item.value).join('\n') || 'PDF Editor elements';
-        const copy: ObjectCopy = { token: globalThis.crypto.randomUUID(), objects: data, text };
+        const copy: ObjectCopy = { token: globalThis.crypto.randomUUID(), objects: data, text, custom: false };
         copiedObjects = copy;
-        // Some Obsidian desktop contexts do not expose navigator.clipboard.
-        // Keep element copy/paste usable inside the plugin in that case.
-        if (clipboard?.writeText) copy.write = clipboard.writeText(text).then(() => true, () => false);
+        // A web custom format carries an opaque identity without changing the
+        // plain text seen when this answer is pasted into another application.
+        const writePlainText = async () => { try { await clipboard?.writeText?.(text); } catch { /* Internal copy still works in restricted contexts. */ } };
+        if (clipboard?.write && typeof view.ClipboardItem === 'function') {
+          try {
+            const item = new view.ClipboardItem({
+              'text/plain': new Blob([text], { type: 'text/plain' }),
+              [webObjectClipboardType]: new Blob([copy.token], { type: objectClipboardType })
+            });
+            copy.write = clipboard.write([item]).then(() => { copy.custom = true; }, writePlainText);
+          } catch { copy.write = writePlainText(); }
+        } else copy.write = writePlainText();
       } catch (error) { this.showError(error); }
       return true;
     }
@@ -426,11 +436,25 @@ export class TextEditor extends Component {
       answer.setRangeText(value, caret.start, caret.end, 'end');
       answer.dispatchEvent(new view.Event('input', { bubbles: true }));
     };
-    if (!clipboard?.readText) { paste(); return true; }
+    if (!clipboard?.readText && !clipboard?.read) { paste(); return true; }
     void (async () => {
       // Clipboard writes and reads can be unavailable in some Obsidian
       // contexts. The window-blur guard still invalidates their fallback.
       if (copy.write) await copy.write;
+      if (copiedObjects !== copy) return;
+      if (copy.custom && clipboard.read) {
+        try {
+          const items = await clipboard.read();
+          const tokens = await Promise.all(items.filter(item => item.types.includes(webObjectClipboardType))
+            .map(async item => (await item.getType(webObjectClipboardType)).text()));
+          if (copiedObjects !== copy) return;
+          if (tokens.includes(copy.token)) { paste(); return; }
+        } catch { /* Without a readable token, do not paste a cached PDF object. */ }
+        copiedObjects = undefined;
+        try { if (clipboard.readText) pasteCurrentText(await clipboard.readText()); } catch { /* No readable text to insert. */ }
+        return;
+      }
+      if (!clipboard.readText) { paste(); return; }
       try {
         const current = await clipboard.readText();
         if (copiedObjects !== copy) return;

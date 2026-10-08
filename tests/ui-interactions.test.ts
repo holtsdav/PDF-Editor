@@ -609,6 +609,43 @@ test('a changed system clipboard cannot paste a stale PDF object', async () => {
     assert.equal(f.clipboard.text, 'Copied from another source');
   } finally { f.dispose(); }
 });
+test('identical clipboard text without the PDF copy token cannot paste a stale object', async () => {
+  const f = await fixture(1, true);
+  try {
+    const view = f.doc.defaultView!;
+    class FakeClipboardItem {
+      readonly types: string[];
+      private readonly values: Record<string, Blob>;
+      constructor(values: Record<string, Blob>) { this.values = values; this.types = Object.keys(values); }
+      async getType(type: string) { return this.values[type]!; }
+    }
+    Object.defineProperty(view, 'ClipboardItem', { value: FakeClipboardItem });
+    let plainText = '';
+    let items: FakeClipboardItem[] = [];
+    Object.defineProperty(view.navigator, 'clipboard', { configurable: true, value: {
+      write: async (value: FakeClipboardItem[]) => { items = value; plainText = await value[0]!.getType('text/plain').then(blob => blob.text()); },
+      read: async () => items,
+      writeText: async (value: string) => { plainText = value; items = [new FakeClipboardItem({ 'text/plain': new Blob([value]) })]; },
+      readText: async () => plainText
+    } });
+    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
+    f.session.setValue(field.name, 'Same words'); f.editor.refresh();
+    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
+    frame.focus();
+    const shortcut = (key: string) => f.doc.activeElement!.dispatchEvent(new view.KeyboardEvent('keydown', {
+      key, metaKey: true, bubbles: true, cancelable: true
+    }));
+    shortcut('c'); await pause(0);
+    assert.equal(plainText, 'Same words');
+    shortcut('v'); await pause(0);
+    assert.equal(f.session.snapshot.fields.length, 2);
+    // A different application can put the same text on the clipboard. The
+    // cached PDF element must not be treated as the source of that text.
+    items = [new FakeClipboardItem({ 'text/plain': new Blob(['Same words']) })];
+    frame.focus(); shortcut('v'); await pause(0);
+    assert.equal(f.session.snapshot.fields.length, 2);
+  } finally { f.dispose(); }
+});
 test('changed clipboard text pastes into an active PDF answer instead of a stale object', async () => {
   const f = await fixture(1, true);
   try {
