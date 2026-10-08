@@ -1,0 +1,7 @@
+reviews:
+  auto_review:
+    enabled: true
+    drafts: false
+    auto_pause_after_reviewed_commits: 0
+  request_changes_workflow: true
+  allow_author_approval: false
