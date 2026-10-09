@@ -3,19 +3,13 @@
 Write, fill answers, highlight and draw on PDFs without leaving Obsidian. Works in PDF tabs, notes and pop-out windows.
 
 ### Write and fill answers
-![Add text and fill detected answer lines](assets/demos/text-and-answers.gif)
+<img src="assets/demos/text-and-answers.gif" alt="Add text and fill detected answer lines" width="480">
 
 ### Draw and highlight
-![Draw, highlight and hold for shapes](assets/demos/ink-and-shapes.gif)
-
-### Move things and undo
-![Select, rearrange and undo edits](assets/demos/selection-and-undo.gif)
-
-### Browse pages and recover originals
-![Navigate pages and restore an original copy](assets/demos/navigation-and-recovery.gif)
+<img src="assets/demos/ink-and-shapes.gif" alt="Draw, highlight and hold for shapes" width="480">
 
 ### Edit inside your notes
-![Edit PDFs in notes and pop-out windows](assets/demos/embeds-and-popouts.gif)
+<img src="assets/demos/embeds-and-popouts.gif" alt="Edit PDFs in notes and pop-out windows" width="480">
 
 ## Get started
 
