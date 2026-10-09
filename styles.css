@@ -69,7 +69,10 @@
   z-index: 2;
   outline: 1px solid transparent;
   outline-offset: 0;
+  box-sizing: border-box;
 }
+.pdf-form-studio-box.is-empty, .pdf-form-studio-box.is-form-field { outline-color: #8b8b8b; }
+.pdf-form-studio-box.is-form-field { cursor: text; }
 .pdf-form-studio-box:hover { outline-color: #8b8b8b; }
 .pdf-form-studio-box:focus-within { outline-color: #1476e5; }
 .pdf-form-studio-box.is-selected { outline-color: #1476e5; z-index: 2; }

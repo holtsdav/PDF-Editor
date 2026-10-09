@@ -12,6 +12,8 @@ import type { TextEditor as Editor } from '../src/ui/text-editor.ts';
 import type { EditorSurface } from '../src/compat/native-pdf.ts';
 import type { VaultSessions } from '../src/pdf/vault-sessions.ts';
 import type { App } from 'obsidian';
+import { authoredForms, legacyBlank, prefixBlank, prefixValue, uuidCollision } from './fixtures/authored-forms.ts';
+import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
 
 // Exercise the actual editor and pointer handlers; only the host API/layout is mocked.
 const built = await build({ entryPoints: ['src/ui/text-editor.ts'], bundle: true, write: false, format: 'esm', platform: 'node', packages: 'external', plugins: [{ name: 'test-host', setup(builder) {
@@ -46,9 +48,10 @@ const { TextEditor } = await import(moduleUrl.href) as { TextEditor: typeof Edit
 const font = new Uint8Array(await readFile(new URL('../assets/fonts/NotoSans-Regular.ttf', import.meta.url)));
 
 interface MockScope { handlers: { key: string; func(event: KeyboardEvent): unknown }[] }
-async function fixture(pageCount = 1, withKeymap = false, rotation = 0) {
+async function fixture(pageCount = 1, withKeymap = false, rotation = 0, seed?: Uint8Array, shared?: TextSession) {
   const pdf = await PDFDocument.create(); for (let i = 0; i < pageCount; i++) pdf.addPage([600, 800]).setRotation(degrees(rotation)); let bytes = await pdf.save();
-  const session = await TextSession.open({ read: async () => bytes, write: async value => { bytes = value; }, backup: async () => 'original.pdf' }, font);
+  if (seed) bytes = seed.slice(); let writes = 0;
+  const session = shared ?? await TextSession.open({ read: async () => bytes, write: async value => { bytes = value; writes++; }, backup: async () => 'original.pdf' }, font);
   const dom = new JSDOM(`<body><div id="editor"><div id="tools"></div>${Array.from({ length: pageCount }, (_, i) => `<div id="${i ? 'page' + (i + 1) : 'page'}"></div>`).join('')}</div><button id="outside">Outside</button></body>`, { pretendToBeVisual: true });
   const doc = dom.window.document;
   Object.assign(dom.window.Node.prototype, { instanceOf(this: Node, type: typeof Node) { return this instanceof type; } });
@@ -72,9 +75,10 @@ async function fixture(pageCount = 1, withKeymap = false, rotation = 0) {
     releasePointerCapture(this: HTMLElement) { delete this.dataset.capture; }
   });
   const scanButton = doc.createElement('button'); scanButton.setAttribute('aria-label', 'Detect answer lines in PDF');
-  const native = { identity: {}, element: doc.querySelector('#editor')!, file: {}, toolbarHost: () => doc.querySelector('#tools')!, answerLineButton: () => scanButton, pages: () => Array.from({ length: pageCount }, (_, i) => ({ div: doc.querySelector(i ? '#page' + (i + 1) : '#page')!, number: i + 1, annotationElements: () => [], viewport: {
+  const viewports = Array.from({ length: pageCount }, () => ({
     width: 600, height: 800, scale: 1, rotation, convertToPdfPoint: (x: number, y: number) => [x, 800 - y], convertToViewportRectangle: (r: number[]) => [r[0]!, 800 - r[1]!, r[2]!, 800 - r[3]!]
-  } })) } as unknown as EditorSurface;
+  }));
+  const native = { identity: {}, element: doc.querySelector('#editor')!, file: {}, toolbarHost: () => doc.querySelector('#tools')!, answerLineButton: () => scanButton, pages: () => Array.from({ length: pageCount }, (_, i) => ({ div: doc.querySelector(i ? '#page' + (i + 1) : '#page')!, number: i + 1, annotationElements: () => [], viewport: viewports[i] })) } as unknown as EditorSurface;
   const sessions = { get: async () => session, preferences: loadToolPreferences({ holdShapes: true }), updatePreferences: async () => {} } as unknown as VaultSessions;
   const scopes: MockScope[] = [];
   const app = withKeymap ? { scope: {}, keymap: {
@@ -92,9 +96,80 @@ async function fixture(pageCount = 1, withKeymap = false, rotation = 0) {
     pointer(button, 'pointerdown'); button.focus(); button.click();
   };
   const dispose = () => { (editor as Editor & { unload(): void }).unload(); dom.window.close(); };
-  return { doc, session, editor, sessions, scopes, pointer, tool, dispose, bytes: () => bytes,
+  return { doc, session, editor, sessions, scopes, pointer, tool, dispose, native, viewports, bytes: () => bytes, writes: () => writes,
     clipboard: { get text() { return clipboardText; }, set text(value: string) { clipboardText = value; } } };
 }
+
+test('mounting an existing form never schedules destructive blank cleanup; authored controls are visible and click to edit', async () => {
+  const seed = await authoredForms(), f = await fixture(1, true, 0, seed);
+  try {
+    await pause(1050); assert.equal(f.writes(), 0); assert.equal(f.session.dirty, false); assert.deepEqual(f.bytes(), seed);
+    assert.equal(f.session.snapshot.fields.length, 8);
+    for (const name of ['Blank', 'Prefilled', prefixBlank, prefixValue, uuidCollision, 'Multiline']) {
+      const input = f.doc.querySelector<HTMLInputElement | HTMLTextAreaElement>(`[data-pdf-field="${name}"]`)!;
+      const frame = input.parentElement!;
+      assert(frame.classList.contains('is-form-field'));
+      assert.equal(frame.style.backgroundColor, 'rgb(230, 242, 255)'); assert.equal(frame.style.borderWidth, '2px');
+      assert.equal(frame.style.borderColor, 'rgb(51, 77, 153)'); assert.equal(frame.querySelector('[data-resize]'), null);
+      assert.equal(input.tagName, name === 'Multiline' ? 'TEXTAREA' : 'INPUT');
+      f.pointer(frame, 'pointerdown', 100, 200); assert.equal(f.doc.activeElement, input); assert.equal(input.readOnly, false);
+      input.value = name === 'Multiline' ? 'Edited row one\nEdited row two' : 'Edited ' + name.slice(-8);
+      input.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true }));
+      f.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); await pause(0);
+      assert(f.session.snapshot.fields.some(field => field.name === name));
+    }
+    assert.equal(f.doc.querySelector('[data-pdf-field="Readonly"]'), null);
+    const prefilled = f.doc.querySelector<HTMLInputElement>('[data-pdf-field="Prefilled"]')!;
+    assert.equal(prefilled.maxLength, 40); assert.equal(prefilled.style.textAlign, 'right');
+    prefilled.parentElement!.focus(); assert.equal(f.doc.activeElement, prefilled, 'Tab into a form frame enters its input');
+    prefilled.value = ''; prefilled.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true }));
+    f.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); await pause(0); await f.session.saveWhenIdle();
+    const saved = await readTextPdf(f.bytes()); assert.equal(saved.fields.length, 8); assert.equal(saved.fields.find(field => field.name === 'Prefilled')!.value, '');
+    assert(saved.fields.some(field => field.name === legacyBlank));
+  } finally { f.dispose(); }
+});
+
+test('authored inputs retain geometry, styles, focus and values through zoom and every page rotation', async () => {
+  const seed = await authoredForms(), f = await fixture(1, false, 0, seed);
+  const task = getDocument({ data: seed.slice(), standardFontDataUrl: new URL('../node_modules/pdfjs-dist/standard_fonts/', import.meta.url).pathname });
+  try {
+    const page = await (await task.promise).getPage(1);
+    const input = f.doc.querySelector<HTMLInputElement>('[data-pdf-field="Blank"]')!, frame = input.parentElement!;
+    const rect = [...f.session.snapshot.fields.find(field => field.name === 'Blank')!.widgets[0]!.rect];
+    f.pointer(frame, 'pointerdown', 100, 200); input.value = 'Rotation answer'; input.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true }));
+    input.setSelectionRange(3, 6);
+    for (const rotation of [0, 90, 180, 270]) for (const scale of [0.5, 2]) {
+      const viewport = page.getViewport({ scale, rotation }); f.viewports[0] = viewport; f.editor.refresh();
+      assert.equal(input.style.fontSize, `${16 * scale}px`); assert.equal(frame.style.borderWidth, `${2 * scale}px`);
+      assert.equal(frame.style.transform, `rotate(${rotation}deg)`); assert.equal(f.doc.activeElement, input);
+      assert.equal(input.selectionStart, 3); assert.equal(input.selectionEnd, 6);
+      const r = viewport.convertToViewportRectangle(rect), left = Math.min(r[0]!, r[2]!), right = Math.max(r[0]!, r[2]!), top = Math.min(r[1]!, r[3]!), bottom = Math.max(r[1]!, r[3]!);
+      assert.equal(frame.style.left, `${rotation === 90 || rotation === 180 ? right : left}px`);
+      assert.equal(frame.style.top, `${rotation === 180 || rotation === 270 ? bottom : top}px`);
+    }
+    f.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); await f.session.saveWhenIdle();
+    assert.deepEqual((await readTextPdf(f.bytes())).fields.find(field => field.name === 'Blank')!.widgets[0]!.rect, rect);
+  } finally { f.dispose(); await task.destroy(); }
+});
+
+test('two document windows share authored values and preserve blanks during focus handoff, autosave and undo/redo', async () => {
+  const seed = await authoredForms(), main = await fixture(1, true, 0, seed), popout = await fixture(1, true, 0, seed, main.session);
+  try {
+    const a = main.doc.querySelector<HTMLInputElement>(`[data-pdf-field="${prefixBlank}"]`)!;
+    const b = popout.doc.querySelector<HTMLInputElement>(`[data-pdf-field="${prefixBlank}"]`)!;
+    main.pointer(a.parentElement!, 'pointerdown', 100, 200); a.value = 'Main answer'; a.dispatchEvent(new main.doc.defaultView!.Event('input', { bubbles: true }));
+    assert.equal(b.value, 'Main answer');
+    popout.pointer(b.parentElement!, 'pointerdown', 100, 200); b.value = ''; b.dispatchEvent(new popout.doc.defaultView!.Event('input', { bubbles: true }));
+    main.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); popout.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); await pause(0);
+    assert.equal(main.session.pruneEmptyBoxes(), 0); await main.session.saveWhenIdle();
+    assert.equal((await readTextPdf(main.bytes())).fields.length, 8);
+    b.parentElement!.focus(); b.value = 'Popout answer'; b.dispatchEvent(new popout.doc.defaultView!.Event('input', { bubbles: true }));
+    popout.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); await main.session.saveWhenIdle();
+    assert.equal((await readTextPdf(main.bytes())).fields.find(field => field.name === prefixBlank)!.value, 'Popout answer');
+    main.session.undoStroke(); assert.equal(a.value, ''); assert.equal(b.value, ''); await main.session.saveWhenIdle();
+    main.session.redoStroke(); assert.equal(a.value, 'Popout answer'); assert.equal(b.value, 'Popout answer'); await main.session.saveWhenIdle();
+  } finally { popout.dispose(); main.dispose(); }
+});
 
 test('answer-line scan button sits beside Add text box in the editing toolbar', async () => {
   const f = await fixture();

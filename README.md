@@ -5,6 +5,8 @@ Write, fill answers, highlight and draw on PDFs without leaving Obsidian. Works 
 ### Write and fill answers
 <img src="assets/demos/text-and-answers.gif" alt="Add text and fill detected answer lines" width="480">
 
+Existing editable form fields show their borders and backgrounds; click a field to type. Authored fields keep their geometry, alignment, length limits and multiline options. Opening a PDF or clearing an existing answer retains its blank fields. Only newly placed, unsaved empty boxes disappear when abandoned. Read-only and unsupported form fields retain their original appearances.
+
 ### Draw and highlight
 <img src="assets/demos/ink-and-shapes.gif" alt="Draw, highlight and hold for shapes" width="480">
 
