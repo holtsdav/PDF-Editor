@@ -224,17 +224,17 @@ test('invalid PDF.js coordinates cannot create answer suggestions or leave a sca
   } finally { f.dispose(); }
 });
 
-test('manual scans of a long PDF run in 100-page sections from the current page', async () => {
-  const f = fixture(Array(205).fill(0));
+test('manual scans of a long PDF run in 300-page sections from the current page', async () => {
+  const f = fixture(Array(605).fill(0));
   try {
     const realScan = f.surface.detectLines.bind(f.surface);
-    await assert.rejects(realScan(f.surface.entries), /limited to 100 pages/);
+    await assert.rejects(realScan(f.surface.entries), /limited to 300 pages/);
     const ranges: number[][] = [];
     f.surface.detectLines = async targets => { ranges.push(targets!.map(entry => entry.native.number)); };
     f.surface.currentPage = 1; f.surface.answerLineActions().run();
-    f.surface.currentPage = 101; f.surface.answerLineActions().run();
-    f.surface.currentPage = 201; f.surface.answerLineActions().run();
-    assert.deepEqual(ranges.map(range => [range[0], range.at(-1), range.length]), [[1, 100, 100], [101, 200, 100], [201, 205, 5]]);
+    f.surface.currentPage = 301; f.surface.answerLineActions().run();
+    f.surface.currentPage = 601; f.surface.answerLineActions().run();
+    assert.deepEqual(ranges.map(range => [range[0], range.at(-1), range.length]), [[1, 300, 300], [301, 600, 300], [601, 605, 5]]);
   } finally { f.dispose(); }
 });
 test('scanning another section keeps suggestions from earlier pages', async () => {
