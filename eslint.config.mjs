@@ -16,7 +16,8 @@ export default tseslint.config(
     plugins: { obsidianmd: obsidian },
     rules: {
       'obsidianmd/commands/no-plugin-id-in-command-id': 'error',
-      'obsidianmd/commands/no-plugin-name-in-command-name': 'error'
+      'obsidianmd/commands/no-plugin-name-in-command-name': 'error',
+      'obsidianmd/no-static-styles-assignment': 'error'
     }
   }
 );

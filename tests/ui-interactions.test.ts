@@ -1054,3 +1054,44 @@ test('line flow stays off until enabled; clicking an adjacent line then joins th
     assert.deepEqual(first.ruled, { spacing: 24, rows: 3 }); assert.equal(first.value, 'Keep separate');
   } finally { f.dispose(); }
 });
+
+test('stylesheet hides both shortcut proxies and anchors rotated text boxes', async () => {
+  const f = await fixture();
+  try {
+    const style = f.doc.createElement('style');
+    style.textContent = await readFile(new URL('../styles.css', import.meta.url), 'utf8'); f.doc.head.append(style);
+    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
+    f.session.setValue(field.name, 'Visible answer'); f.editor.refresh();
+    const proxies = [...f.doc.querySelectorAll<HTMLTextAreaElement>('.pdf-form-studio-shortcut-proxy')];
+    assert.equal(proxies.length, 2);
+    for (const proxy of proxies) {
+      const css = f.doc.defaultView!.getComputedStyle(proxy);
+      assert.equal(proxy.getAttribute('style'), null);
+      assert.equal(css.position, 'absolute'); assert.equal(css.width, '1px'); assert.equal(css.height, '1px');
+      assert.equal(css.opacity, '0'); assert.equal(css.pointerEvents, 'none'); assert.equal(css.resize, 'none');
+      proxy.focus(); assert.equal(f.doc.activeElement, proxy);
+    }
+    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
+    assert.equal(frame.style.transformOrigin, '');
+    assert.equal(f.doc.defaultView!.getComputedStyle(frame).transformOrigin, 'top left');
+  } finally { f.dispose(); }
+});
+
+test('HTML object copies preserve whitespace safely without inline styles', async () => {
+  const f = await fixture();
+  try {
+    const value = '\nFirst  line\n\n<b>literal & safe</b>\tend\n';
+    const field = f.session.add(1, [80, 500, 300, 610], 12, true);
+    f.session.setValue(field.name, value); f.editor.refresh();
+    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!; frame.focus();
+    const values = new Map<string, string>();
+    const copy = new f.doc.defaultView!.Event('copy', { bubbles: true, cancelable: true });
+    Object.defineProperty(copy, 'clipboardData', { value: { setData(type: string, text: string) { values.set(type, text); } } });
+    frame.dispatchEvent(copy);
+    assert.equal(copy.defaultPrevented, true); assert.equal(values.get('text/plain'), value);
+    const parsed = new f.doc.defaultView!.DOMParser().parseFromString(values.get('text/html')!, 'text/html');
+    assert(parsed.querySelector('pre > span[data-pdf-editor-objects]'));
+    assert.equal(parsed.body.textContent, value);
+    assert.equal(parsed.querySelector('[style], b, script'), null);
+  } finally { f.dispose(); }
+});

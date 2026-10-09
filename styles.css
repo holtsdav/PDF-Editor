@@ -64,6 +64,7 @@
 .pdf-form-studio-layer[hidden] { display: none; }
 .pdf-form-studio-box {
   position: absolute;
+  transform-origin: top left;
   pointer-events: auto;
   z-index: 2;
   outline: 1px solid transparent;
@@ -264,3 +265,19 @@ body:has(.pfs-surface .pfs-page:hover) .tooltip { display: none !important; }
 .pfs-object-selection.is-marquee { background: rgb(20 118 229 / 10%); border-style: solid; }
 .pdf-form-studio-box.is-multi-selected { outline: 2px solid #1476e5; }
 .pdf-form-studio-ink-control.is-multi-selected .pdf-form-studio-stroke-outline { display: block; }
+
+/* Focusable keyboard targets for selected text and drawings, never visible controls. */
+.pdf-form-studio-view textarea.pdf-form-studio-shortcut-proxy {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  box-sizing: border-box;
+  opacity: 0;
+  pointer-events: none;
+  padding: 0;
+  border: 0;
+  resize: none;
+}

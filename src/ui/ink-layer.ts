@@ -51,7 +51,6 @@ export class InkLayer extends Component {
     this.shortcutProxy = doc.createElement('textarea');
     this.shortcutProxy.className = 'pdf-form-studio-shortcut-proxy'; this.shortcutProxy.readOnly = true; this.shortcutProxy.tabIndex = -1;
     this.shortcutProxy.setAttribute('aria-label', 'Selected PDF drawing');
-    this.shortcutProxy.style.cssText = 'position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;padding:0;border:0;resize:none';
     layer.append(this.shortcutProxy);
     this.registerDomEvent(this.shortcutProxy, 'focus', () => {
       this.shortcutRelease?.(); this.shortcutRelease = this.session.beginInteraction();
