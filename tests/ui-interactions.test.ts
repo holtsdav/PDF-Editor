@@ -13,6 +13,7 @@ import type { EditorSurface } from '../src/compat/native-pdf.ts';
 import type { VaultSessions } from '../src/pdf/vault-sessions.ts';
 import type { App } from 'obsidian';
 import { authoredForms, legacyBlank, prefixBlank, prefixValue, uuidCollision } from './fixtures/authored-forms.ts';
+import { orphanForms } from './fixtures/orphan-forms.ts';
 import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
 
 // Exercise the actual editor and pointer handlers; only the host API/layout is mocked.
@@ -169,6 +170,35 @@ test('two document windows share authored values and preserve blanks during focu
     main.session.undoStroke(); assert.equal(a.value, ''); assert.equal(b.value, ''); await main.session.saveWhenIdle();
     main.session.redoStroke(); assert.equal(a.value, 'Popout answer'); assert.equal(b.value, 'Popout answer'); await main.session.saveWhenIdle();
   } finally { popout.dispose(); main.dispose(); }
+});
+
+test('recovered orphan inputs mount visibly without autosaving and share edits through popout focus, rotation and zoom', async () => {
+  const seed = await orphanForms(), main = await fixture(1, true, 0, seed), popout = await fixture(1, true, 0, seed, main.session);
+  const task = getDocument({ data: seed.slice(), standardFontDataUrl: new URL('../node_modules/pdfjs-dist/standard_fonts/', import.meta.url).pathname });
+  try {
+    await pause(1050); assert.equal(main.writes(), 0); assert.deepEqual(main.bytes(), seed);
+    const a = main.doc.querySelector<HTMLTextAreaElement>('[data-pdf-field="Orphan multiline"]')!;
+    const b = popout.doc.querySelector<HTMLTextAreaElement>('[data-pdf-field="Orphan multiline"]')!;
+    assert.equal(a.tagName, 'TEXTAREA'); assert.equal(a.parentElement!.style.borderWidth, '1px');
+    assert.equal(a.parentElement!.style.backgroundColor, 'rgb(255, 255, 255)');
+    main.pointer(a.parentElement!, 'pointerdown', 100, 200); assert.equal(main.doc.activeElement, a);
+    a.value = 'Main row\nSecond row'; a.dispatchEvent(new main.doc.defaultView!.Event('input', { bubbles: true })); assert.equal(b.value, a.value);
+    const page = await (await task.promise).getPage(1);
+    for (const rotation of [0, 90, 180, 270]) for (const scale of [0.5, 2]) {
+      main.viewports[0] = page.getViewport({ rotation, scale }); main.editor.refresh();
+      assert.equal(a.style.fontSize, `${12 * scale}px`); assert.equal(a.parentElement!.style.borderWidth, `${scale}px`);
+      assert.equal(a.parentElement!.style.transform, `rotate(${rotation}deg)`); assert.equal(main.doc.activeElement, a);
+    }
+    main.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); await pause(0); await main.session.saveWhenIdle();
+    await pause(1050); // Separate typing bursts for the session's normal text undo grouping.
+    popout.pointer(b.parentElement!, 'pointerdown', 100, 200); b.value = ''; b.dispatchEvent(new popout.doc.defaultView!.Event('input', { bubbles: true }));
+    main.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); popout.doc.querySelector<HTMLButtonElement>('#outside')!.focus();
+    await pause(0); await main.session.saveWhenIdle();
+    assert.equal((await readTextPdf(main.bytes())).fields.find(field => field.name === 'Orphan multiline')!.value, '');
+    main.session.undoStroke(); assert.equal(a.value, 'Main row\nSecond row'); assert.equal(b.value, a.value); await main.session.saveWhenIdle();
+    main.session.redoStroke(); assert.equal(a.value, ''); await main.session.saveWhenIdle();
+    assert.equal(main.session.snapshot.fields.length, 9); assert.equal(main.session.pruneEmptyBoxes(), 0);
+  } finally { popout.dispose(); main.dispose(); await task.destroy(); }
 });
 
 test('answer-line scan button sits beside Add text box in the editing toolbar', async () => {
