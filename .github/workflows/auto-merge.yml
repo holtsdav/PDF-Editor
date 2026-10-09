@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   enable:
-    if: github.event.pull_request.base.ref == 'main' && !github.event.pull_request.draft && (github.event.action != 'edited' || github.event.changes.base)
+    if: github.event.pull_request.base.ref == 'main' && !github.event.pull_request.draft && github.event.pull_request.user.login == 'holtsdav' && github.event.pull_request.head.repo.full_name == github.repository && (github.event.action != 'edited' || github.event.changes.base)
     runs-on: ubuntu-latest
     steps:
       - name: Enable squash auto-merge
