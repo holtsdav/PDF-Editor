@@ -1,4 +1,4 @@
-# PDF Editor (Beta)
+# PDF Editor
 
 Write, fill answers, highlight and draw on PDFs without leaving Obsidian. Works in PDF tabs, notes and pop-out windows.
 
@@ -13,7 +13,7 @@ Write, fill answers, highlight and draw on PDFs without leaving Obsidian. Works 
 
 ## Get started
 
-For manual installation, copy `main.js`, `manifest.json` and `styles.css` from the [latest release](https://github.com/holtsdav/PDF_Editor/releases/latest) into `.obsidian/plugins/pdf-editor/`, then enable **PDF Editor (Beta)**.
+For manual installation, copy `main.js`, `manifest.json` and `styles.css` from the [latest release](https://github.com/holtsdav/PDF-Editor/releases/latest) into `.obsidian/plugins/pdf-editor/`, then enable **PDF Editor**.
 
 Desktop only, Obsidian **1.13.7+**. Tested on Linux 1.14.4, with a basic check on 1.13.7; macOS 1.14.4 is user-confirmed. Windows and mobile are unverified.
 

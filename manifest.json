@@ -1,7 +1,7 @@
 {
   "id": "pdf-editor",
-  "name": "PDF Editor (Beta)",
-  "version": "0.7.13",
+  "name": "PDF Editor",
+  "version": "0.7.14",
   "minAppVersion": "1.13.7",
   "description": "Edit PDF text fields and add text and ink, with automatic saving and recovery copies. Desktop beta.",
   "author": "holtsdav",
