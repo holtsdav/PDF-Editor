@@ -14,6 +14,7 @@ assert.equal(versions[manifest.version], manifest.minAppVersion, 'Compatibility 
 assert.equal(typeof manifest.isDesktopOnly, 'boolean');
 assert.equal(typeof manifest.author, 'string');
 assert(manifest.author.length > 0 && manifest.name.length > 0);
+assert(!/obsidian/i.test(manifest.description), 'Manifest description must not mention Obsidian.');
 assert(manifest.description.length <= 250 && manifest.description.endsWith('.'));
 const tag = process.env.GITHUB_REF_TYPE === 'tag' ? process.env.GITHUB_REF_NAME : undefined;
 if (tag) assert.equal(tag, manifest.version, 'Release tag must equal manifest version, with no v prefix.');

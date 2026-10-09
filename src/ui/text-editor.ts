@@ -28,8 +28,11 @@ interface ObjectCopy { token: string; objects: CopiedPdfObject[]; text: string; 
 let copiedObjects: ObjectCopy | undefined;
 function objectClipboardHtml(doc: Document, text: string, token: string): string {
   const span = doc.createElement('span'); span.dataset.pdfEditorObjects = token;
-  span.style.whiteSpace = 'pre-wrap'; span.textContent = text;
-  return span.outerHTML;
+  span.textContent = text;
+  // Semantic preformatting survives HTML clipboard transfer without inline CSS.
+  // Nesting the span also preserves a leading newline when the HTML is parsed.
+  const pre = doc.createElement('pre'); pre.append(span);
+  return pre.outerHTML;
 }
 
 interface FieldControl {
@@ -889,7 +892,7 @@ export class TextEditor extends Component {
     frame.style.top = `${angle === 180 || angle === 270 ? bottom : top}px`;
     frame.style.width = `${angle === 90 || angle === 270 ? bottom - top : right - left}px`;
     frame.style.height = `${angle === 90 || angle === 270 ? right - left : bottom - top}px`;
-    frame.style.transformOrigin = 'top left'; frame.style.transform = `rotate(${angle}deg)`;
+    frame.style.transform = `rotate(${angle}deg)`;
     input.style.fontFamily = `'${fontFaces[field.fontFamily]}', ${field.fontFamily === 'serif' ? 'serif' : field.fontFamily === 'mono' ? 'monospace' : 'sans-serif'}`;
     input.style.color = cssColor(field.color); input.style.caretColor = cssColor(field.color);
     input.style.fontSize = `${field.fontSize * entry.page.viewport.scale}px`;
@@ -997,7 +1000,6 @@ export class TextEditor extends Component {
     const shortcutProxy = doc.createElement('textarea');
     shortcutProxy.className = 'pdf-form-studio-shortcut-proxy'; shortcutProxy.readOnly = true; shortcutProxy.tabIndex = -1;
     shortcutProxy.setAttribute('aria-label', 'Selected PDF text box');
-    shortcutProxy.style.cssText = 'position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;padding:0;border:0;resize:none';
     frame.append(shortcutProxy);
     const owned = this.session!.snapshot.fields.find(field => field.name === name)!.owned;
     labelOverlay(frame, owned ? 'Text box. Click to select, drag to move, double-click or Enter to edit, Backspace to delete.' : 'Form field. Double-click or Enter to edit.');
