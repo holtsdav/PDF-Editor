@@ -4,6 +4,7 @@ import { PDFDocument, beginMarkedContent, endMarkedContent } from 'pdf-lib';
 import { getDocument, OPS } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { decorativeFooterRules, excludeDecorativeFooters } from '../src/compat/pdf-artifacts.ts';
 import type { OperatorList } from '../src/compat/pdf-artifacts.ts';
+import type { PageViewport } from 'pdfjs-dist';
 
 async function fixture() {
   const pdf = await PDFDocument.create(); const page = pdf.addPage([600, 800]);
@@ -40,4 +41,15 @@ test('legacy or malformed operator bounds, clips, non-footer graphics and untagg
       argsArray: [['Artifact'], [[OPS.rectangle], [50, 40, 500, 0.5], [50, 40, 550, 40.5]], [OPS.fill, [], [50, NaN, 550, 40.5]], [OPS.endPath, [], [50, 40, 550, 40.5]], [OPS.fill, [], [50, 600, 550, 600.5]], null, [OPS.fill, [], [50, 40, 550, 40.5]]] };
     assert.deepEqual(decorativeFooterRules(list, OPS, f.viewport), []);
   } finally { await f.task.destroy(); }
+});
+
+test('malformed viewport conversion results retain footer answer candidates', () => {
+  const list: OperatorList = { fnArray: [OPS.beginMarkedContent, OPS.constructPath],
+    argsArray: [['Artifact'], [OPS.fill, [], [50, 40, 550, 40.5]]] };
+  for (const result of [undefined, null, [50], [50, 760, 1], ['50', 760], [NaN, 760], [50, Infinity]]) {
+    const viewport = { width: 600, height: 800, convertToViewportPoint: () => result } as unknown as PageViewport;
+    assert.deepEqual(decorativeFooterRules(list, OPS, viewport), []);
+  }
+  const viewport = { width: 600, height: 800, convertToViewportPoint: (x: number, y: number) => new Float64Array([x, 800 - y]) } as unknown as PageViewport;
+  assert.deepEqual(decorativeFooterRules(list, OPS, viewport), [[50, 759.5, 550, 760]]);
 });

@@ -9,7 +9,7 @@ import type { ToolPreferences } from './tool-preferences';
 import { migrateRecovery } from './recovery-migration.ts';
 import { DraftJournal } from './draft-journal.ts';
 
-export function arrayBuffer(bytes: Uint8Array): ArrayBuffer { return bytes.slice().buffer as ArrayBuffer; }
+export function arrayBuffer(bytes: Uint8Array): ArrayBuffer { return bytes.slice().buffer; }
 export interface RecoveryUsage { files: number; bytes: number; indexedPdfs: number }
 
 export class VaultSessions {
@@ -158,7 +158,7 @@ export class VaultSessions {
     try {
       if (equalBytes(new Uint8Array(await this.app.vault.readBinary(created)), draft.bytes)) return created;
     } catch { /* Read-back failure is also an unverified export. */ }
-    try { await this.app.vault.delete(created); }
+    try { await this.app.fileManager.trashFile(created); }
     catch (error) {
       throw new Error(`The exported PDF could not be verified, and the unverified file at ${path} could not be removed. Remove it manually. The recovery draft was retained. Cleanup failed: ${String(error)}`, { cause: error });
     }

@@ -21,7 +21,8 @@ export function decorativeFooterRules(list: OperatorList, ops: Operations, viewp
   let matrix: Matrix | undefined = identity();
   const painted = new Set([ops.stroke, ops.closeStroke, ops.fill, ops.eoFill, ops.fillStroke, ops.eoFillStroke, ops.closeFillStroke, ops.closeEOFillStroke]);
   for (let i = 0; i < list.fnArray.length; i++) {
-    const fn = list.fnArray[i]!, args = list.argsArray[i] as unknown[] | null;
+    const fn = list.fnArray[i]!, raw: unknown = list.argsArray[i];
+    const args: unknown[] | undefined = Array.isArray(raw) ? raw : undefined;
     if (fn === ops.beginMarkedContent || fn === ops.beginMarkedContentProps) {
       const tag = args?.[0]; marks.push(tag === 'Artifact' || (!!tag && typeof tag === 'object' && 'name' in tag && tag.name === 'Artifact'));
     } else if (fn === ops.endMarkedContent) marks.pop();
@@ -34,9 +35,15 @@ export function decorativeFooterRules(list: OperatorList, ops: Operations, viewp
       // Newer PDF.js combines painting and path construction and exposes its
       // bounds. Legacy/unknown argument layouts are deliberately ignored.
       const bounds = numbers(args[2], 4); if (!bounds) continue;
-      const corners = [[bounds[0]!, bounds[1]!], [bounds[2]!, bounds[1]!], [bounds[2]!, bounds[3]!], [bounds[0]!, bounds[3]!]]
-        .map(([x, y]) => viewport.convertToViewportPoint(matrix![0] * x! + matrix![2] * y! + matrix![4], matrix![1] * x! + matrix![3] * y! + matrix![5]));
-      const xs = corners.map(p => p[0]!), ys = corners.map(p => p[1]!);
+      const corners: [number, number][] = [];
+      for (const [x, y] of [[bounds[0]!, bounds[1]!], [bounds[2]!, bounds[1]!], [bounds[2]!, bounds[3]!], [bounds[0]!, bounds[3]!]]) {
+        const point = numbers(viewport.convertToViewportPoint(matrix[0] * x! + matrix[2] * y! + matrix[4], matrix[1] * x! + matrix[3] * y! + matrix[5]), 2);
+        if (!point) break;
+        corners.push([point[0]!, point[1]!]);
+      }
+      // Unknown or non-finite conversions must retain legitimate answer lines.
+      if (corners.length !== 4) continue;
+      const xs = corners.map(p => p[0]), ys = corners.map(p => p[1]);
       const rect: Rect = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
       if (rect[1] >= viewport.height * 0.88 && rect[3] - rect[1] <= 2 && rect[2] > rect[0]) pieces.push(rect);
     }

@@ -21,7 +21,7 @@ function numbers(dict: PDFDict, key: string): number[] | undefined {
   const array = dict.lookup(PDFName.of(key));
   if (!(array instanceof PDFArray)) return;
   const result = array.asArray().map((_, index) => array.lookup(index));
-  return result.every(value => value instanceof PDFNumber) ? result.map(value => (value as PDFNumber).asNumber()) : undefined;
+  return result.every(value => value instanceof PDFNumber) ? result.map(value => value.asNumber()) : undefined;
 }
 function number(dict: PDFDict, key: string, fallback: number): number {
   const value = dict.lookup(PDFName.of(key)); return value instanceof PDFNumber ? value.asNumber() : fallback;

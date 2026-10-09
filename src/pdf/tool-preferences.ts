@@ -8,7 +8,12 @@ export function loadToolPreferences(value: unknown): ToolPreferences {
   if (!value || typeof value !== 'object') return result;
   const saved = value as Record<string, unknown>;
   for (const key of ['textColor', 'penColor', 'markerColor'] as const) {
-    const color = saved[key]; if (Array.isArray(color) && validColor(color as PdfColor)) result[key] = [...color] as PdfColor;
+    const color: unknown = saved[key];
+    if (!Array.isArray(color) || color.length !== 3) continue;
+    const red: unknown = color[0], green: unknown = color[1], blue: unknown = color[2];
+    if (typeof red !== 'number' || typeof green !== 'number' || typeof blue !== 'number') continue;
+    const components: PdfColor = [red, green, blue];
+    if (validColor(components)) result[key] = components;
   }
   for (const key of ['fontSize', 'penWidth', 'markerWidth'] as const) { const n = saved[key]; if (typeof n === 'number' && Number.isFinite(n) && n >= 1 && n <= (key === 'fontSize' ? 96 : 30)) result[key] = n; }
   const offset = saved.toolbarTopOffset;
