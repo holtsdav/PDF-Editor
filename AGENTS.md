@@ -1,6 +1,6 @@
 # PDF Editor
 
-This repository contains research and a first text editing development beta for Obsidian. Read `README.md`, `docs/RESEARCH.md`, `docs/ROADMAP.md`, and `docs/TESTING.md` before extending editing features. Keep implementation status accurate in the README and manifest description.
+This repository contains a PDF editing beta for Obsidian. Read `README.md`, `docs/DEVELOPMENT.md`, `docs/RELEASE_READINESS.md`, and `docs/TESTING.md` before extending editing features. Keep implementation status accurate in the README and manifest description.
 
 ## Working conventions
 

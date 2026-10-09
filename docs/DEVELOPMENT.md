@@ -56,13 +56,6 @@ CI runs `npm ci` and `npm run check` with Node.js 24, then uploads the three plu
 
 Run `npm run test:stress` separately for deterministic mixed-edit concurrency, a 120-page/1,200-stroke PDF, 50 reopen/save cycles and a 24 MiB image workload. It writes anonymous PDF artifacts under ignored `tmp/production-audit/`. Use an isolated process for memory measurements; see the audit's reproduction commands.
 
-```sh
-npm version patch
-npm run check
-git push origin main
-git push origin --tags
-```
-
-The version hook synchronizes the manifest and compatibility map. Tags must be exact `x.y.z` without a `v` prefix. Tag pushes validate metadata and create a **draft** release. The private repository cannot serve as public Community distribution. Submission requires broader testing and current [Obsidian requirements](https://docs.obsidian.md/community-directory/submission-requirements-for-plugins).
+For an approved release, the version hook synchronizes the manifest and compatibility map. Tags must be exact `x.y.z` without a `v` prefix. A tag push validates metadata and creates a **draft** release. Confirm the release assets and distribution repository before publishing. Obsidian permits a public assets repository with private source when its Community directory GitHub App has read access to that source; see [release readiness](RELEASE_READINESS.md). Submission requires broader testing and the current [Obsidian requirements](https://docs.obsidian.md/community-directory/submission-requirements-for-plugins).
 
 Keep dependencies pinned and the lockfile synchronized. Do not commit private PDFs, answers, vault paths, credentials or hardware details. The API package's development-only Moment override does not alter Obsidian runtime modules.
