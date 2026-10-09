@@ -7,6 +7,8 @@ Write, fill answers, highlight and draw on PDFs without leaving Obsidian. Works 
 
 Existing editable form fields show their borders and backgrounds; click a field to type. Authored fields keep their geometry, alignment, length limits and multiline options. Opening a PDF or clearing an existing answer retains its blank fields. Only newly placed, unsaved empty boxes disappear when abandoned. Read-only and unsupported form fields retain their original appearances.
 
+Text widgets omitted from the PDF's form tree are recovered when their identities and hierarchy are unambiguous. They become editable without changing the file on open; the recovered form tree is saved with the next edit. Ambiguous names and malformed field hierarchies are rejected before editing.
+
 ### Draw and highlight
 <img src="assets/demos/ink-and-shapes.gif" alt="Draw, highlight and hold for shapes" width="480">
 

@@ -1,4 +1,4 @@
-import { PDFDocument, PDFHexString, PDFString, PDFDict, PDFArray, PDFName, PDFNumber, PDFStream, PDFTextField, StandardFonts, rgb, setFontAndSize, setFillingRgbColor } from 'pdf-lib';
+import { PDFDocument, PDFHexString, PDFString, PDFDict, PDFArray, PDFName, PDFNumber, PDFRef, PDFStream, PDFTextField, StandardFonts, rgb, setFontAndSize, setFillingRgbColor } from 'pdf-lib';
 import type { PDFFont } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import { multilineAppearance } from './text-appearance.ts';
@@ -58,10 +58,15 @@ async function loadWritable(bytes: Uint8Array): Promise<PDFDocument> {
   }
   validateTree(pdf, pdf.catalog.lookup(PDFName.of('Pages')), 'page');
   const roots = acroForm?.lookup(PDFName.of('Fields'));
-  if (roots instanceof PDFArray) validateTree(pdf, roots, 'form');
+  if (acroForm?.has(PDFName.of('Fields')) && !(roots instanceof PDFArray)) throw new Error('Malformed PDF form fields.');
+  const reachable = roots instanceof PDFArray ? validateTree(pdf, roots, 'form') : new Set<PDFDict | PDFArray>();
+  const recovered = recoverTextWidgets(pdf, reachable), fields = pdf.getForm().getFields();
+  const textWidgets = new Set(fields.flatMap(field => field instanceof PDFTextField ? field.acroField.getWidgets().map(widget => widget.dict) : []));
+  if ([...recovered].some(widget => !textWidgets.has(widget))) throw new Error('Malformed PDF orphan form: incompatible field and widget types.');
   const names = new Set<string>();
-  for (const field of pdf.getForm().getFields()) {
+  for (const field of fields) {
     const name = field.getName();
+    if (field instanceof PDFTextField && !name) throw new Error('The PDF contains an unnamed text field. Editing would be ambiguous.');
     if (names.has(name)) throw new Error('The PDF contains duplicate field names. Editing would be ambiguous.');
     names.add(name);
   }
@@ -69,7 +74,7 @@ async function loadWritable(bytes: Uint8Array): Promise<PDFDocument> {
 }
 
 /** Bound recursive library traversal before entering page/form trees. */
-function validateTree(pdf: PDFDocument, root: unknown, kind: string): void {
+function validateTree(pdf: PDFDocument, root: unknown, kind: string): Set<PDFDict | PDFArray> {
   const pending = [{ value: root, depth: 0 }], seen = new Set<PDFDict | PDFArray>();
   while (pending.length) {
     const { value, depth } = pending.pop()!;
@@ -80,9 +85,11 @@ function validateTree(pdf: PDFDocument, root: unknown, kind: string): void {
     if (!(value instanceof PDFDict) || depth > 128 || seen.has(value)) throw new Error(`Malformed PDF ${kind} tree: cyclic, repeated or excessively deep entries.`);
     seen.add(value);
     const parents = new Set<PDFDict>([value]); let parent = value.lookup(PDFName.of('Parent'));
+    if (value.has(PDFName.of('Parent')) && !(parent instanceof PDFDict)) throw new Error(`Malformed PDF ${kind} parent chain.`);
     while (parent instanceof PDFDict) {
       if (parents.has(parent) || parents.size > 128) throw new Error(`Malformed PDF ${kind} parent chain.`);
-      parents.add(parent); parent = parent.lookup(PDFName.of('Parent'));
+      parents.add(parent); const hasParent = parent.has(PDFName.of('Parent')); parent = parent.lookup(PDFName.of('Parent'));
+      if (hasParent && !(parent instanceof PDFDict)) throw new Error(`Malformed PDF ${kind} parent chain.`);
     }
     const children = value.lookup(PDFName.of('Kids'));
     if (children !== undefined) {
@@ -90,6 +97,50 @@ function validateTree(pdf: PDFDocument, root: unknown, kind: string): void {
       pending.push({ value: children, depth: depth + 1 });
     }
   }
+  return seen;
+}
+
+/** Some PDFs store real field/widgets only in page Annots. Repair this copy, never the source on open. */
+function recoverTextWidgets(pdf: PDFDocument, reachable: Set<PDFDict | PDFArray>): Set<PDFDict> {
+  const recovered = new Set<PDFDict>();
+  for (const page of pdf.getPages()) {
+    const annotations = page.node.Annots();
+    for (const entry of annotations?.asArray() ?? []) {
+      const widget = pdf.context.lookup(entry);
+      if (!(widget instanceof PDFDict) || widget.get(PDFName.of('Subtype')) !== PDFName.of('Widget') || reachable.has(widget)) continue;
+      let root = widget, type: unknown;
+      const parents = new Set<PDFDict>();
+      for (;;) {
+        if (parents.has(root) || parents.size > 128) throw new Error('Malformed PDF orphan form parent chain.');
+        parents.add(root);
+        type ??= root.lookup(PDFName.of('FT'));
+        const parent = root.lookup(PDFName.of('Parent'));
+        if (!root.has(PDFName.of('Parent'))) break;
+        if (!(parent instanceof PDFDict)) throw new Error('Malformed PDF orphan form parent chain.');
+        root = parent;
+      }
+      if (type !== PDFName.of('Tx')) continue; // Preserve unsupported controls without making them editable.
+      const tree = validateTree(pdf, root, 'orphan form');
+      if (!tree.has(widget) || [...tree].some(object => reachable.has(object))) {
+        throw new Error('Malformed PDF orphan form: inconsistent parent or shared children.');
+      }
+      // PDF-LIB ignores direct child fields. Do not silently recover only part of a hierarchy.
+      for (const object of tree) if (object instanceof PDFArray && object.asArray().some(child => !(child instanceof PDFRef))) {
+        throw new Error('Malformed PDF orphan form children: expected indirect references.');
+      }
+      for (const object of tree) if (object instanceof PDFDict) {
+        const children = object.lookup(PDFName.of('Kids'));
+        if (children instanceof PDFArray && children.asArray().some(child => pdf.context.lookup(child, PDFDict).lookup(PDFName.of('Parent')) !== object)) {
+          throw new Error('Malformed PDF orphan form: inconsistent child parent.');
+        }
+      }
+      const ref = pdf.context.getObjectRef(root) ?? pdf.context.register(root);
+      pdf.getForm().acroForm.addField(ref);
+      recovered.add(widget);
+      for (const object of tree) reachable.add(object);
+    }
+  }
+  return recovered;
 }
 
 function editableText(field: PDFTextField): boolean {
