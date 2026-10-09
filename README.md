@@ -1,75 +1,99 @@
 # PDF Editor (Beta)
 
-Fill PDF text fields, type answers on printed worksheets, highlight and scribble directly inside Obsidian notes. Text is saved into the vault PDF as editable AcroForm fields; marks use standard ink annotations with appearance streams for other viewers and printing.
+Fill forms, type on worksheets, highlight and draw directly in Obsidian PDF embeds and tabs. Text stays editable in the PDF; drawings save as standard ink annotations for other viewers and printing.
 
-**Version 0.7.11: integrated editor beta.** Ordinary PDF embeds and PDF tabs use a persistent PDF.js editing surface. The editor loading surface replaces native viewer chrome immediately when its host is discovered; unsupported PDFs return to the native viewer with an explanation. Saving no longer replaces its page canvases, text controls or drawing layers. Development is in [holtsdav/PDF_Editor](https://github.com/holtsdav/PDF_Editor); this is not yet a published Community plugin.
+**Desktop beta · 0.7.11 · Installed ID: `pdf-form-studio`**
 
-The editor remains a beta. **Edit each PDF in one place at a time:** wait for **Saved** and for vault sync to finish before editing the same PDF in another app or device. A concurrent writer can still be overwritten during the final vault write. Crash recovery during file moves and large-file resource use also limit production readiness.
-The remaining safety and Community submission work is tracked in [Release readiness](docs/RELEASE_READINESS.md).
+> **Edit each PDF in one place at a time.** Wait for **Saved** and let vault sync finish before switching apps or devices. Another writer can still overwrite, or be overwritten by, a save. Keep a separate backup of important PDFs.
 
-The display name is **PDF Editor (Beta)**. Its installed ID remains `pdf-form-studio`, so existing settings and recovery copies carry over.
+## Write and fill answers
 
-## Use
+- Edit existing text fields, or choose **Text (T)** and click or drag to add a box. Select a box to move or resize it; double-click or press Enter to type.
+- Use **Detect answer lines** to find printed rules, underscores and regular dotted lines. Click a blue suggestion to answer; consecutive lines can become one wrapping answer block. Detection alone never changes the PDF.
+- Choose Sans, Serif or Mono, a text size and a color. Tab moves between detected answers. Text boxes wrap and grow within the page.
 
-1. Embed a PDF normally, for example `![[worksheet.pdf]]`, or open its PDF tab. Page navigation, fit-width zoom, rotation and PDF search sit above the editing toolbar. The default embed is tall enough for one complete page at fit-width, including A4. Existing `#page=` and explicit numeric `#height=` embed options are respected. **PDF options → Floating toolbar** keeps both the PDF controls and editing tools at the top of the note while the PDF remains on screen. The same switch is in Settings and applies to open PDFs.
-2. **Select (V)** lets you select printed text, follow PDF links and move your marks. Drag from blank space to marquee-select added text boxes and drawings on that page. Shift-click adds or removes an object; drag a selected member to move the group, use arrows to nudge, and Delete/Backspace removes the group. Movement and deletion undo as one action. With an added box or drawing selected, Cmd/Ctrl+C copies it, Cmd/Ctrl+V pastes a new editable copy, and Cmd/Ctrl+D duplicates it immediately. Pasting ordinary text while an element is selected creates a new editable text box near it. These shortcuts also work while the caret is in an added answer box and no text is highlighted; ordinary text pastes at that caret. Highlighted text keeps normal copy and paste. Groups copy and undo in one step; printed-text selection keeps its normal clipboard behavior. Starting a drag on printed PDF text still selects text. Click a text box once to select it; double-click or press Enter to edit. **Text (T)** places and focuses one new box by clicking or dragging on the page, then returns to Select to prevent accidental boxes.
-3. **Pen (P)** draws opaque ink. **Smooth ink** reduces wobble and defaults on. **Highlighter (H)** draws transparent strokes: hold still for about 650ms before lifting to straighten, or start with Shift for a horizontal line. **Eraser (E)** removes entire owned strokes.
-4. Use the adjacent settings button for color swatches, sample thicknesses and a combined brush preview. Click it again, tap the active tool or press Escape to dismiss. Text settings offer Sans/Serif/Mono, color and size. Preferences persist across restarts; changing tools keeps the toolbar in place.
-5. Drag anywhere on a selected, non-editing added box to move it; use its blue handles to resize. Delete/Backspace removes a selected owned box or mark. Empty added boxes disappear when focus leaves the whole box. Switching between Text and Select, moving, resizing and using text settings retain the blank; authored fields and blanks actively being edited in another view are retained. Manually placed text wraps and grows to the page edge. Detected ruled answer blocks add rows below their printed area when needed. Authored fields keep their original geometry.
-6. **Undo/Redo** covers text box creation, changes, formatting, movement, deletion and ink actions, including edits already saved (50 actions per session). Focused text inputs retain normal browser text undo. Outside inputs use Cmd/Ctrl+Z and Shift+Cmd/Ctrl+Z. Escape cancels the active gesture or clears the selection.
-7. Edits save automatically after a short pause, even while a drawing tool remains selected. **Saved** means the actual vault PDF has been written and read back successfully. The disk button or Cmd/Ctrl+S saves immediately. No tool switch is needed. The PDF remains editable and can be opened or printed in other viewers.
+![Typing in a form and filling detected answer lines](assets/demos/text-and-answers.gif)
 
-8. Enable **Draw & hold shapes** in Pen settings for single-stroke lines, rectangles, triangles, ellipses/circles and arrows. It defaults off. Rectangles and a triangle’s longest edge snap to page axes when within eight degrees; deliberate rotations remain. Hold at the endpoint until a shape label appears, then keep the pointer down and move to resize. Lines follow the held endpoint; circles keep a uniform radius; other closed shapes stretch in two directions. Lift to commit or press Escape to cancel. Uncertain shapes stay freehand. Draw arrows along the shaft, to one wing, back to the tip, then to the other wing.
-9. **Detect answer lines** beside Add text box scans every page of PDFs up to 100 pages. For larger PDFs, it scans up to 100 pages starting at the current page; move to another page and run it again to scan another section. The button stays highlighted while a scan is running or its results are active, including after an automatic scan with no matches. Progress shows the current page, and clicking the button again cancels the scan. Click a blue outline to fill that answer; this activates Select, so further page clicks do not create free text boxes. Click a detected answer once to edit it again. By default, closely spaced, aligned consecutive blank lines form one editable answer block when clicked. Text wraps onto the next printed rule with matching line spacing and adds further rows below the last printed rule when needed. Clicking any row starts the same continuous answer at the first row. Tab/Shift+Tab moves to the next/previous answer block or independent line in page order; Enter inserts a newline within that answer. Clicking a neighboring detected line can extend a saved answer block while keeping its text; separate authored fields are never merged. Longer answers grow and save as one editable block. At the page edge, the complete logical value still saves, but visible overflow requires widening the box or reducing text size. Deleting a detected answer dismisses its suggestion until the next scan; leaving an empty answer without deleting it keeps the suggestion available. Click the scan button after completion to clear that section’s scan. Detection alone never edits the PDF, and existing fields are excluded. It is a raster heuristic, not OCR: clear underscores, regular short dashes, compact regularly spaced dots and thin horizontal rules work best. Matching wide footer rules marked as decorative PDF artifacts are excluded; unmarked or ambiguous rules remain available, including near the bottom. Inset answer rules inside a frame are supported; connected table edges remain excluded. Nearby labels limit field height and overlapping label tails are trimmed; text size fits the detected space. Noisy scans, slanted/irregularly dotted lines and table cells can still be missed.
-10. Click the PDF name in its header to rename it in the same vault folder. Enter saves; Escape cancels. Pending edits save before renaming through Obsidian's file manager, which handles links according to your vault settings.
+## Draw, highlight and hold for shapes
 
-11. **Settings → PDF Editor (Beta)** provides a **PDF toolbar top offset** slider (0–160 px, default 0) to move the PDF controls and editing tools down. Changes apply to open PDFs. In fixed-height views, the page area becomes shorter by the chosen offset. **Floating PDF toolbar** is off by default; when enabled, both rows dock in view as the note scrolls. The same offset leaves an opaque empty area above them, so the PDF does not show through. They fade in and out quickly, with no animation when reduced motion is preferred. It also has native Obsidian toggles for **Detect answer lines on PDF open** (off by default) and **Wrap across consecutive answer lines** (on by default). Automatic detection scans a newly opened PDF only when it has at most the configured page limit (25 by default, 1–100). Larger PDFs show a skip message; the toolbar scan button covers at most 100 pages per action, starting at the current page, with progress and cancellation. The 100-page maximum bounds work per scan rather than the PDF size. Detection adds no fields until a suggestion is clicked. Native viewer replacement after a save does not trigger another scan. Wrapping settings apply to newly created answers and adjacent-line extensions.
+- **Pen (P)** draws with optional smoothing; **Highlighter (H)** adds transparent strokes. **Eraser (E)** removes a whole owned stroke.
+- Enable **Draw & hold shapes** in Pen settings, draw a line, rectangle, triangle, ellipse/circle or arrow, then pause at the endpoint. Keep holding to resize; lift to finish. Uncertain shapes stay freehand.
+- Hold a highlighter stroke still to straighten it, or start with Shift for a horizontal line. The settings button beside each tool opens colors, widths and a brush preview.
 
-PDF pages are rendered near the viewport; fast scrolling cancels distant renders and releases distant bitmap and text-layer memory. Scrolling checks nearby page shells rather than every page. Large documents still load page metadata and rewrite the complete PDF on save. Saving reuses a verified draft for the same revision. The visible document, selection and scroll position stay mounted during ordinary saves. Pointer interruption preserves collected pen points; Escape explicitly cancels. Two views share the document and serialized writer, and gesture ownership prevents one view cancelling another view's drawing.
+![Drawing, highlighting and holding to snap a shape](assets/demos/ink-and-shapes.gif)
 
-The editor uses Obsidian's theme, icons, existing embeds and vault storage. A compatibility adapter discovers native hosts; the visible renderer uses the public PDF.js loader. Native Obsidian page DOM is no longer the editing surface. The native viewer remains available when a document cannot be edited. This version does not reproduce every native PDF viewer feature: outlines, thumbnails, native PDF context-menu actions and updating already-open views from new subpath links require further integration. Search navigates matching pages and highlights matching text spans; it is not OCR.
+## Select, rearrange and undo
 
-## Recovery
+- **Select (V)** lets you select printed text and follow links. Drag from blank space to select your boxes and drawings together; Shift-click changes the selection.
+- Move a selection by dragging or using arrow keys. Cmd/Ctrl+C, V and D copy, paste and duplicate editable objects; Delete removes them. Ordinary pasted text can become a new text box.
+- **Undo/Redo** keeps 50 editing actions per session, including saved edits. Outside text inputs, use Cmd/Ctrl+Z and Shift+Cmd/Ctrl+Z. Escape cancels a gesture or clears the selection.
 
-Saved text boxes and drawings are stored in the normal PDF, where they remain editable. Because PDF Editor is in beta, it offers an optional full-PDF original copy before the first save, so you can return to the earlier whole PDF after Undo history has ended. This is on by default. There is no backup for every save, line or character. Turning original copies off or deleting existing copies does not remove saved edits or make them uneditable. Temporary recovery drafts for unsaved work remain active even when original copies are off.
+![Selecting, duplicating and undoing PDF objects](assets/demos/selection-and-undo.gif)
 
-When original copies are enabled, one verified **original.pdf** is retained before the first overwrite in the plugin's hidden recovery storage (`.obsidian/plugins/pdf-form-studio/recovery`, or the vault's configured settings directory). Further saves reuse it. Turning the setting off skips new originals but keeps existing ones, including their checksum checks. Turning it back on later creates a copy from the PDF as it exists at that later save; it cannot recreate an older original. There is no backup folder in the note list.
+## Navigate and save
 
-Upgrading moves the entire old **PDF Form Studio Backups** folder into hidden storage, including older unindexed copies. A migration receipt lets an interrupted index update resume after restart. Copies are moved without deleting their contents. When enabled, newly tracked PDFs retain one original. Restoring can use up to two alternating **before-restore** slots, keeping the previous complete reversal available if the next copy is interrupted. Missing indexed originals block saving rather than being silently replaced with newer content.
+- Use the header for page navigation, fit-width zoom, rotation and text search. Click the filename to rename the PDF in its current vault folder.
+- Turn on **Floating toolbar** in PDF options to keep navigation and editing tools visible while scrolling a note. Settings also provide a top offset and optional answer-line detection on open.
+- Edits save automatically after a pause. **Saved** means the vault PDF was written and read back successfully. Use the disk button or Cmd/Ctrl+S to save now; the page and selection stay in place.
 
-The options menu offers **Recovery copies…**, showing purpose, storage location and current copy sizes, and **Preview original PDF**, **Restore original backup…** and **Undo last restore…**. The original opens in a read-only paginated preview. Restoring asks before replacing the PDF and discarding pending edits; it first verifies a recovery copy of the current saved PDF, so the restore can be reversed.
+![Navigating pages and viewing PDF recovery options](assets/demos/navigation-and-recovery.gif)
 
-If a source PDF is damaged or conflicts with a pending draft, use the command **Export pending PDF recovery draft**. It writes a verified copy beside the source under a new name and does not replace or clear either file. This command does not require the source PDF to open successfully.
+## Work inside your notes
 
-Pending edits are serialized into a verified draft PDF in a hidden journal, with two sequenced slots preserving the latest complete copy during the next write. Explicit saving checkpoints before writing the source too. Opening the PDF after restart recovers that draft; a journal identical to the committed source is recognized as already saved. A baseline checksum prevents an older draft from overwriting a newer source PDF; detected external changes stop stale saves. **Reload PDF** asks before discarding pending text and marks. Reload/restore temporarily block editing while replacing the document.
+Use the editor in a PDF tab, a normal `![[worksheet.pdf]]` embed in Reading view or Live Preview, or a pop-out window. Existing `#page=` and numeric `#height=` embed options are respected.
 
-The plugin makes no network requests and has no telemetry or account requirement. It reads and writes PDFs in your vault and keeps drafts and recovery copies under the vault's Obsidian settings directory; it does not access files outside the vault. Saved PDFs follow normal vault sync; hidden drafts and recovery copies are local plugin storage, and their synchronization depends on your sync tool's settings. Copy the recovery directory separately when moving a vault or reinstalling the plugin. Removing the plugin's entire folder also removes its local recovery data. Originals and migrated legacy copies have no automatic expiry; with the toggle on, each edited PDF keeps one original, while restore copies use bounded alternating slots. Storage can therefore grow as you edit more PDFs, especially large ones. **Settings → PDF backups** has a toggle that affects only PDFs without an existing original; it shows the current size and opens the folder. **Delete backups…** permanently removes stored recovery copies only after every editor view is closed and pending drafts are resolved. The next save creates a new original only if the toggle is on. Do not delete individual indexed originals in the file manager: a missing original blocks later saves. Drafts are cleared once all edits are saved, or after an explicit discard/reload or restore. Do not downgrade to an older build while edits remain pending.
+![Editing PDFs in Live Preview, Reading view and a pop-out window](assets/demos/embeds-and-popouts.gif)
+
+## Recovery and privacy
+
+**Keep original copies for new PDFs** is on by default. It retains one verified whole-PDF original before the first overwrite, rather than a copy of every edit. Turning it off keeps existing originals; turning it on later cannot recreate an earlier version.
+
+Use **PDF options → Recovery copies…** to inspect copies, **Preview original PDF** to view one, and **Restore original backup…** to restore it after confirmation. **Undo last restore…** reverses that restore using a verified before-restore copy. **Export pending PDF recovery draft** saves a retained draft beside the source under a new filename, including when the source is damaged.
+
+Temporary recovery drafts remain active even with original copies off. A draft is durable only after its checkpoint succeeds; a crash before that point can lose recent edits. Interrupted file/folder moves can leave recovery copies associated with an old path. Real power-loss and disk-failure recovery are not established.
+
+Everything stays in the vault: no network requests, telemetry or account. Recovery data lives under `.obsidian/plugins/pdf-form-studio/recovery` (or the vault's configured settings directory). Hidden recovery files may not be covered by your sync settings. Copy them separately when moving a vault or reinstalling; deleting the plugin folder deletes its local recovery data. Settings show storage use and provide guarded cleanup. Originals have no automatic expiry; do not manually delete indexed copies or downgrade with unsaved edits.
 
 ## Current limits
 
-- Smooth ink stabilizes strokes; it does not rewrite handwriting or perform OCR. Cube and multistroke recognition are deferred pending grouping, labeled examples and false-positive evaluation. Physical stylus/pressure testing remains outstanding.
-- Moving/resizing applies to boxes created by this plugin; existing authored form fields keep their original geometry. Printed PDF content itself is not a text box and cannot be rewritten by clicking it.
-- Marker and Scribble use constant widths. Marker is freehand rather than tied to selected words. No pressure/Wacom support, partial-stroke erasing, OCR or handwriting recognition. Session undo/redo is limited to 50 editing actions and is not preserved after reopening; ordinary focused text undo uses the browser's editing behavior. Only this plugin's marks can be moved, erased or removed here; unrelated annotations are preserved.
-- Other form controls are preserved, but changes to checkboxes, radio groups and dropdowns are not saved by this version.
-- Read-only, password, rich text, hidden and locked fields retain their original appearances and cannot be edited. XFA, encrypted PDFs, PDFs containing signature fields, duplicate field names and malformed page/form trees are rejected for editing.
-- The bundled fonts support the tested German, Latin and Greek text. Formatting applies to whole fields, with three font families and palette colors; selected substrings do not have independent styles. Unsupported glyphs produce a save error; there is no CJK/emoji font fallback. Growth stops at the page edge, where an overflow outline asks you to widen the box or reduce its text size. Original authored form regions can still clip long answers.
-- Native integration uses an undocumented compatibility adapter. Other app versions/platforms, arbitrary PDFs and third-party PDF plugins need further testing. Large PDFs are rewritten on save; this is a single-writer editor. Do not edit the same PDF in another app or device while it is open here. Obsidian's vault write API cannot atomically reject a concurrent external update.
-- A draft is durable only after its checkpoint succeeds. Use **Saved** before sending the PDF to another app. A crash before the short debounce/checkpoint completes can lose the latest edits. Disk failures or unsupported text can prevent checkpointing; save errors leave pending edits in the session.
+- **Single writer:** external-change checks reduce conflicts, but Obsidian's write API cannot atomically reject a concurrent update. Large PDFs are rewritten in full on save and can use substantial memory.
+- **PDF support:** encrypted, XFA, signature-bearing and malformed PDFs, including duplicate field names, are rejected for editing. Unsupported documents return to Obsidian's native viewer. Read-only, password, rich-text, hidden and locked fields retain their original appearance.
+- **Editing scope:** printed text cannot be rewritten. Existing authored fields keep their geometry. Checkbox, radio and dropdown changes are not saved. Only this plugin's drawings can be moved or erased here; unrelated annotations are preserved.
+- **Ink and detection:** constant-width strokes, no pressure sensitivity, OCR or handwriting recognition. Physical stylus/Wacom testing is outstanding. Answer-line detection is a raster heuristic and can miss noisy scans or table cells. Manual scans cover at most 100 pages per action; automatic scanning defaults to a 25-page limit.
+- **Text and viewer:** whole-field formatting, no CJK/emoji font fallback; unsupported glyphs cause a save error. Text can clip at the page edge. Native outlines, thumbnails and some context-menu/subpath behavior are not reproduced. Search requires existing PDF text.
+- **Compatibility:** the native-host adapter uses undocumented Obsidian internals. The checks below cover specific desktop versions and actions; broad third-party plugin compatibility is not established.
 
-## Install and develop
+## Install
 
-Copy `main.js`, `manifest.json` and `styles.css` into `.obsidian/plugins/pdf-form-studio/`, then enable **PDF Editor (Beta)** in Community plugins. The installed ID remains `pdf-form-studio` for compatibility. Release tags create private **draft** releases with those assets.
+This is not yet a published Community plugin. Version 0.7.11 is prepared locally, with no published tag or release. Copy `main.js`, `manifest.json` and `styles.css` from your build into `.obsidian/plugins/pdf-form-studio/`, then enable **PDF Editor (Beta)** in Community plugins. Existing settings use the same plugin ID.
 
-Use Node.js 24:
+## Build and test
+
+Use Node.js 24 and an isolated development vault:
 
 ```sh
 npm ci
 npm run check
 npm run test:stress
-npm run build
 npm run install:dev -- "/absolute/path/to/initialized-development-vault"
 ```
 
-The installer does not enable the plugin. Reload Obsidian after rebuilding. `npm run dev` watches source. The desktop minimum of 1.13.7 matches the tested app; it is not a claim about older versions.
+`check` runs lint, tests, TypeScript, the production build and metadata validation. The installer copies the three plugin assets without enabling the plugin. Reload Obsidian after rebuilding; `npm run dev` watches source.
 
-Original code is MIT licensed. PDF-LIB and fontkit are bundled for writing; Perfect Freehand provides ink streamlining; Obsidian's PDF.js supports the persistent page surface, inspection and recovery preview. Upstream PDF.js is a test dependency only. The Noto fonts are SIL OFL licensed. [Third-party notices](THIRD_PARTY_NOTICES.txt) are embedded in `main.js`.
+## Verified scope
+
+| Desktop app | Evidence |
+| --- | --- |
+| Linux · Obsidian 1.14.4 | Actual UI checks in PDF tabs, Live Preview, Reading view and pop-outs. Covered text/answer detection, formatting, text and mixed-object selection, move/duplicate, deletion, undo/redo, ink/highlighter/eraser, held circle, navigation/zoom/rotation/search, and original preview/restore/undo restore. |
+| Linux · Obsidian 1.13.7 | Narrower smoke pass: startup/rendering, existing text edits, new ink, saving, page navigation, answer-line detection/typing and reopening in Live Preview and Reading embeds. |
+| macOS · Obsidian 1.14.4 | User-confirmed use; not independently rerun in this verification pass. |
+
+The Linux checks ran on 2026-10-09. Saved fields and ink were independently inspected, and restoring the original reproduced its SHA-256 checksum. The declared desktop minimum remains **1.13.7**. No Windows or mobile compatibility claim.
+
+**204 tests and 4 stress workloads passed**, along with lint, TypeScript and build; the dependency audit reported **0 known vulnerabilities** on 2026-10-09. These checks do not establish physical pen behavior, power-loss durability or unrestricted PDF compatibility.
+
+Exact `x.y.z` tags create **draft** releases. Release publication and Community submission still need a distribution decision and broader testing.
+
+## License
+
+Original code is [MIT licensed](LICENSE). PDF-LIB, fontkit and Perfect Freehand are bundled; rendering uses Obsidian's PDF.js. Bundled Noto fonts use the SIL OFL. [Third-party notices](THIRD_PARTY_NOTICES.txt) are included in the build.
