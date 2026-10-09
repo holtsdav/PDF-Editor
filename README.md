@@ -13,7 +13,7 @@ Write, fill answers, highlight and draw on PDFs without leaving Obsidian. Works 
 
 ## Get started
 
-Not yet listed in Community plugins. For manual installation, put `main.js`, `manifest.json` and `styles.css` in your vault’s `.obsidian/plugins/pdf-form-studio/` folder, then enable **PDF Editor (Beta)** in Obsidian.
+[Install from Community plugins](https://community.obsidian.md/plugins/pdf-form-studio), then enable **PDF Editor (Beta)** in Obsidian.
 
 Desktop only, Obsidian **1.13.7+**. Tested on Linux 1.14.4, with a basic check on 1.13.7; macOS 1.14.4 is user-confirmed. Windows and mobile are unverified.
 
