@@ -29,7 +29,7 @@ export class VaultSessions {
   constructor(app: App, font: PdfFonts, backups: Record<string, BackupRecord>, persist: () => Promise<void>, preferences: ToolPreferences = loadToolPreferences(null)) {
     this.preferences = preferences;
     this.app = app; this.font = font; this.backups = backups; this.persist = persist;
-    this.root = `${app.vault.configDir}/plugins/pdf-form-studio/recovery`;
+    this.root = `${app.vault.configDir}/plugins/pdf-editor/recovery`;
     const adapter = app.vault.adapter;
     this.journal = new DraftJournal(adapter);
     this.recovery = new RecoveryCopies({

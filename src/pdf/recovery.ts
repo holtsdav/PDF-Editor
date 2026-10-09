@@ -1,6 +1,6 @@
 import { equalBytes } from './text-session.ts';
 
-export const BACKUP_ROOT = '.obsidian/plugins/pdf-form-studio/recovery';
+export const BACKUP_ROOT = '.obsidian/plugins/pdf-editor/recovery';
 export const LEGACY_BACKUP_ROOT = 'PDF Form Studio Backups';
 export type BackupPurpose = 'edit' | 'restore';
 export type BackupKind = 'original' | 'recovery';

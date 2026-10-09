@@ -6,6 +6,7 @@ const [manifest, pkg, versions] = await Promise.all([
   readJson('manifest.json'), readJson('package.json'), readJson('versions.json')
 ]);
 assert.match(manifest.id, /^[a-z]+(?:-[a-z]+)*$/);
+assert.equal(manifest.id, 'pdf-editor', 'The installed identity must match the published plugin ID.');
 assert(!manifest.id.includes('obsidian') && !manifest.id.endsWith('plugin'));
 assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
 assert.match(manifest.minAppVersion, /^\d+\.\d+\.\d+$/);
