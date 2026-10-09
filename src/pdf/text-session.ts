@@ -221,11 +221,15 @@ export class TextSession {
     const field = this.snapshot.fields.find(field => field.name === name);
     if (!field || field.readOnly || this.conflicted) throw new Error('This text cannot be formatted.');
     const next = { fontFamily: field.fontFamily, fontSize: field.fontSize, color: [...field.color] as PdfColor, ...format };
+    if (field.autoSize && format.fontSize === undefined) next.autoSize = true; else delete next.autoSize;
+    if (!field.owned && format.fontSize === undefined && (!this.changes.formats.has(name) || this.changes.formats.get(name)?.preserveWidgetSizes)) next.preserveWidgetSizes = true;
+    else delete next.preserveWidgetSizes;
     if (!['sans', 'serif', 'mono'].includes(next.fontFamily) || !Number.isFinite(next.fontSize) || next.fontSize < 1 || next.fontSize > 200 || !validColor(next.color)) throw new Error('Invalid text formatting.');
-    if (next.fontFamily === field.fontFamily && next.fontSize === field.fontSize && next.color.every((v, i) => v === field.color[i])) return;
+    if (next.fontFamily === field.fontFamily && next.fontSize === field.fontSize && next.color.every((v, i) => v === field.color[i]) && next.autoSize === field.autoSize) return;
     this.rememberText(name);
     Object.assign(field, next);
-    for (const widget of field.widgets) { delete widget.fontSize; delete widget.color; }
+    if (!next.autoSize) delete field.autoSize;
+    for (const widget of field.widgets) { if (!next.preserveWidgetSizes) delete widget.fontSize; if (format.color) delete widget.color; }
     this.changes.formats.set(name, next); this.changes.values.set(name, field.value); this.fitRuledField(name); this.changed();
   }
 

@@ -124,3 +124,31 @@ test('the writer refuses destructive prefix collisions and locked owned fields b
   field.acroField.getWidgets()[0]!.dict.set(PDFName.of('F'), PDFNumber.of(128)); changes.deleted = new Set([legacyBlank]);
   await assert.rejects(writeTextPdf(await pdf.save(), changes, font), /Only editable/);
 });
+
+test('formatting an auto-sized authored field preserves zero Tf until an explicit size is selected, including undo/redo', async () => {
+  const pdf = await PDFDocument.create(), page = pdf.addPage(), field = pdf.getForm().createTextField('Auto');
+  field.addToPage(page, { x: 20, y: 300, width: 200, height: 30 }); field.setFontSize(0);
+  const file = memory(await pdf.save({ updateFieldAppearances: false })), session = await TextSession.open(file.store, font);
+  const size = async () => Number(/([\d.]+)\s+Tf/.exec((await PDFDocument.load(file.bytes())).getForm().getTextField('Auto').acroField.getDefaultAppearance()!)?.[1]);
+  assert.equal(session.snapshot.fields[0]!.autoSize, true);
+  session.setValue('Auto', 'Automatic sizing'); session.formatField('Auto', { color: [1, 0, 0] }); await session.save(); assert.equal(await size(), 0);
+  session.formatField('Auto', { fontFamily: 'mono' }); await session.save(); assert.equal(await size(), 0);
+  const reopened = await TextSession.open(file.store, font); assert.equal(reopened.snapshot.fields[0]!.autoSize, true);
+  reopened.formatField('Auto', { fontSize: 14 }); await reopened.save(); assert.equal(await size(), 14);
+  reopened.undoStroke(); await reopened.save(); assert.equal(await size(), 0);
+  reopened.redoStroke(); await reopened.save(); assert.equal(await size(), 14);
+});
+
+test('color and family changes retain individual widget sizes, and an explicit size remains explicit across later formatting', async () => {
+  const pdf = await PDFDocument.create(), page = pdf.addPage(), field = pdf.getForm().createTextField('Shared');
+  for (const y of [300, 400]) field.addToPage(page, { x: 20, y, width: 200, height: 30 });
+  field.setFontSize(16);
+  field.acroField.getWidgets()[0]!.setDefaultAppearance('/Helvetica 8 Tf 0 g');
+  field.acroField.getWidgets()[1]!.setDefaultAppearance('/Helvetica 0 Tf 0 g');
+  const file = memory(await pdf.save({ updateFieldAppearances: false })), session = await TextSession.open(file.store, font);
+  const sizes = async () => (await PDFDocument.load(file.bytes())).getForm().getTextField('Shared').acroField.getWidgets().map(widget => Number(/([\d.]+)\s+Tf/.exec(widget.getDefaultAppearance()!)?.[1]));
+  session.setValue('Shared', 'Widget styles'); session.formatField('Shared', { color: [1, 0, 0] }); await session.save(); assert.deepEqual(await sizes(), [8, 0]);
+  session.formatField('Shared', { fontFamily: 'mono' }); await session.save(); assert.deepEqual(await sizes(), [8, 0]);
+  session.formatField('Shared', { fontSize: 18 }); await session.save(); assert.deepEqual(await sizes(), [18, 18]);
+  session.formatField('Shared', { color: [0, 0, 1] }); await session.save(); assert.deepEqual(await sizes(), [18, 18]);
+});

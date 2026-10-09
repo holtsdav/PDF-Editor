@@ -27,6 +27,7 @@ export interface TextField {
   multiline: boolean;
   readOnly: boolean;
   owned: boolean;
+  autoSize?: true;
   alignment?: 'left' | 'center' | 'right';
   maxLength?: number;
   widgets: TextWidget[];
@@ -176,6 +177,7 @@ export async function readTextPdf(bytes: Uint8Array): Promise<TextSnapshot> {
         : field.acroField.dict.get(PDFName.of('PFSFont'))?.toString() === '/mono' || originalFont(pdf, field)?.startsWith('Courier') ? 'mono' : 'sans', color: defaultColor(da),
       multiline: field.isMultiline(), readOnly: !editableText(field),
       owned, alignment: field.getAlignment() === 1 ? 'center' : field.getAlignment() === 2 ? 'right' : 'left',
+      ...(!owned && size !== undefined && Number(size) === 0 ? { autoSize: true as const } : {}),
       maxLength: field.getMaxLength(), widgets, ...(ruled ? { ruled } : {})
     });
   }
@@ -279,7 +281,7 @@ export async function writeTextPdf(seed: Uint8Array, changes: TextChanges, fontB
     const format = changes.formats.get(name);
     const color = format?.color ?? defaultColor(originalDa);
     const originalSize = /([\d.]+)\s+Tf/.exec(originalDa)?.[1];
-    const size = format?.fontSize ?? changes.boxes.get(name)?.fontSize ?? (originalSize !== undefined ? Number(originalSize) : 14);
+    const size = format?.autoSize ? 0 : format?.fontSize ?? changes.boxes.get(name)?.fontSize ?? (originalSize !== undefined ? Number(originalSize) : 14);
     if (!Number.isFinite(size) || size < 0 || size > 200 || !validColor(color)) throw new Error('Invalid text formatting.');
     const da = `${setFillingRgbColor(...color)}\n${setFontAndSize(font.name, size)}`;
     field.acroField.setDefaultAppearance(da); field.acroField.dict.set(PDFName.of('PFSFont'), PDFName.of(family));
@@ -287,7 +289,7 @@ export async function writeTextPdf(seed: Uint8Array, changes: TextChanges, fontB
     const widgetDas = field.acroField.getWidgets().map((widget, index) => {
       const original = widgetDefaults[index] ?? originalDa;
       const widgetSize = /([\d.]+)\s+Tf/.exec(original)?.[1];
-      const next = !owned && !format ? `${setFillingRgbColor(...defaultColor(original))}\n${setFontAndSize(font.name, widgetSize !== undefined ? Number(widgetSize) : size)}` : da;
+      const next = !owned && (!format || format.preserveWidgetSizes) ? `${setFillingRgbColor(...(format?.color ?? defaultColor(original)))}\n${setFontAndSize(font.name, widgetSize !== undefined ? Number(widgetSize) : size)}` : da;
       widget.setDefaultAppearance(next); return next;
     });
     field.acroField.dict.set(PDFName.of('PFSKind'), PDFName.of(owned ? 'Text' : 'Form'));
@@ -295,7 +297,7 @@ export async function writeTextPdf(seed: Uint8Array, changes: TextChanges, fontB
     for (const ref of referencedObjects(pdf, field.acroField.getWidgets().flatMap(widget => widget.dict.lookupMaybe(PDFName.of('AP'), PDFDict)?.values() ?? []))) replaced.add(ref);
     field.updateAppearances(font, owned && field.isMultiline() ? multilineAppearance : undefined);
     // PDF-LIB resolves auto-size (0) while drawing. Retain that form option for future edits.
-    if (!owned && !format) {
+    if (!owned && (!format || format.preserveWidgetSizes)) {
       field.acroField.setDefaultAppearance(da);
       field.acroField.getWidgets().forEach((widget, index) => widget.setDefaultAppearance(widgetDas[index]!));
     }
@@ -322,7 +324,7 @@ export async function writeTextPdf(seed: Uint8Array, changes: TextChanges, fontB
     const field = verified.getForm().getTextField(name);
     const da = field.acroField.getDefaultAppearance() ?? '';
     if (field.acroField.dict.get(PDFName.of('PFSFont'))?.toString() !== '/' + format.fontFamily
-      || Math.abs(Number(/([\d.]+)\s+Tf/.exec(da)?.[1]) - format.fontSize) > 0.001
+      || Math.abs(Number(/([\d.]+)\s+Tf/.exec(da)?.[1]) - (format.autoSize ? 0 : format.fontSize)) > 0.001
       || defaultColor(da).some((value, i) => Math.abs(value - format.color[i]!) > 0.001)) throw new Error('PDF text formatting verification failed.');
   }
   for (const name of changes.deleted) {

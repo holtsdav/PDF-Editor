@@ -1,6 +1,6 @@
 export type FontFamily = 'sans' | 'serif' | 'mono';
 export type PdfColor = [number, number, number];
-export interface TextFormat { fontFamily: FontFamily; fontSize: number; color: PdfColor }
+export interface TextFormat { fontFamily: FontFamily; fontSize: number; color: PdfColor; autoSize?: true; preserveWidgetSizes?: true }
 export type PdfFonts = Uint8Array | Record<FontFamily, Uint8Array>;
 export const fontNames: Record<FontFamily, string> = { sans: 'Sans', serif: 'Serif', mono: 'Mono' };
 export const fontFaces: Record<FontFamily, string> = { sans: 'PDF Form Studio Text', serif: 'PDF Form Studio Serif', mono: 'PDF Form Studio Mono' };
