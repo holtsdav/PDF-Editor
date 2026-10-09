@@ -2,7 +2,7 @@ import { Component, Menu, Modal, Notice, Scope, setIcon, setTooltip } from 'obsi
 import type { App } from 'obsidian';
 import type { NativePage, NativePdf, EditorSurface } from '../compat/native-pdf';
 import { pdfRectangle, screenRectangle } from '../compat/native-pdf';
-import type { Rect, TextField } from '../pdf/text-engine';
+import type { Rect, TextField, TextWidget } from '../pdf/text-engine';
 import type { BackupKind } from '../pdf/recovery';
 import { usePdfFont } from './pdf-font';
 import type { CopiedPdfObject, PdfObject, TextSession } from '../pdf/text-session';
@@ -320,7 +320,6 @@ export class TextEditor extends Component {
       endTyping: () => { this.selected = undefined; this.selectedStroke = undefined; this.focused = undefined; this.endTextEditing(); }
     }, this.app));
     this.unsubscribe = session.subscribe(() => { this.updateStatus(); this.refresh(); });
-    if (session.pruneEmptyBoxes()) this.scheduleSave();
   }
 
   private activateBox(name: string): void {
@@ -854,7 +853,7 @@ export class TextEditor extends Component {
       for (const { field, widget, key } of fieldWidgets) {
         let control = entry.controls.get(key);
         if (!control) { this.mountField(entry, field, key); control = entry.controls.get(key)!; }
-        if (!control.preview) this.positionField(entry, control, field, widget.rect, widget.rotation);
+        if (!control.preview) this.positionField(entry, control, field, widget.rect, widget.rotation, widget);
         if (!this.composing.has(control.input) && control.input.value !== field.value) control.input.value = field.value;
         control.input.disabled = field.readOnly;
         control.input.readOnly = (this.session.status === 'conflict' || this.session.replacing) || this.editing !== field.name;
@@ -864,6 +863,7 @@ export class TextEditor extends Component {
         control.frame.classList.toggle('is-answer-field', this.answerFields.has(field.name) || !!field.ruled);
         if (this.answerFields.has(field.name) || field.ruled) labelOverlay(control.frame, field.ruled ? 'Ruled answer block. Click to edit; text wraps along the printed lines.' : 'Detected answer. Click to edit; Tab or Shift+Tab to change answer lines.');
         control.frame.classList.toggle('is-editing', this.editing === field.name);
+        control.frame.classList.toggle('is-empty', !field.value.trim());
         control.frame.classList.toggle('is-selected', field.name === this.selected);
         control.frame.classList.toggle('is-locked', (this.session.status === 'conflict' || this.session.replacing) || field.readOnly || (field.owned && field.widgets.length !== 1));
       }
@@ -882,7 +882,7 @@ export class TextEditor extends Component {
     this.selection?.update(pages);
   }
 
-  private positionField(entry: PageLayer, control: FieldControl, field: TextField, rect: Rect, rotation: number): void {
+  private positionField(entry: PageLayer, control: FieldControl, field: TextField, rect: Rect, rotation: number, widget?: TextWidget): void {
     const { frame, input } = control;
     const [left, top, right, bottom] = screenRectangle(entry.page.viewport, rect);
     // PDF widget appearance rotation is counterclockwise; viewport/CSS is clockwise.
@@ -893,8 +893,16 @@ export class TextEditor extends Component {
     frame.style.height = `${angle === 90 || angle === 270 ? right - left : bottom - top}px`;
     frame.style.transform = `rotate(${angle}deg)`;
     input.style.fontFamily = `'${fontFaces[field.fontFamily]}', ${field.fontFamily === 'serif' ? 'serif' : field.fontFamily === 'mono' ? 'monospace' : 'sans-serif'}`;
-    input.style.color = cssColor(field.color); input.style.caretColor = cssColor(field.color);
-    input.style.fontSize = `${field.fontSize * entry.page.viewport.scale}px`;
+    const color = widget?.color ?? field.color, size = widget?.fontSize ?? field.fontSize;
+    input.style.color = cssColor(color); input.style.caretColor = cssColor(color);
+    input.style.fontSize = `${size * entry.page.viewport.scale}px`;
+    input.style.textAlign = field.alignment ?? 'left';
+    const appearance = widget?.appearance;
+    frame.style.backgroundColor = appearance?.backgroundColor ? cssColor(appearance.backgroundColor) : '';
+    frame.style.borderColor = appearance?.borderColor ? cssColor(appearance.borderColor) : 'transparent';
+    frame.style.borderStyle = appearance?.borderStyle === 'underline' ? 'solid' : appearance?.borderStyle ?? 'solid';
+    const borderWidth = Math.max(0, appearance?.borderWidth ?? 0) * entry.page.viewport.scale;
+    frame.style.borderWidth = appearance?.borderStyle === 'underline' ? `0 0 ${borderWidth}px` : `${borderWidth}px`;
     input.style.padding = `${entry.page.viewport.scale}px`;
     const offset = field.ruled ? Math.max(0, (field.ruled.spacing - field.fontSize * 1.2) / 2) * entry.page.viewport.scale : 0;
     input.style.lineHeight = field.ruled ? `${field.ruled.spacing * entry.page.viewport.scale}px` : '1.2';
@@ -908,6 +916,7 @@ export class TextEditor extends Component {
     const doc = entry.layer.ownerDocument;
     const frame = doc.createElement('div'); frame.className = 'pdf-form-studio-box';
     frame.classList.toggle('is-added', field.owned);
+    frame.classList.toggle('is-form-field', !field.owned);
     const input = field.owned || field.multiline ? doc.createElement('textarea') : doc.createElement('input');
     const control: FieldControl = { frame, input };
     if (input instanceof doc.defaultView!.HTMLInputElement) input.type = 'text';
@@ -1001,7 +1010,7 @@ export class TextEditor extends Component {
     shortcutProxy.setAttribute('aria-label', 'Selected PDF text box');
     frame.append(shortcutProxy);
     const owned = this.session!.snapshot.fields.find(field => field.name === name)!.owned;
-    labelOverlay(frame, owned ? 'Text box. Click to select, drag to move, double-click or Enter to edit, Backspace to delete.' : 'Form field. Double-click or Enter to edit.');
+    labelOverlay(frame, owned ? 'Text box. Click to select, drag to move, double-click or Enter to edit, Backspace to delete.' : 'Form field. Click to edit.');
     const labels: Record<ResizeHandle, string> = {
       n: 'top', ne: 'top right', e: 'right', se: 'bottom right', s: 'bottom', sw: 'bottom left', w: 'left', nw: 'top left'
     };
@@ -1020,6 +1029,7 @@ export class TextEditor extends Component {
       this.selected = name; this.selectedStroke = undefined; this.updateStatus(); this.refresh();
     };
     frame.addEventListener('focus', () => {
+      if (!owned && this.session?.status !== 'conflict' && !this.session?.replacing) { input.focus({ preventScroll: true }); return; }
       this.activateBox(name); this.endTextEditing(name);
       select(); shortcutProxy.focus({ preventScroll: true });
     });
@@ -1065,7 +1075,7 @@ export class TextEditor extends Component {
       if (event.target === input && this.editing === name) return;
       const field = this.session?.snapshot.fields.find(field => field.name === name);
       if (!field || field.readOnly) return;
-      if ((this.answerFields.has(name) || this.session?.snapshot.fields.find(field => field.name === name)?.ruled) && !event.shiftKey && !(event.target as HTMLElement).closest('[data-resize], [data-edge]')) {
+      if ((!owned || this.answerFields.has(name) || field.ruled) && !event.shiftKey && !(event.target as HTMLElement).closest('[data-resize], [data-edge]')) {
         event.preventDefault(); event.stopPropagation(); this.selection?.clear(); input.focus({ preventScroll: true }); return;
       }
       event.preventDefault(); event.stopPropagation(); select(); frame.focus({ preventScroll: true });

@@ -66,6 +66,7 @@ export class TextSession {
   private editEpoch = 0;
   private waitingForInteraction = false;
   private textEditors = new Map<string, number>();
+  private persistedFieldNames: Set<string>;
   private replacements = 0;
   get replacing(): boolean { return this.replacements > 0; }
   private assertAvailable(): void {
@@ -81,7 +82,8 @@ export class TextSession {
   }
   pruneEmptyBoxes(only?: string): number {
     if (this.conflicted || this.replacing) return 0;
-    const empty = this.snapshot.fields.filter(field => field.owned && !field.readOnly && !field.value.trim()
+    const empty = this.snapshot.fields.filter(field => this.changes.added.has(field.name) && !this.persistedFieldNames.has(field.name)
+      && field.owned && !field.readOnly && !field.value.trim()
       && (!only || field.name === only) && !this.textEditors.has(field.name));
     for (const field of empty) this.delete(field.name);
     return empty.length;
@@ -89,6 +91,7 @@ export class TextSession {
 
   private constructor(store: PdfStore, font: PdfFonts, seed: Uint8Array, snapshot: TextSnapshot) {
     this.store = store; this.font = font; this.seed = seed; this.baseline = seed; this.snapshot = snapshot; this.seedStrokeIds = new Set(snapshot.strokes.map(stroke => stroke.id));
+    this.persistedFieldNames = new Set(snapshot.fields.map(field => field.name));
   }
 
   static async open(store: PdfStore, font: PdfFonts): Promise<TextSession> {
@@ -162,7 +165,7 @@ export class TextSession {
   delete(name: string, explicit = false): void {
     this.assertAvailable();
     const field = this.snapshot.fields.find(field => field.name === name);
-    if (!field?.owned) throw new Error('Only text boxes created here can be removed.');
+    if (!field?.owned || field.readOnly) throw new Error('Only editable text boxes created here can be removed.');
     if (this.status === 'conflict') throw new Error('Reload the PDF before removing text after an external change.');
     this.rememberText(name, false);
     if (this.changes.added.has(name)) this.changes.added.delete(name);
@@ -218,10 +221,16 @@ export class TextSession {
     const field = this.snapshot.fields.find(field => field.name === name);
     if (!field || field.readOnly || this.conflicted) throw new Error('This text cannot be formatted.');
     const next = { fontFamily: field.fontFamily, fontSize: field.fontSize, color: [...field.color] as PdfColor, ...format };
+    if (field.autoSize && format.fontSize === undefined) next.autoSize = true; else delete next.autoSize;
+    if (!field.owned && format.fontSize === undefined && (!this.changes.formats.has(name) || this.changes.formats.get(name)?.preserveWidgetSizes)) next.preserveWidgetSizes = true;
+    else delete next.preserveWidgetSizes;
     if (!['sans', 'serif', 'mono'].includes(next.fontFamily) || !Number.isFinite(next.fontSize) || next.fontSize < 1 || next.fontSize > 200 || !validColor(next.color)) throw new Error('Invalid text formatting.');
-    if (next.fontFamily === field.fontFamily && next.fontSize === field.fontSize && next.color.every((v, i) => v === field.color[i])) return;
+    if (next.fontFamily === field.fontFamily && next.fontSize === field.fontSize && next.color.every((v, i) => v === field.color[i]) && next.autoSize === field.autoSize) return;
     this.rememberText(name);
-    Object.assign(field, next); this.changes.formats.set(name, next); this.changes.values.set(name, field.value); this.fitRuledField(name); this.changed();
+    Object.assign(field, next);
+    if (!next.autoSize) delete field.autoSize;
+    for (const widget of field.widgets) { if (!next.preserveWidgetSizes) delete widget.fontSize; if (format.color) delete widget.color; }
+    this.changes.formats.set(name, next); this.changes.values.set(name, field.value); this.fitRuledField(name); this.changed();
   }
 
   private textState(): TextState {
@@ -541,6 +550,7 @@ export class TextSession {
     this.candidate = undefined; this.draftRevision = -1;
     this.changes = emptyChanges(); this.strokeHistory = []; this.strokeFuture = []; this.inkAction = undefined; this.inkOwner = undefined;
     this.seedStrokeIds = new Set(snapshot.strokes.map(stroke => stroke.id));
+    this.persistedFieldNames = new Set(snapshot.fields.map(field => field.name));
     this.revision = 0; this.savedRevision = 0;
   }
 
@@ -592,8 +602,10 @@ export class TextSession {
       if (!equalBytes(await this.store.read(), output)) return this.conflict();
       this.baseline = output;
       this.draftRevision = -1;
+      const savedSnapshot = await readTextPdf(output);
+      for (const field of savedSnapshot.fields) this.persistedFieldNames.add(field.name);
       if (this.snapshot.strokes.length) {
-        const saved = new Map((await readTextPdf(output)).strokes.map(stroke => [stroke.id, stroke.annotationId]));
+        const saved = new Map(savedSnapshot.strokes.map(stroke => [stroke.id, stroke.annotationId]));
         for (const stroke of this.snapshot.strokes) stroke.annotationId = saved.get(stroke.id);
       }
       this.savedRevision = revision;
