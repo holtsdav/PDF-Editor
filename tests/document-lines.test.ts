@@ -21,7 +21,7 @@ const bundle = await build({ entryPoints: ['src/ui/pdf-surface.ts'], bundle: tru
 const moduleUrl = new URL('../tmp/ui-tests/document-lines.mjs', import.meta.url);
 await mkdir(new URL('../tmp/ui-tests/', import.meta.url), { recursive: true }); await writeFile(moduleUrl, bundle.outputFiles[0]!.text);
 const { PdfSurface } = await import(moduleUrl.href);
-interface Entry { page: { getOperatorList?: () => Promise<OperatorList> }; native: { div: HTMLElement; number: number; viewport: object }; candidates?: Rect[]; suggestions?: HTMLElement }
+interface Entry { page: { getOperatorList?: () => Promise<OperatorList>; getViewport(options: { scale: number; rotation: number }): { width: number; height: number; convertToPdfPoint(x: number, y: number): number[] } }; native: { div: HTMLElement; number: number; viewport: object }; candidates?: Rect[]; suggestions?: HTMLElement }
 interface Harness {
   detectLines(targets?: Entry[]): Promise<void>; cancelLineScan(): void; clearSuggestions(): void; refreshSuggestions(): void;
   answerLineActions(): { title: string; run(): void; clear?: () => void };
@@ -207,6 +207,18 @@ test('a page scrolled away during text loading can render its text and links on 
     assert.equal(entry.painted, entry.version);
   } finally { dom.window.close(); }
 });
+test('invalid PDF.js coordinates cannot create answer suggestions or leave a scan canvas allocated', async () => {
+  const f = fixture([1]);
+  try {
+    const entry = f.surface.entries[0]!;
+    const viewport = entry.page.getViewport({ scale: 1, rotation: 0 });
+    entry.page.getViewport = () => ({ ...viewport, convertToPdfPoint: () => [NaN, 42] });
+    await assert.rejects(f.surface.detectLines(), /invalid point/);
+    assert.equal(entry.suggestions, undefined); assert.equal(entry.candidates, undefined);
+    assert(f.canvases.every(canvas => canvas.width === 0 && canvas.height === 0));
+  } finally { f.dispose(); }
+});
+
 test('manual scans of a long PDF run in 100-page sections from the current page', async () => {
   const f = fixture(Array(205).fill(0));
   try {

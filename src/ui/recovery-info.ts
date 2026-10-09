@@ -27,8 +27,9 @@ export class RecoveryInfo extends Modal {
         const size = item.size < 1024 ? `${item.size} bytes` : item.size < 1024 * 1024 ? `${(item.size / 1024).toFixed(1)} KB` : `${(item.size / 1024 / 1024).toFixed(2)} MB`;
         row.createSpan({ text: `${item.label} · ${size}` });
         if (item.kind) {
+          const kind = item.kind;
           const preview = row.createEl('button', { text: 'Preview' });
-          preview.onclick = () => { const modal = new RecoveryPreview(this.app, () => this.sessions.readRecovery(this.file, item.kind!)); this.previews.add(modal); modal.open(); };
+          preview.onclick = () => { const modal = new RecoveryPreview(this.app, () => this.sessions.readRecovery(this.file, kind)); this.previews.add(modal); modal.open(); };
         }
       }
     }).catch(error => { if (!this.closed) copies.createEl('p', { text: String(error) }); });

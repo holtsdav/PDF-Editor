@@ -1,3 +1,5 @@
+import { setTooltip } from 'obsidian';
+
 const labels = new WeakMap<HTMLElement, HTMLSpanElement>();
 
 /** Keep PDF overlay controls named for assistive technology without Obsidian's aria-label hover tooltip. */
@@ -14,6 +16,8 @@ export function labelOverlay(element: HTMLElement, text: string): void {
     element.setAttribute('aria-labelledby', label.id);
   }
   label.textContent = text;
+  // Tag only this control's tooltip; Obsidian attaches it to the document body.
+  setTooltip(element, text, { classes: ['pfs-overlay-tooltip'] });
   element.removeAttribute('aria-label');
   element.removeAttribute('title');
 }

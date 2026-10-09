@@ -419,12 +419,11 @@ export class TextEditor extends Component {
     if (!(target instanceof this.native.element.ownerDocument.defaultView!.Node)) return [];
     const field = this.shortcutField(target);
     if (field) return [{ kind: 'text', id: field }];
-    if (target instanceof this.native.element.ownerDocument.defaultView!.HTMLElement && target.classList.contains('pdf-form-studio-shortcut-proxy')) return this.selectedObjects();
+    if (target.instanceOf(this.native.element.ownerDocument.defaultView!.HTMLElement) && target.classList.contains('pdf-form-studio-shortcut-proxy')) return this.selectedObjects();
     if (this.isTextTarget(target)) {
-      const node = target instanceof this.native.element.ownerDocument.defaultView!.Node ? target : undefined;
       // Live Preview can keep its note editor as the keyboard target even
       // while the PDF selection owns the active Obsidian shortcut scope.
-      return node && !this.native.element.contains(node) && this.objectShortcutActive() ? this.selectedObjects() : [];
+      return !this.native.element.contains(target) && this.objectShortcutActive() ? this.selectedObjects() : [];
     }
     return this.selectedObjects();
   }
@@ -1041,7 +1040,7 @@ export class TextEditor extends Component {
       queueMicrotask(() => {
         const active = doc.activeElement;
         if (this.loaded && this.activeBox === name && active !== doc.body && active !== doc.documentElement && !(active && (frame.contains(active) || this.toolbar.contains(active)
-          || (active instanceof doc.defaultView!.Element && active.closest('.pfs-tool-popover'))))) this.endTextEditing();
+          || (active?.instanceOf(doc.defaultView!.Element) && active.closest('.pfs-tool-popover'))))) this.endTextEditing();
       });
     });
     frame.addEventListener('dblclick', event => {

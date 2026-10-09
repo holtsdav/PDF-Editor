@@ -10,6 +10,7 @@ import { decorativeFooterRules, excludeDecorativeFooters } from '../compat/pdf-a
 import { detectAnswerLines } from '../pdf/answer-lines';
 import { MAX_AUTO_DETECT_PAGES } from '../pdf/tool-preferences';
 import { labelOverlay } from './overlay-label';
+import { pdfPoint, pdfRectangle } from './pdf-geometry';
 import type { Rect } from '../pdf/text-engine';
 import type { TextField } from '../pdf/text-engine';
 
@@ -412,9 +413,9 @@ export class PdfSurface extends Component {
     if (this.closed || version !== entry.version || !this.nearViewport(entry)) return;
     for (const annotation of annotations as { subtype: string; rect: number[]; url?: string; dest?: string | unknown[] }[]) {
       if (annotation.subtype !== 'Link') continue;
-      const p = viewport.convertToViewportRectangle(annotation.rect);
+      const p = pdfRectangle(viewport.convertToViewportRectangle(annotation.rect));
       const link = entry.links.createEl('a', { cls: 'pfs-pdf-link', attr: { 'aria-label': annotation.url ?? 'Go to linked page', tabindex: '0' } });
-      Object.assign(link.style, { left: `${Math.min(p[0]!, p[2]!)}px`, top: `${Math.min(p[1]!, p[3]!)}px`, width: `${Math.abs(p[2]! - p[0]!)}px`, height: `${Math.abs(p[3]! - p[1]!)}px` });
+      Object.assign(link.style, { left: `${Math.min(p[0], p[2])}px`, top: `${Math.min(p[1], p[3])}px`, width: `${Math.abs(p[2] - p[0])}px`, height: `${Math.abs(p[3] - p[1])}px` });
       if (annotation.url && /^(https?:|mailto:)/i.test(annotation.url)) { link.href = annotation.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; }
       else if (annotation.dest) { link.href = '#'; link.onclick = event => { event.preventDefault(); void this.destination(annotation.dest!).catch(error => this.fail(error)); }; }
     }
@@ -510,8 +511,8 @@ export class PdfSurface extends Component {
           if (!this.scanCurrent(scan)) return [];
         }
       }
-      return lines.map(({ rect }) => { const a = base.convertToPdfPoint(rect[0], rect[1]), b = base.convertToPdfPoint(rect[2], rect[3]);
-          return [Math.min(a[0]!, b[0]!), Math.min(a[1]!, b[1]!), Math.max(a[0]!, b[0]!), Math.max(a[1]!, b[1]!)] as Rect; });
+      return lines.map(({ rect }) => { const a = pdfPoint(base.convertToPdfPoint(rect[0], rect[1])), b = pdfPoint(base.convertToPdfPoint(rect[2], rect[3]));
+          return [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[0], b[0]), Math.max(a[1], b[1])] as Rect; });
     } finally { scan.task = undefined; canvas.width = 0; canvas.height = 0; }
   }
   private async detectLines(targets: PageEntry[] = this.entries): Promise<void> {
