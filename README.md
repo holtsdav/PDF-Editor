@@ -21,4 +21,6 @@ Desktop only, Obsidian **1.13.7+**. Tested on Linux 1.14.4, with a basic check o
 
 **Beta:** keep backups and edit each PDF in only one app or device at a time. Wait for **Saved** and sync to finish before switching. Existing printed text cannot be rewritten; not every PDF is supported.
 
+The PDF picker enumerates vault file names to find PDFs. Copy and paste use the system clipboard when invoked in the active PDF editor; pasted text can become PDF content. PDF Editor does not poll the clipboard in the background.
+
 [MIT license](LICENSE) · [Third-party credits and licenses](THIRD_PARTY_NOTICES.txt)

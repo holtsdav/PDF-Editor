@@ -9,9 +9,10 @@ import type { PdfDraft } from '../src/pdf/text-session.ts';
 import { readTextPdf, renderTextPdf } from '../src/pdf/text-engine.ts';
 import { hitsStroke } from '../src/pdf/ink-geometry.ts';
 import { migrateRecovery } from '../src/pdf/recovery-migration.ts';
-import { BACKUP_ROOT, LEGACY_BACKUP_ROOT, loadBackups } from '../src/pdf/recovery.ts';
+import { LEGACY_BACKUP_ROOT, loadBackups } from '../src/pdf/recovery.ts';
 import type { BackupRecord } from '../src/pdf/recovery.ts';
 
+const BACKUP_ROOT = '.custom-config/plugins/pdf-editor/recovery';
 const fonts = {
   sans: new Uint8Array(await readFile(new URL('../assets/fonts/NotoSans-Regular.ttf', import.meta.url))),
   serif: new Uint8Array(await readFile(new URL('../assets/fonts/NotoSerif-Regular.ttf', import.meta.url))),
@@ -121,7 +122,7 @@ test('whole-field fonts, colors and sizes survive edits and produce actual appea
 
 test('hidden recovery migration moves all copies and resumes after an interrupted index write', async () => {
   const targetFiles = new Map<string, string>([[`${LEGACY_BACKUP_ROOT}/one/original.pdf`, 'original'], [`${LEGACY_BACKUP_ROOT}/older.pdf`, 'older']]);
-  const records: Record<string, BackupRecord> = loadBackups({ 'Answer.pdf': { original: `${LEGACY_BACKUP_ROOT}/one/original.pdf` } });
+  const records: Record<string, BackupRecord> = loadBackups({ 'Answer.pdf': { original: `${LEGACY_BACKUP_ROOT}/one/original.pdf` } }, BACKUP_ROOT);
   const store = {
     exists: async (path: string) => targetFiles.has(path) || [...targetFiles.keys()].some(key => key.startsWith(path + '/')),
     read: async (path: string) => targetFiles.get(path)!, write: async (path: string, value: string) => { targetFiles.set(path, value); },

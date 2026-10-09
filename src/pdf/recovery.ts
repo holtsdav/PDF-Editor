@@ -1,6 +1,5 @@
 import { equalBytes } from './text-session.ts';
 
-export const BACKUP_ROOT = '.obsidian/plugins/pdf-editor/recovery';
 export const LEGACY_BACKUP_ROOT = 'PDF Form Studio Backups';
 export type BackupPurpose = 'edit' | 'restore';
 export type BackupKind = 'original' | 'recovery';
@@ -10,14 +9,14 @@ export interface RecoveryStore {
   write(path: string, bytes: Uint8Array): Promise<void>;
 }
 
-export function isRecoveryPath(path: string, root = BACKUP_ROOT): boolean { return path.startsWith(root + '/') || path.startsWith(LEGACY_BACKUP_ROOT + '/'); }
+export function isRecoveryPath(path: string, root: string): boolean { return path.startsWith(root + '/') || path.startsWith(LEGACY_BACKUP_ROOT + '/'); }
 function safeRecoveryPath(path: string, root: string): boolean {
   return isRecoveryPath(path, root) && !path.includes('\\') && !path.split('/').some(part => part === '.' || part === '..');
 }
-export function loadBackups(value: unknown, root = BACKUP_ROOT): Record<string, BackupRecord> {
-  if (!value || typeof value !== 'object') return {};
+export function loadBackups(value: unknown, root: string): Record<string, BackupRecord> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
   const result: Record<string, BackupRecord> = Object.create(null) as Record<string, BackupRecord>;
-  for (const [source, saved] of Object.entries(value)) {
+  for (const [source, saved] of Object.entries(value as Record<string, unknown>)) {
     // 0.2.0 stored only the latest backup path. Reuse that file without copying it.
     if (typeof saved === 'string' && safeRecoveryPath(saved, root)) result[source] = { original: saved };
     else if (saved && typeof saved === 'object' && 'original' in saved && typeof saved.original === 'string' && safeRecoveryPath(saved.original, root)) {
@@ -32,6 +31,7 @@ export function loadBackups(value: unknown, root = BACKUP_ROOT): Record<string, 
 }
 
 export async function hash(bytes: Uint8Array): Promise<string> {
+  // Web Crypto is independent of DOM/window ownership, including pop-out views.
   const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes.slice().buffer);
   return Array.from(new Uint8Array(digest), value => value.toString(16).padStart(2, '0')).join('');
 }
@@ -44,7 +44,7 @@ export class RecoveryCopies {
   private root: string;
   private queues = new Map<string, Promise<string>>();
 
-  constructor(store: RecoveryStore, records: Record<string, BackupRecord>, persist: () => Promise<void>, root = BACKUP_ROOT) {
+  constructor(store: RecoveryStore, records: Record<string, BackupRecord>, persist: () => Promise<void>, root: string) {
     this.store = store; this.records = records; this.persist = persist; this.root = root;
   }
 

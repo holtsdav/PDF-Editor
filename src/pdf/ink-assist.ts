@@ -27,7 +27,7 @@ export function resampleInk(points: Point[], step: number): Point[] {
 export function smoothInk(points: Point[], enabled: boolean): Point[] {
   if (!enabled || points.length < 3 || length(points) < 3) return points.map(p => [...p]);
   const sampled = resampleInk(points, Math.max(0.8, length(points) / 3000));
-  const stabilized = getStrokePoints(sampled, { size: 1, streamline: 0.45, last: true }).map(p => p.point as Point);
+  const stabilized = getStrokePoints(sampled, { size: 1, streamline: 0.45, last: true }).map(p => p.point);
   if (stabilized.length < 3) return points.map(p => [...p]);
   // A small corner-cutting pass rounds sample jitter, without filling a stroke
   // outline or introducing different on-screen and exported path geometries.

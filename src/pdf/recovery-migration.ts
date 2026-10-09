@@ -28,7 +28,8 @@ export async function migrateRecovery(store: MigrationStore, root: string, recor
     await store.rename(LEGACY_BACKUP_ROOT, target);
   }
   for (const record of Object.values(records)) for (const kind of ['original', 'recovery'] as const) {
-    if (record[kind]?.startsWith(LEGACY_BACKUP_ROOT + '/')) record[kind] = target + record[kind]!.slice(LEGACY_BACKUP_ROOT.length);
+    const path = record[kind];
+    if (path?.startsWith(LEGACY_BACKUP_ROOT + '/')) record[kind] = target + path.slice(LEGACY_BACKUP_ROOT.length);
   }
   await persist(); await store.remove(receipt);
 }

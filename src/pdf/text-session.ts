@@ -131,10 +131,10 @@ export class TextSession {
     const field = this.snapshot.fields.find(field => field.name === name);
     if (!field?.ruled || !field.owned || field.readOnly || field.widgets.length !== 1) return;
     let font = this.metrics.get(field.fontFamily);
-    if (!font) { font = fontkit.create(this.font instanceof Uint8Array ? this.font : this.font[field.fontFamily]) as Font; this.metrics.set(field.fontFamily, font); }
+    if (!font) { font = fontkit.create(this.font instanceof Uint8Array ? this.font : this.font[field.fontFamily]); this.metrics.set(field.fontFamily, font); }
     const widget = field.widgets[0]!;
     const rows = Math.max(minimumRows, wrapText(field.value, widget.rect[2] - widget.rect[0] - 2,
-      text => font!.layout(text).glyphs.reduce((sum, glyph) => sum + glyph.advanceWidth, 0) * field.fontSize / font!.unitsPerEm).length);
+      text => font.layout(text).glyphs.reduce((sum, glyph) => sum + glyph.advanceWidth, 0) * field.fontSize / font.unitsPerEm).length);
     const next = growRuledBlock(widget.rect, field.ruled, rows, field.fontSize, this.snapshot.pages[widget.page - 1]!);
     if (widget.rect.every((n, i) => Math.abs(n - next.rect[i]!) < 0.001) && next.layout?.spacing === field.ruled.spacing && next.layout?.rows === field.ruled.rows) return;
     this.rememberText(name);

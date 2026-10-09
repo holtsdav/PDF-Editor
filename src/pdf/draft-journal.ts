@@ -19,7 +19,7 @@ export class DraftJournal {
   constructor(store: JournalStore) { this.store = store; }
 
   private async entries(base: string): Promise<Entry[]> {
-    const entries: Entry[] = []; let failure: unknown;
+    const entries: Entry[] = []; let failure: Error | undefined;
     for (const path of [base, base + '.previous']) {
       if (!await this.store.exists(path)) continue;
       try {
@@ -32,7 +32,7 @@ export class DraftJournal {
         const bytes = Uint8Array.from(atob(value.pdf), character => character.charCodeAt(0));
         if (await hash(bytes) !== value.pdfHash) throw new Error('The pending PDF draft failed verification.');
         entries.push({ path, sequence, draft: { bytes, baselineHash: value.baselineHash } });
-      } catch (error) { failure = error; }
+      } catch (error) { failure = error instanceof Error ? error : new Error('Unable to read the pending PDF draft.', { cause: error }); }
     }
     if (!entries.length && failure) throw failure;
     return entries.sort((a, b) => b.sequence - a.sequence);
