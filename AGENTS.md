@@ -40,6 +40,6 @@ This repository contains a desktop PDF editing beta for Obsidian. Read `README.m
 
 ## Release rules
 
-The installed ID remains `pdf-form-studio`; PDF_Editor is the repository name. Keep desktop-only scope while Electron is required. Verify the declared minimum Obsidian version against real app tests.
+The installed ID is `pdf-editor`; legacy `pdf-form-studio` annotation identifiers remain unchanged for compatibility; PDF_Editor is the repository name. Keep desktop-only scope while Electron is required. Verify the declared minimum Obsidian version against real app tests.
 
 Keep `package.json`, `manifest.json` and `versions.json` synchronized. Use exact `x.y.z` release tags without a `v` prefix. The release workflow creates drafts with `main.js`, `manifest.json` and `styles.css`; publication and Community submission require a separate decision. Check current official Obsidian submission requirements before submitting. Do not change repository visibility or install a GitHub App as part of routine release preparation.

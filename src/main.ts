@@ -37,7 +37,7 @@ export default class PdfEditor extends Plugin {
   async onload(): Promise<void> {
     const saved: unknown = await this.loadData();
     if (saved && typeof saved === 'object' && 'backups' in saved && saved.backups && typeof saved.backups === 'object') {
-      this.backups = loadBackups(saved.backups, `${this.app.vault.configDir}/plugins/pdf-form-studio/recovery`);
+      this.backups = loadBackups(saved.backups, `${this.app.vault.configDir}/plugins/pdf-editor/recovery`);
     }
     if (saved && typeof saved === 'object' && 'preferences' in saved) this.preferences = loadToolPreferences(saved.preferences);
     this.sessions = new VaultSessions(this.app, { sans: fontBytes, serif: serifBytes, mono: monoBytes }, this.backups, () => {
