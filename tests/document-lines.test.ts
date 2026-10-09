@@ -158,7 +158,7 @@ test('floating PDF controls and editing tools stay together without flickering a
     assert.equal(doc.querySelector('.pfs-floating-toolbar'), null, 'reduced motion restores the inline toolbar immediately');
   } finally { dom.window.close(); }
 });
-test('a page scrolled away during text loading can render its text and links on return', async () => {
+test('a page scrolled away during text loading renders text and valid links on return despite malformed annotations', async () => {
   const dom = new JSDOM('<body><div id="root"><div id="page"></div></div></body>');
   try {
     const doc = dom.window.document, div = doc.querySelector<HTMLElement>('#page')!;
@@ -183,7 +183,11 @@ test('a page scrolled away during text loading can render its text and links on 
         getViewport: () => viewport,
         render: () => ({ promise: Promise.resolve(), cancel() {} }),
         async getTextContent() { reads++; if (reads === 1) { textStarted(); await deferred; } if (reads === 3) { evictionTextStarted(); await evictedText; } return {}; },
-        async getAnnotations() { return [{ subtype: 'Link', rect: [1, 2, 3, 4], url: 'https://example.com' }]; }
+        async getAnnotations() { return [
+          { subtype: 'Link', rect: [1, NaN, 3, 4], url: 'https://invalid.example' },
+          { subtype: 'Link', rect: [1, 2, 3, 4], url: 'https://example.com' },
+          { subtype: 'Link', rect: [1, 2, Infinity, 4], url: 'https://invalid.example' }
+        ]; }
       } };
     const surface = Object.assign(Object.create(PdfSurface.prototype), { root: doc.querySelector('#root'), scroller, entries: [entry],
       paintedEntries: new Set(), closed: false, currentPage: 1, renderQueue: Promise.resolve(),
@@ -197,6 +201,7 @@ test('a page scrolled away during text loading can render its text and links on 
     scroller.scrollTop = 0; surface.paintVisible(); await surface.renderQueue;
     assert.equal(text.textContent, 'Page text');
     assert.equal(links.querySelectorAll('a').length, 1);
+    assert.equal(links.querySelector('a')?.href, 'https://example.com/');
     assert.equal(entry.painted, 1);
     entry.version++; surface.paintVisible(); await evictionStarted;
     scroller.scrollTop = 3000; surface.paintVisible();

@@ -413,7 +413,9 @@ export class PdfSurface extends Component {
     if (this.closed || version !== entry.version || !this.nearViewport(entry)) return;
     for (const annotation of annotations as { subtype: string; rect: number[]; url?: string; dest?: string | unknown[] }[]) {
       if (annotation.subtype !== 'Link') continue;
-      const p = pdfRectangle(viewport.convertToViewportRectangle(annotation.rect));
+      let p: Rect;
+      try { p = pdfRectangle(viewport.convertToViewportRectangle(annotation.rect)); }
+      catch { continue; } // A damaged link must not prevent the rest of the page from rendering.
       const link = entry.links.createEl('a', { cls: 'pfs-pdf-link', attr: { 'aria-label': annotation.url ?? 'Go to linked page', tabindex: '0' } });
       Object.assign(link.style, { left: `${Math.min(p[0], p[2])}px`, top: `${Math.min(p[1], p[3])}px`, width: `${Math.abs(p[2] - p[0])}px`, height: `${Math.abs(p[3] - p[1])}px` });
       if (annotation.url && /^(https?:|mailto:)/i.test(annotation.url)) { link.href = annotation.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; }
