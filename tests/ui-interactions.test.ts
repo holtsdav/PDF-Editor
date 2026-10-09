@@ -51,6 +51,7 @@ async function fixture(pageCount = 1, withKeymap = false, rotation = 0) {
   const session = await TextSession.open({ read: async () => bytes, write: async value => { bytes = value; }, backup: async () => 'original.pdf' }, font);
   const dom = new JSDOM(`<body><div id="editor"><div id="tools"></div>${Array.from({ length: pageCount }, (_, i) => `<div id="${i ? 'page' + (i + 1) : 'page'}"></div>`).join('')}</div><button id="outside">Outside</button></body>`, { pretendToBeVisual: true });
   const doc = dom.window.document;
+  Object.assign(dom.window.Node.prototype, { instanceOf(this: Node, type: typeof Node) { return this instanceof type; } });
   let clipboardText = '';
   Object.defineProperty(dom.window.navigator, 'clipboard', { configurable: true, value: {
     writeText: async (text: string) => { clipboardText = text; },

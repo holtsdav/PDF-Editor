@@ -88,7 +88,7 @@
   min-height: 0;
   border: 0;
   border-radius: 0;
-  background: transparent !important;
+  background: transparent;
   color: #161616;
   box-shadow: none;
   outline: none;
@@ -251,8 +251,8 @@
 
 .pfs-answer-suggestions { position: absolute; inset: 0; z-index: 6; pointer-events: none; }
 .pfs-page button.pfs-answer-suggestion { position: absolute; pointer-events: auto; cursor: text; padding: 0; min-height: 0; border: 1px dashed #1476e5; border-radius: 2px; background: rgb(20 118 229 / 8%); box-shadow: none; }
-/* Obsidian generates tooltips from accessible names even without title or aria-label. */
-body:has(.pfs-surface .pfs-page:hover) .tooltip { display: none !important; }
+/* Overlay controls retain accessible names without covering the PDF on hover. */
+.tooltip.pfs-overlay-tooltip { display: none; }
 .pfs-page button.pfs-answer-suggestion:hover, .pfs-page button.pfs-answer-suggestion:focus-visible { background: rgb(20 118 229 / 18%); outline: 2px solid #1476e5; }
 
 .pfs-object-selection {

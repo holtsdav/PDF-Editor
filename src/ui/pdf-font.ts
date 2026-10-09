@@ -10,7 +10,7 @@ const fonts = new WeakMap<Document, { faces: FontFace[]; users: number }>();
 export function usePdfFont(doc: Document): () => void {
   let entry = fonts.get(doc);
   if (!entry) {
-    const faces = ([['sans', fontBytes], ['serif', serif], ['mono', mono]] as const).map(([family, bytes]) => new doc.defaultView!.FontFace(fontFaces[family], bytes.slice().buffer as ArrayBuffer));
+    const faces = ([['sans', fontBytes], ['serif', serif], ['mono', mono]] as const).map(([family, bytes]) => new doc.defaultView!.FontFace(fontFaces[family], bytes.slice().buffer));
     entry = { faces, users: 0 }; fonts.set(doc, entry);
   }
   const shared = entry; shared.users++;

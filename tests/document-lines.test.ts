@@ -21,7 +21,7 @@ const bundle = await build({ entryPoints: ['src/ui/pdf-surface.ts'], bundle: tru
 const moduleUrl = new URL('../tmp/ui-tests/document-lines.mjs', import.meta.url);
 await mkdir(new URL('../tmp/ui-tests/', import.meta.url), { recursive: true }); await writeFile(moduleUrl, bundle.outputFiles[0]!.text);
 const { PdfSurface } = await import(moduleUrl.href);
-interface Entry { page: { getOperatorList?: () => Promise<OperatorList> }; native: { div: HTMLElement; number: number; viewport: object }; candidates?: Rect[]; suggestions?: HTMLElement }
+interface Entry { page: { getOperatorList?: () => Promise<OperatorList>; getViewport(options: { scale: number; rotation: number }): { width: number; height: number; convertToPdfPoint(x: number, y: number): number[] } }; native: { div: HTMLElement; number: number; viewport: object }; candidates?: Rect[]; suggestions?: HTMLElement }
 interface Harness {
   detectLines(targets?: Entry[]): Promise<void>; cancelLineScan(): void; clearSuggestions(): void; refreshSuggestions(): void;
   answerLineActions(): { title: string; run(): void; clear?: () => void };
@@ -158,7 +158,7 @@ test('floating PDF controls and editing tools stay together without flickering a
     assert.equal(doc.querySelector('.pfs-floating-toolbar'), null, 'reduced motion restores the inline toolbar immediately');
   } finally { dom.window.close(); }
 });
-test('a page scrolled away during text loading can render its text and links on return', async () => {
+test('a page scrolled away during text loading renders text and valid links on return despite malformed annotations', async () => {
   const dom = new JSDOM('<body><div id="root"><div id="page"></div></div></body>');
   try {
     const doc = dom.window.document, div = doc.querySelector<HTMLElement>('#page')!;
@@ -183,7 +183,11 @@ test('a page scrolled away during text loading can render its text and links on 
         getViewport: () => viewport,
         render: () => ({ promise: Promise.resolve(), cancel() {} }),
         async getTextContent() { reads++; if (reads === 1) { textStarted(); await deferred; } if (reads === 3) { evictionTextStarted(); await evictedText; } return {}; },
-        async getAnnotations() { return [{ subtype: 'Link', rect: [1, 2, 3, 4], url: 'https://example.com' }]; }
+        async getAnnotations() { return [
+          { subtype: 'Link', rect: [1, NaN, 3, 4], url: 'https://invalid.example' },
+          { subtype: 'Link', rect: [1, 2, 3, 4], url: 'https://example.com' },
+          { subtype: 'Link', rect: [1, 2, Infinity, 4], url: 'https://invalid.example' }
+        ]; }
       } };
     const surface = Object.assign(Object.create(PdfSurface.prototype), { root: doc.querySelector('#root'), scroller, entries: [entry],
       paintedEntries: new Set(), closed: false, currentPage: 1, renderQueue: Promise.resolve(),
@@ -197,6 +201,7 @@ test('a page scrolled away during text loading can render its text and links on 
     scroller.scrollTop = 0; surface.paintVisible(); await surface.renderQueue;
     assert.equal(text.textContent, 'Page text');
     assert.equal(links.querySelectorAll('a').length, 1);
+    assert.equal(links.querySelector('a')?.href, 'https://example.com/');
     assert.equal(entry.painted, 1);
     entry.version++; surface.paintVisible(); await evictionStarted;
     scroller.scrollTop = 3000; surface.paintVisible();
@@ -207,6 +212,18 @@ test('a page scrolled away during text loading can render its text and links on 
     assert.equal(entry.painted, entry.version);
   } finally { dom.window.close(); }
 });
+test('invalid PDF.js coordinates cannot create answer suggestions or leave a scan canvas allocated', async () => {
+  const f = fixture([1]);
+  try {
+    const entry = f.surface.entries[0]!;
+    const viewport = entry.page.getViewport({ scale: 1, rotation: 0 });
+    entry.page.getViewport = () => ({ ...viewport, convertToPdfPoint: () => [NaN, 42] });
+    await assert.rejects(f.surface.detectLines(), /invalid point/);
+    assert.equal(entry.suggestions, undefined); assert.equal(entry.candidates, undefined);
+    assert(f.canvases.every(canvas => canvas.width === 0 && canvas.height === 0));
+  } finally { f.dispose(); }
+});
+
 test('manual scans of a long PDF run in 100-page sections from the current page', async () => {
   const f = fixture(Array(205).fill(0));
   try {

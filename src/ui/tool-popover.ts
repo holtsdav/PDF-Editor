@@ -14,7 +14,7 @@ export class ToolPopover extends Component {
     el.setAttribute('role', 'dialog'); el.setAttribute('aria-label', options.title); el.tabIndex = -1;
     const header = el.createDiv({ cls: 'pfs-popover-heading' }); header.createSpan({ text: options.title });
     const close = header.createEl('button', { cls: 'clickable-icon', attr: { 'aria-label': 'Close tool settings' } }); setIcon(close, 'x');
-    this.registerDomEvent(close, 'click', options.close);
+    this.registerDomEvent(close, 'click', () => options.close());
     const preview = el.createDiv({ cls: 'pfs-brush-preview', attr: { 'aria-hidden': 'true' } });
     const sample = preview.createSpan(); let color = options.color, width = options.widths?.value ?? 2;
     const updatePreview = () => { sample.style.background = cssColor(color); sample.style.height = `${Math.min(24, width)}px`; sample.style.opacity = options.title === 'Highlighter' ? '0.5' : '1'; };
