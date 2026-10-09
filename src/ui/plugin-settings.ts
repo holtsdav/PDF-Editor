@@ -23,8 +23,8 @@ export class PdfSettingsTab extends PluginSettingTab {
       this.slider('toolbarTopOffset', 'PDF toolbar top offset', 'Move the PDF toolbar down. When it floats, the space above it covers the PDF.', 0, MAX_TOOLBAR_TOP_OFFSET),
       this.toggle('floatingToolbar', 'Floating PDF toolbar', 'Keep the PDF controls and editing tools visible at the top of a note while its PDF is on screen. You can also switch this from the PDF options menu.'),
       { type: 'group', heading: 'Answer lines', items: [
-        this.toggle('autoDetectLines', 'Detect answer lines on PDF open', 'Scan for blank answer lines when a PDF opens. For larger PDFs, use the scan button beside Add text box to scan up to 100 pages at a time.'),
-        this.slider('autoDetectPageLimit', 'Automatic detection page limit', 'Only scan automatically when the PDF has this many pages or fewer. Manual scans can cover larger PDFs in 100-page sections.', 1, MAX_AUTO_DETECT_PAGES),
+        this.toggle('autoDetectLines', 'Detect answer lines on PDF open', `Scan for blank answer lines when a PDF opens. For larger PDFs, use the scan button beside Add text box to scan up to ${MAX_AUTO_DETECT_PAGES} pages at a time.`),
+        this.slider('autoDetectPageLimit', 'Automatic detection page limit', `Only scan automatically when the PDF has this many pages or fewer. Manual scans can cover larger PDFs in ${MAX_AUTO_DETECT_PAGES}-page sections.`, 1, MAX_AUTO_DETECT_PAGES),
         this.toggle('flowAnswerLines', 'Wrap across consecutive answer lines', 'Nearby aligned lines make one text block. Click a neighboring detected line to extend an existing answer.')
       ] },
       { type: 'group', heading: 'PDF backups', items: [

@@ -102,7 +102,7 @@ test('rendered settings read current preferences and save through the shared sto
     f.tab.update();
     const offset = f.row('PDF toolbar top offset').slider!, pages = f.row('Automatic detection page limit').slider!;
     assert.deepEqual(offset.limits, [0, 160, 1]); assert.equal(offset.value, 48);
-    assert.deepEqual(pages.limits, [1, 100, 1]); assert.equal(pages.value, 30);
+    assert.deepEqual(pages.limits, [1, 300, 1]); assert.equal(pages.value, 30);
     assert.equal(f.row('Floating PDF toolbar').toggle!.value, true);
     await offset.change(96); await pages.change(42); await f.row('Detect answer lines on PDF open').toggle!.change(true);
     assert.equal(f.writes.length, 3);

@@ -44,8 +44,8 @@ test('invalid stored layouts never become a ruled answer block', () => {
 test('plugin settings migrate old preferences and reject untyped toggle values', () => {
   assert.equal(loadToolPreferences(null).autoDetectLines, false); assert.equal(loadToolPreferences(null).flowAnswerLines, true);
   assert.equal(loadToolPreferences(null).toolbarTopOffset, 0);
-  assert.equal(loadToolPreferences(null).floatingToolbar, false);
-  assert.equal(loadToolPreferences(null).autoDetectPageLimit, 25);
+  assert.equal(loadToolPreferences(null).floatingToolbar, true);
+  assert.equal(loadToolPreferences(null).autoDetectPageLimit, 50);
   assert.equal(loadToolPreferences(null).keepOriginalBackups, true);
   const loaded = loadToolPreferences({ autoDetectLines: true, flowAnswerLines: false, penWidth: 5 });
   assert.equal(loaded.autoDetectLines, true); assert.equal(loaded.flowAnswerLines, false); assert.equal(loaded.penWidth, 5);
@@ -53,10 +53,12 @@ test('plugin settings migrate old preferences and reject untyped toggle values',
   assert.equal(loadToolPreferences({ flowAnswerLines: 0 }).flowAnswerLines, true);
   assert.equal(loadToolPreferences({ toolbarTopOffset: 72 }).toolbarTopOffset, 72);
   assert.equal(loadToolPreferences({ floatingToolbar: true }).floatingToolbar, true);
-  assert.equal(loadToolPreferences({ floatingToolbar: 'true' }).floatingToolbar, false);
+  assert.equal(loadToolPreferences({ floatingToolbar: false }).floatingToolbar, false);
+  assert.equal(loadToolPreferences({ floatingToolbar: 'true' }).floatingToolbar, true);
   for (const toolbarTopOffset of [-1, 161, 4.5, Infinity, '32']) assert.equal(loadToolPreferences({ toolbarTopOffset }).toolbarTopOffset, 0);
-  assert.equal(loadToolPreferences({ autoDetectPageLimit: 50 }).autoDetectPageLimit, 50);
-  for (const autoDetectPageLimit of [0, 101, 4.5, Infinity, '32']) assert.equal(loadToolPreferences({ autoDetectPageLimit }).autoDetectPageLimit, 25);
+  assert.equal(loadToolPreferences({ autoDetectPageLimit: 25 }).autoDetectPageLimit, 25);
+  assert.equal(loadToolPreferences({ autoDetectPageLimit: 300 }).autoDetectPageLimit, 300);
+  for (const autoDetectPageLimit of [0, 301, 4.5, Infinity, '32']) assert.equal(loadToolPreferences({ autoDetectPageLimit }).autoDetectPageLimit, 50);
   assert.equal(loadToolPreferences({ keepOriginalBackups: false }).keepOriginalBackups, false);
   for (const keepOriginalBackups of ['false', 0, null]) assert.equal(loadToolPreferences({ keepOriginalBackups }).keepOriginalBackups, true);
 });

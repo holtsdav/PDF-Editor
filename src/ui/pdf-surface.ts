@@ -523,7 +523,7 @@ export class PdfSurface extends Component {
       this.cancelLineScan(); this.clearSuggestions(active); this.message.textContent = ''; return;
     }
     if (!this.pdf || !this.editor || !targets.length || this.closed) return;
-    if (targets.length > MAX_AUTO_DETECT_PAGES) throw new Error('Answer-line scans are limited to 100 pages at a time.');
+    if (targets.length > MAX_AUTO_DETECT_PAGES) throw new Error(`Answer-line scans are limited to ${MAX_AUTO_DETECT_PAGES} pages at a time.`);
     if (targets.every(entry => entry.candidates !== undefined)) {
       this.clearSuggestions(targets); this.message.textContent = ''; return;
     }
