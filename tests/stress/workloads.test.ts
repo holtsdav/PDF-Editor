@@ -38,6 +38,30 @@ async function fixture(pages = 8) {
   return pdf.save();
 }
 
+test('450-page PDFs preserve distant forms, links and ink across save/reopen and PDF.js page cleanup', { timeout: 120000 }, async t => {
+  const file = memory(await fixture(450)), session = await TextSession.open(file.store, font), start = performance.now();
+  for (const index of [0, 224, 449]) session.setValue(`Authored-${index}`, `Anonymous edit ${index} Grüße`);
+  const box = session.add(450, [40, 100, 300, 180], 14, true); session.setValue(box.name, 'Last page\nUnicode café');
+  const stroke = session.addStroke(225, 'marker', [[40, 300], [300, 300]], 14);
+  await session.saveWhenIdle(); const reopened = await readTextPdf(file.bytes());
+  assert.equal(reopened.pages.length, 450); assert.equal(reopened.fields.length, 451);
+  assert.equal(reopened.fields.find(field => field.name === box.name)!.value, 'Last page\nUnicode café');
+  assert.equal(reopened.strokes[0]!.id, stroke.id);
+  const task = getDocument({ data: file.bytes().slice(), standardFontDataUrl });
+  try {
+    const doc = await task.promise; assert.equal(doc.numPages, 450);
+    for (const number of [1, 225, 450]) {
+      const page = await doc.getPage(number); await page.getOperatorList();
+      const annotations = await page.getAnnotations(); assert(annotations.some(item => item.subtype === 'Link'));
+      assert.equal(annotations.find(item => item.fieldName === `Authored-${number - 1}`)!.fieldValue, `Anonymous edit ${number - 1} Grüße`);
+      assert(page.cleanup()); await page.getOperatorList();
+      assert((await page.getTextContent()).items.some(item => 'str' in item && item.str === `Preserved page ${number}`));
+    }
+  } finally { await task.destroy(); }
+  assert.equal(file.maximum(), 1);
+  t.diagnostic(JSON.stringify({ workload: '450-page', pages: 450, fields: reopened.fields.length, writes: file.writes(), milliseconds: Math.round(performance.now() - start), bytes: file.bytes().length }));
+});
+
 test('1,200 mixed edits with 240 concurrent save/checkpoint/check requests preserve final state', { timeout: 120000 }, async t => {
   const file = memory(await fixture()), session = await TextSession.open(file.store, font), start = performance.now();
   for (let batch = 0; batch < 40; batch++) {

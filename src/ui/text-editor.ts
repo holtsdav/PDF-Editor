@@ -39,7 +39,7 @@ interface FieldControl {
   frame: HTMLElement; input: HTMLInputElement | HTMLTextAreaElement;
   preview?: Rect; dispose?: () => void; cancel?: () => void;
 }
-interface PageLayer { page: NativePage; layer: HTMLElement; controls: Map<string, FieldControl>; ink: InkLayer; cancelPlacement?: () => void }
+interface PageLayer { page: NativePage; layer: HTMLElement; controls: Map<string, FieldControl>; ink: InkLayer; cancelPlacement?: () => void; placing?: () => boolean }
 interface EditorState {
   tool: EditorTool; textFamily: FontFamily; textColor: PdfColor; fontSize: number; markerWidth: number; penWidth: number; markerColor: PdfColor; penColor: PdfColor; selected?: string; selectedStroke?: string;
   letterSpacing: number; lineSpacing: number; textAlignment: 'left' | 'center' | 'right';
@@ -645,6 +645,7 @@ export class TextEditor extends Component {
   addSuggestedField(page: number, rect: Rect, scroll = false): void {
     if (!this.session || this.session.replacing || this.session.status === 'conflict') return;
     try {
+      if (![...this.layers.values()].some(layer => layer.page.number === page)) { this.native.revealPage?.(page); this.refresh(); }
       const entry = [...this.layers.values()].find(layer => layer.page.number === page);
       if (!entry) return;
       // Filling never arms the tool that creates boxes on arbitrary page clicks.
@@ -873,11 +874,21 @@ export class TextEditor extends Component {
     modal.open();
   }
 
+  /** Mount nearby pages plus focused, selected or interacting pages without changing the shared model. */
   refresh(): void {
     if (!this.loaded) return;
     // Obsidian may replace toolbar content while refreshing a file.
     if (this.native.element.isConnected && (!this.toolbar.isConnected || this.toolbar.parentElement !== (this.native.toolbarHost() ?? this.native.element))) this.mountToolbar();
-    const pages = this.native.pages();
+    const allPages = this.native.pages(), nearby = this.native.editablePages?.() ?? allPages;
+    const requested = new Set(nearby.map(page => page.div)), all = new Set(allPages.map(page => page.div));
+    const active = this.native.element.ownerDocument.activeElement;
+    const selected = new Set(this.selectedObjects().map(object => `${object.kind}:${object.id}`));
+    const retained = new Set<number>(this.selection?.gesturePage ? [this.selection.gesturePage] : []);
+    for (const field of this.session?.snapshot.fields ?? []) if (field.owned && field.widgets.length === 1 && selected.has(`text:${field.name}`)) retained.add(field.widgets[0]!.page);
+    for (const stroke of this.session?.snapshot.strokes ?? []) if (selected.has(`ink:${stroke.id}`)) retained.add(stroke.page);
+    for (const entry of this.layers.values()) if (all.has(entry.page.div) && (retained.has(entry.page.number) || !!active && entry.layer.contains(active)
+      || entry.placing?.() || entry.ink.interacting || [...entry.controls.values()].some(control => control.preview))) requested.add(entry.page.div);
+    const pages = allPages.filter(page => requested.has(page.div));
     const resume = this.focused && !this.focused.input.isConnected ? this.focused : undefined;
     const alive = new Set(pages.map(page => page.div));
     for (const [div, entry] of this.layers) if (!alive.has(div) || !entry.layer.isConnected) {
@@ -1279,7 +1290,7 @@ export class TextEditor extends Component {
     });
     const cancel = () => { start = undefined; pointer = undefined; preview?.remove(); preview = undefined; release?.(); release = undefined; };
     entry.layer.addEventListener('pointercancel', cancel); entry.layer.addEventListener('lostpointercapture', cancel);
-    entry.cancelPlacement = cancel;
+    entry.cancelPlacement = cancel; entry.placing = () => !!start;
   }
 
   onunload(): void {

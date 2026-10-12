@@ -52,7 +52,7 @@ const font = new Uint8Array(await readFile(new URL('../assets/fonts/NotoSans-Reg
 
 interface MockScope { handlers: { key: string; func(event: KeyboardEvent): unknown }[] }
 /** Mount the real editor on an anonymous session, mocking only host APIs, clipboard and page layout. */
-async function fixture(pageCount = 1, withKeymap = false, rotation = 0, seed?: Uint8Array, shared?: TextSession) {
+async function fixture(pageCount = 1, withKeymap = false, rotation = 0, seed?: Uint8Array, shared?: TextSession, visible?: number[]) {
   const pdf = await PDFDocument.create(); for (let i = 0; i < pageCount; i++) pdf.addPage([600, 800]).setRotation(degrees(rotation)); let bytes = await pdf.save();
   if (seed) bytes = seed.slice(); let writes = 0;
   const session = shared ?? await TextSession.open({ read: async () => bytes, write: async value => { bytes = value; writes++; }, backup: async () => 'original.pdf' }, font);
@@ -83,6 +83,9 @@ async function fixture(pageCount = 1, withKeymap = false, rotation = 0, seed?: U
     width: 600, height: 800, scale: 1, rotation, convertToPdfPoint: (x: number, y: number) => [x, 800 - y], convertToViewportRectangle: (r: number[]) => [r[0]!, 800 - r[1]!, r[2]!, 800 - r[3]!]
   }));
   const native = { identity: {}, element: doc.querySelector('#editor')!, file: {}, toolbarHost: () => doc.querySelector('#tools')!, answerLineButton: () => scanButton, pages: () => Array.from({ length: pageCount }, (_, i) => ({ div: doc.querySelector(i ? '#page' + (i + 1) : '#page')!, number: i + 1, annotationElements: () => [], viewport: viewports[i] })) } as unknown as EditorSurface;
+  if (visible) {
+    Object.assign(native, { editablePages: () => native.pages().filter(page => visible.includes(page.number)), revealPage: (number: number) => visible.splice(0, visible.length, number) });
+  }
   const sessions = { get: async () => session, preferences: loadToolPreferences({ holdShapes: true }), updatePreferences: async () => {} } as unknown as VaultSessions;
   const scopes: MockScope[] = [];
   const app = withKeymap ? { scope: {}, keymap: {
@@ -103,6 +106,41 @@ async function fixture(pageCount = 1, withKeymap = false, rotation = 0, seed?: U
   return { doc, session, editor, sessions, scopes, pointer, tool, dispose, native, viewports, bytes: () => bytes, writes: () => writes,
     clipboard: { get text() { return clipboardText; }, set text(value: string) { clipboardText = value; } } };
 }
+
+test('a 450-page PDF bounds editing layers while retaining an offscreen caret and save/reopen state', async context => {
+  const visible = [1, 2, 3], started = performance.now(), f = await fixture(450, false, 0, undefined, undefined, visible);
+  try {
+    context.diagnostic(JSON.stringify({ pages: 450, mountedLayers: f.doc.querySelectorAll('.pdf-form-studio-layer').length, nodes: f.doc.querySelectorAll('*').length, mountMilliseconds: Math.round(performance.now() - started) }));
+    assert.equal(f.doc.querySelectorAll('.pdf-form-studio-layer').length, 3);
+    const field = f.session.add(1, [80, 500, 340, 540], 14, true); f.session.setValue(field.name, 'Unicode café');
+    const input = f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!; input.focus(); input.setSelectionRange(2, 6);
+    visible.splice(0, visible.length, 448, 449, 450); f.editor.refresh();
+    assert.equal(f.doc.querySelectorAll('.pdf-form-studio-layer').length, 4);
+    assert.equal(f.doc.activeElement, input); assert(input.isConnected); assert.equal(input.selectionStart, 2); assert.equal(input.selectionEnd, 6);
+    f.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); await pause(0); f.editor.refresh();
+    assert.equal(f.doc.querySelectorAll('.pdf-form-studio-layer').length, 3); assert.equal(input.isConnected, false);
+    await f.session.saveWhenIdle(); assert.equal((await readTextPdf(f.bytes())).fields.find(item => item.name === field.name)!.value, 'Unicode café');
+    visible.splice(0, visible.length, 1); f.editor.refresh();
+    assert.equal(f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!.value, 'Unicode café');
+    f.editor.addSuggestedField(449, [80, 600, 340, 620], true);
+    assert.equal((f.doc.activeElement as HTMLElement).dataset.pdfField, f.session.snapshot.fields.at(-1)!.name);
+  } finally { f.dispose(); }
+});
+
+test('virtualized pages retain active placement and pen capture until cancelled, without adding history', async () => {
+  for (const tool of ['Add text box', 'Pen']) {
+    const visible = [1], f = await fixture(450, false, 0, undefined, undefined, visible);
+    try {
+      f.tool(tool); const layer = f.doc.querySelector<HTMLElement>('.pdf-form-studio-layer')!;
+      f.pointer(layer, 'pointerdown', 80, 180); f.pointer(layer, 'pointermove', 240, 280);
+      visible.splice(0, visible.length, 450); f.editor.refresh();
+      assert(layer.isConnected); assert.equal(f.doc.querySelectorAll('.pdf-form-studio-layer').length, 2);
+      f.editor.cancelInteractions(); f.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); await pause(0); f.editor.refresh();
+      assert.equal(layer.isConnected, false); assert.equal(f.doc.querySelectorAll('.pdf-form-studio-layer').length, 1);
+      assert.equal(f.session.snapshot.fields.length, 0); assert.equal(f.session.snapshot.strokes.length, 0); assert.equal(f.session.canUndoStroke, false);
+    } finally { f.dispose(); }
+  }
+});
 
 test('spacing scrubs preview without mutating history, retain the caret and commit once with undo and redo', async () => {
   const f = await fixture(); try {

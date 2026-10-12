@@ -177,11 +177,11 @@ test('fast scrolling cancels distant rendering and releases its bitmap and text 
   Object.defineProperties(page, { offsetTop: { value: 0 }, offsetHeight: { value: 700 } });
   const scroller = f.doc.createElement('div'); scroller.scrollTop = 4000;
   Object.defineProperties(scroller, { clientWidth: { value: 500 }, clientHeight: { value: 800 } });
-  const entry = { native: { div: page, number: 1 }, canvas, text, links, painted: 1, version: 1,
+  const entry = { native: { div: page, number: 1 }, page: { cleanup() {} }, canvas, text, links, painted: 1, version: 1,
     rendering: { cancel() { cancelled++; } }, textTask: { cancel() { textCancelled++; } } };
   const surface = Object.assign(Object.create(PdfSurface.prototype), { root: f.doc.createElement('div'), scroller, entries: [entry],
     currentPage: 1, pageInput: f.doc.createElement('input'), previous: f.doc.createElement('button'), next: f.doc.createElement('button'), closed: false,
-    activeRender: entry, paintedEntries: new Set([entry]) });
+    activeRender: entry, paintedEntries: new Set([entry]), pendingRenders: new Map() });
   try {
     (surface as { paintVisible(): void }).paintVisible();
     assert.equal(cancelled, 1); assert.equal(textCancelled, 1);
@@ -201,12 +201,134 @@ test('a long PDF queues only pages near a fast-scroll destination', async () => 
   const painted: number[] = [];
   const surface = Object.assign(Object.create(PdfSurface.prototype), { root: f.doc.createElement('div'), scroller, entries,
     currentPage: 1, pageInput: f.doc.createElement('input'), previous: f.doc.createElement('button'), next: f.doc.createElement('button'), closed: false,
-    paintedEntries: new Set(), renderQueue: Promise.resolve(), paint: async (entry: { native: { number: number } }) => { painted.push(entry.native.number); } });
+    paintedEntries: new Set(), pendingRenders: new Map(), renderQueue: Promise.resolve(), paint: async (entry: { native: { number: number } }) => { painted.push(entry.native.number); } });
   try {
     (surface as { paintVisible(): void }).paintVisible();
     await (surface as { renderQueue: Promise<void> }).renderQueue;
     assert.equal(surface.currentPage, 100);
     assert(painted.length <= 4, 'Only the destination and adjacent pages should be queued');
     assert(painted.includes(100));
+  } finally { f.dom.window.close(); }
+});
+
+test('distant printed text stays copyable across pages until its selection ends, without retaining note selections', () => {
+  const f = fixture(), root = f.doc.createElement('div'), scroller = f.doc.createElement('div'); root.append(scroller); f.doc.body.append(root);
+  scroller.scrollTop = 4000; Object.defineProperties(scroller, { clientWidth: { value: 500 }, clientHeight: { value: 700 } });
+  let cleaned = 0;
+  const entries = Array.from({ length: 2 }, (_, index) => {
+    const div = f.doc.createElement('div'), canvas = f.doc.createElement('canvas'), text = f.doc.createElement('div'), links = f.doc.createElement('div');
+    text.className = 'pfs-text-layer'; text.textContent = `Copy page ${index + 1}`; canvas.width = 500; canvas.height = 700;
+    div.append(canvas, text, links); scroller.append(div); Object.defineProperties(div, { offsetTop: { value: index * 700 }, offsetHeight: { value: 700 } });
+    return { native: { div, number: index + 1 }, canvas, text, links, page: { cleanup() { cleaned++; } }, version: 1, painted: 1 };
+  });
+  const surface = Object.assign(Object.create(PdfSurface.prototype), { root, scroller, entries, currentPage: 1, pageInput: f.doc.createElement('input'),
+    previous: f.doc.createElement('button'), next: f.doc.createElement('button'), closed: false, paintedEntries: new Set(entries), pendingRenders: new Map() });
+  const selection = f.doc.getSelection()!, range = f.doc.createRange();
+  try {
+    range.setStart(entries[0]!.text.firstChild!, 0); range.setEnd(entries[1]!.text.firstChild!, 11); selection.addRange(range);
+    const value = selection.toString(); surface.paintVisible();
+    assert.equal(cleaned, 0); assert.equal(surface.retainedSelection, true); assert.equal(selection.toString(), value);
+    for (const entry of entries) assert.equal(entry.canvas.width, 500);
+    selection.removeAllRanges();
+    const note = f.doc.createElement('p'); note.textContent = 'Note selection'; f.doc.body.append(note); range.selectNodeContents(note); selection.addRange(range);
+    surface.paintVisible(); assert.equal(cleaned, 2); assert.equal(surface.retainedSelection, false); assert.equal(selection.toString(), 'Note selection');
+    for (const entry of entries) { assert.equal(entry.canvas.width, 0); assert.equal(entry.text.textContent, ''); }
+    const other = f.doc.createElement('div'); other.className = 'pfs-text-layer'; other.textContent = 'Another PDF'; f.doc.body.append(other);
+    selection.removeAllRanges(); range.selectNodeContents(other); selection.addRange(range);
+    assert.equal(surface.selectedTextRange(), undefined, 'another editor owns its printed-text selection');
+  } finally { f.dom.window.close(); }
+});
+
+test('selection changes release retained pages through a disposed viewer-owned listener', () => {
+  const f = fixture(); f.attach();
+  const surface = new PdfSurface(f.app, { identity: f.owner, file: f.file, element: f.element }, {
+    preferences: { toolbarTopOffset: 0 }, retain: () => () => {}, get: () => new Promise(() => {}), subscribePreferences: () => () => {}
+  });
+  try {
+    let calls = 0; surface.requestVisible = () => { calls++; };
+    f.doc.dispatchEvent(new f.dom.window.Event('selectionchange')); assert.equal(calls, 0);
+    surface.retainedSelection = true; f.doc.dispatchEvent(new f.dom.window.Event('selectionchange')); assert.equal(calls, 1);
+    surface.unload(); f.doc.dispatchEvent(new f.dom.window.Event('selectionchange')); assert.equal(calls, 1);
+  } finally { surface.unload(); f.dom.window.close(); }
+});
+
+test('450-page rapid scroll bursts replace stale jobs, cancel raster and text work, and retain only nearby resources', async () => {
+  const f = fixture(), scroller = f.doc.createElement('div');
+  Object.defineProperties(scroller, { clientWidth: { value: 500 }, clientHeight: { value: 700 } });
+  const rastered: number[] = [], cleaned: number[] = [], canvases: HTMLCanvasElement[] = [];
+  let rasterStarted!: () => void, textStarted!: () => void;
+  const firstRaster = new Promise<void>(resolve => { rasterStarted = resolve; }), firstText = new Promise<void>(resolve => { textStarted = resolve; });
+  f.dom.window.HTMLCanvasElement.prototype.getContext = function(this: HTMLCanvasElement) { canvases.push(this); return {}; } as unknown as typeof f.dom.window.HTMLCanvasElement.prototype.getContext;
+  const entries = Array.from({ length: 450 }, (_, index) => {
+    let renders = 0;
+    const div = f.doc.createElement('div'), canvas = f.doc.createElement('canvas'), text = f.doc.createElement('div'), links = f.doc.createElement('div'); div.append(canvas, text, links); f.doc.body.append(div);
+    Object.defineProperties(div, { offsetTop: { value: index * 700 }, offsetHeight: { value: 700 } });
+    return { native: { div, number: index + 1, viewport: { scale: 1, rotation: 0 } }, canvas, text, links, version: 1, painted: -1,
+      page: {
+        getViewport: () => ({ width: 500, height: 700 }), cleanup: () => { cleaned.push(index + 1); return true; },
+        render: () => {
+          rastered.push(index + 1); let reject!: (error: Error) => void;
+          const promise = index === 0 && ++renders === 1 ? new Promise<void>((_, no) => { reject = no; rasterStarted(); }) : Promise.resolve();
+          return { promise, cancel() { const error = new Error('Cancelled raster'); error.name = 'RenderingCancelledException'; reject?.(error); } };
+        },
+        streamTextContent: () => ({ number: index + 1 }), getAnnotations: async () => []
+      } };
+  });
+  const surface = Object.assign(Object.create(PdfSurface.prototype), { root: f.doc.createElement('div'), scroller, entries, search: f.doc.createElement('input'),
+    currentPage: 1, pageInput: f.doc.createElement('input'), previous: f.doc.createElement('button'), next: f.doc.createElement('button'), closed: false,
+    paintedEntries: new Set(), pendingRenders: new Map(), renderQueue: Promise.resolve(), fail(error: unknown) { throw error; },
+    library: { TextLayer: class {
+      private reject?: (error: Error) => void;
+      private options: { container: HTMLElement; textContentSource: { number: number } };
+      constructor(options: { container: HTMLElement; textContentSource: { number: number } }) { this.options = options; }
+      async render() { if (this.options.textContentSource.number === 449) await new Promise<void>((_, no) => { this.reject = no; textStarted(); }); this.options.container.textContent = 'Anonymous page text'; }
+      cancel() { const error = new Error('Cancelled text'); error.name = 'AbortException'; this.reject?.(error); }
+    } } });
+  try {
+    surface.paintVisible(); await firstRaster;
+    for (const number of [225, 450, 20, 360, 449]) { scroller.scrollTop = (number - 1) * 700; surface.paintVisible(); assert(surface.pendingRenders.size <= 3); }
+    await firstText;
+    assert.equal(canvases[0]!.width, 0, 'cancelled offscreen raster is released');
+    for (const number of [450, 180, 2]) { scroller.scrollTop = (number - 1) * 700; surface.paintVisible(); assert(surface.pendingRenders.size <= 3); }
+    await surface.renderQueue;
+    assert.equal(surface.currentPage, 2); assert.equal(surface.pageInput.value, '2');
+    assert.deepEqual(rastered.slice(0, 2), [1, 449], 'the latest visible destination precedes every prefetch job');
+    assert(rastered.length <= 5, 'intermediate scroll destinations never reach the renderer');
+    assert(cleaned.includes(1) && cleaned.includes(449)); assert(surface.paintedEntries.size <= 3);
+    assert.equal(entries[448]!.canvas.width, 0); assert.equal(entries[448]!.text.textContent, '');
+    assert(entries[1]!.canvas.width > 0); assert.equal(entries[1]!.text.textContent, 'Anonymous page text');
+    assert.equal(surface.pendingRenders.size, 0);
+  } finally { f.dom.window.close(); }
+});
+
+test('internal PDF scroll bursts never relocate the page controls; note scrolling still schedules docking', () => {
+  const f = fixture(); f.attach();
+  const surface = new PdfSurface(f.app, { identity: f.owner, file: f.file, element: f.element }, {
+    preferences: { toolbarTopOffset: 0 }, retain: () => () => {}, get: () => new Promise(() => {}), subscribePreferences: () => () => {}
+  });
+  try {
+    let dockChecks = 0; surface.queueFloatingToolbar = () => { dockChecks++; };
+    const pages = f.element.querySelector<HTMLElement>('.pfs-pages')!, input = f.element.querySelector('input[aria-label="Page"]')!, parent = input.parentElement;
+    for (let i = 0; i < 200; i++) pages.dispatchEvent(new f.dom.window.Event('scroll'));
+    assert.equal(dockChecks, 0); assert.equal(input.parentElement, parent);
+    f.doc.querySelector('main')!.dispatchEvent(new f.dom.window.Event('scroll'));
+    assert.equal(dockChecks, 1);
+  } finally { surface.unload(); f.dom.window.close(); }
+});
+
+test('unloading a viewer releases every retained bitmap and page resource', () => {
+  const f = fixture(); f.attach(); let cleaned = 0;
+  const surface = new PdfSurface(f.app, { identity: f.owner, file: f.file, element: f.element }, {
+    preferences: { toolbarTopOffset: 0 }, retain: () => () => {}, get: () => new Promise(() => {}), subscribePreferences: () => () => {}
+  });
+  const entries = Array.from({ length: 3 }, (_, index) => {
+    const canvas = f.doc.createElement('canvas'), text = f.doc.createElement('div'), links = f.doc.createElement('div'); canvas.width = 1200; canvas.height = 1600; text.textContent = 'Anonymous text';
+    return { native: { div: f.doc.createElement('div'), number: index + 1 }, page: { cleanup() { cleaned++; } }, canvas, text, links, version: 1, painted: 1 };
+  });
+  try {
+    surface.entries = entries; surface.paintedEntries = new Set(entries); surface.unload();
+    assert.equal(cleaned, 3);
+    for (const entry of entries) { assert.equal(entry.canvas.width, 0); assert.equal(entry.canvas.height, 0); assert.equal(entry.text.textContent, ''); }
+    assert.equal(f.element.querySelector('.pfs-surface'), null);
   } finally { f.dom.window.close(); }
 });

@@ -214,7 +214,7 @@
 .pfs-surface-message.is-error { color: var(--text-error); }
 .pfs-pages { position: relative; flex: 1; overflow: auto; min-height: 100px; background: var(--background-secondary); overscroll-behavior-x: contain; overscroll-behavior-y: auto; scrollbar-gutter: stable; outline: none; }
 .pfs-page-stack { display: flex; flex-direction: column; align-items: center; gap: 16px; padding: 16px; width: max-content; min-width: 100%; }
-.pfs-page { position: relative; background: white; flex-shrink: 0; box-shadow: 0 2px 8px rgb(0 0 0 / 12%); color: #161616; overflow: hidden; --user-unit: 1; --min-font-size: 1; }
+.pfs-page { position: relative; contain: layout paint; background: white; flex-shrink: 0; box-shadow: 0 2px 8px rgb(0 0 0 / 12%); color: #161616; overflow: hidden; --user-unit: 1; --min-font-size: 1; }
 .pfs-page-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 .pfs-text-layer { position: absolute; inset: 0; overflow: clip; opacity: 1; line-height: 1; text-align: initial; transform-origin: 0 0; caret-color: CanvasText; z-index: 2; }
 .pfs-text-layer :is(span, br) { color: transparent; position: absolute; white-space: pre; cursor: text; transform-origin: 0% 0%; }
