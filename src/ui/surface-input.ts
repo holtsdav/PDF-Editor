@@ -1,5 +1,6 @@
 interface ZoomInput { zoom(factor: number, x: number, y: number): void; interrupt(): void; verticalBounds?(): [number, number] | undefined }
 
+/** Normalize pixel, line and page wheel deltas into CSS pixels. */
 export function wheelPixels(event: Pick<WheelEvent, 'deltaX' | 'deltaY' | 'deltaMode'>, height: number, lineHeight = 16): [number, number] {
   const unit = event.deltaMode === 1 ? lineHeight : event.deltaMode === 2 ? height : 1;
   return [event.deltaX * unit, event.deltaY * unit];
@@ -41,7 +42,10 @@ export function bindSurfaceInput(scroller: HTMLElement, input: ZoomInput): () =>
     if (![dx, dy].every(Number.isFinite)) return;
     if (event.metaKey || event.ctrlKey) {
       stop(event);
-      if (!pinch && win.performance.now() >= suppressWheelUntil) input.zoom(Math.exp(-Math.max(-200, Math.min(200, dy)) * 0.003), event.clientX, event.clientY);
+      if (!pinch && win.performance.now() >= suppressWheelUntil) {
+        input.interrupt();
+        input.zoom(Math.exp(-Math.max(-200, Math.min(200, dy)) * 0.003), event.clientX, event.clientY);
+      }
       return;
     }
     if (pinch) { stop(event); return; }

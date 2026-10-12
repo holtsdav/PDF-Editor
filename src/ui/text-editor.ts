@@ -98,6 +98,7 @@ export class TextEditor extends Component {
   private answerFields = new Set<string>();
   private releaseEditing?: () => void;
 
+  /** Attach document-local editing controls and shortcut ownership to the shared session registry. */
   constructor(app: App, native: EditorSurface, sessions: VaultSessions, state?: EditorState) {
     super(); this.app = app; this.native = native; this.sessions = sessions;
     Object.assign(this, sessions.preferences);
@@ -433,6 +434,7 @@ export class TextEditor extends Component {
   private objectShortcutActive(): boolean {
     return this.objectScopeActive || !!this.selection?.objects.length;
   }
+  /** Apply shared document history for both toolbar and shortcuts, retaining focus after object removal. */
   private applyHistory(redo: boolean): void {
     const doc = this.native.element.ownerDocument, active = doc.activeElement;
     const layer = active instanceof doc.defaultView!.Element && this.native.element.contains(active)
@@ -444,6 +446,7 @@ export class TextEditor extends Component {
       if (layer?.isConnected && (doc.activeElement === doc.body || !doc.activeElement)) layer.focus({ preventScroll: true });
     } catch (error) { this.showError(error); }
   }
+  /** Claim history keys only for this editor, preserving native typing undo and consuming exhausted object history. */
   private claimHistoryShortcut(event: KeyboardEvent): boolean {
     const target = event.target, view = this.native.element.ownerDocument.defaultView!;
     const ownControl = target instanceof view.Element && this.ownsControl(target);
@@ -1034,6 +1037,7 @@ export class TextEditor extends Component {
     control.dispose = this.bindBox(entry, control, field.name);
   }
 
+  /** Measure editor wrapping with PDF glyph advances, previewing spacing without committing geometry. */
   private growField(entry: PageLayer, control: FieldControl, preview = false): void {
     let field = this.session?.snapshot.fields.find(field => field.name === control.input.dataset.pdfField);
     if (!field?.owned || field.readOnly || field.widgets.length !== 1 || (this.session?.status === 'conflict' || this.session?.replacing) || this.composing.has(control.input)) return;
@@ -1298,6 +1302,7 @@ export class TextEditor extends Component {
 
   }
 
+  /** Discard transient previews and release every active gesture before blur, zoom or replacement. */
   cancelInteractions(): void {
     this.popover?.cancelScrub(); this.selection?.cancel();
     for (const entry of this.layers.values()) { entry.cancelPlacement?.(); entry.ink.cancel(); for (const control of entry.controls.values()) control.cancel?.(); }

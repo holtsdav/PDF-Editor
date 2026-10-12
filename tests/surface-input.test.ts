@@ -8,9 +8,9 @@ function fixture() {
   const doc = dom.window.document, note = doc.querySelector<HTMLElement>('main')!, pdf = doc.querySelector<HTMLElement>('.pdf')!, page = doc.querySelector<HTMLElement>('#page')!;
   Object.defineProperties(note, { clientHeight: { value: 300 }, scrollHeight: { value: 1800 } });
   Object.defineProperties(pdf, { clientHeight: { value: 400 }, scrollHeight: { value: 1200, configurable: true }, clientWidth: { value: 600 }, scrollWidth: { value: 1000 } });
-  const zooms: number[][] = []; let interrupts = 0, bubbled = 0;
+  const zooms: number[][] = [], actions: string[] = []; let interrupts = 0, bubbled = 0;
   note.addEventListener('wheel', () => bubbled++);
-  const stop = bindSurfaceInput(pdf, { zoom: (...values) => zooms.push(values), interrupt: () => interrupts++ });
+  const stop = bindSurfaceInput(pdf, { zoom: (...values) => { actions.push('zoom'); zooms.push(values); }, interrupt: () => { actions.push('interrupt'); interrupts++; } });
   const wheel = (dy: number, dx = 0, extra: WheelEventInit = {}) => {
     const event = new dom.window.WheelEvent('wheel', { deltaY: dy, deltaX: dx, bubbles: true, cancelable: true, ...extra }); page.dispatchEvent(event); return event;
   };
@@ -18,7 +18,7 @@ function fixture() {
     const event = new dom.window.Event(type, { bubbles: true, cancelable: true });
     Object.defineProperty(event, 'touches', { value: points.map(([clientX, clientY]) => ({ clientX, clientY })) }); pdf.dispatchEvent(event); return event;
   };
-  return { dom, doc, note, pdf, page, wheel, touch, zooms, stop, interrupts: () => interrupts, bubbled: () => bubbled, dispose: () => { stop(); dom.window.close(); } };
+  return { dom, doc, note, pdf, page, wheel, touch, zooms, actions, stop, interrupts: () => interrupts, bubbled: () => bubbled, dispose: () => { stop(); dom.window.close(); } };
 }
 
 test('one continuing wheel sequence hands only its remaining delta to the note at either PDF boundary', () => {
@@ -63,8 +63,10 @@ test('Cmd and Ctrl wheel zoom own only their PDF window, reverse smoothly and ne
       f.wheel(20, 0, extra);
     }
     assert.equal(f.zooms.length, 4); assert(Math.abs(f.zooms[0]![0]! * f.zooms[1]![0]! - 1) < 1e-8);
+    assert.deepEqual(f.actions, Array.from({ length: 4 }, () => ['interrupt', 'zoom']).flat());
     assert.deepEqual(f.zooms[0]!.slice(1), [75, 125]); assert.equal(f.note.scrollTop, 200); assert.equal(f.pdf.scrollTop, 0);
     f.note.dispatchEvent(new f.dom.window.WheelEvent('wheel', { ctrlKey: true, bubbles: true, cancelable: true, deltaY: -20 })); assert.equal(f.zooms.length, 4);
+    assert.equal(f.interrupts(), 4);
     f.stop(); assert.equal(f.wheel(-20, 0, { ctrlKey: true }).defaultPrevented, false);
   } finally { f.dispose(); }
 });
@@ -75,7 +77,9 @@ test('two-touch pinch uses its midpoint, cancels editing gestures, ignores overl
     assert(f.touch('touchmove', [[0, 20], [120, 20]]).defaultPrevented);
     assert.deepEqual(f.zooms[0], [1.2, 60, 20]);
     f.wheel(-100, 0, { ctrlKey: true }); assert.equal(f.zooms.length, 1);
+    assert.equal(f.interrupts(), 1);
     f.dom.window.dispatchEvent(new f.dom.window.Event('blur')); f.touch('touchmove', [[0, 0], [150, 0]]); assert.equal(f.zooms.length, 1);
+    f.wheel(-100, 0, { metaKey: true }); assert.equal(f.zooms.length, 1); assert.equal(f.interrupts(), 1);
     f.wheel(15); assert.equal(f.pdf.scrollTop, 15);
     f.touch('touchstart', [[0, 0], [100, 0]]); f.touch('touchcancel', []);
     f.touch('touchstart', [[0, 0], [100, 0]]); f.dom.window.dispatchEvent(new f.dom.window.KeyboardEvent('keydown', { key: 'Escape' }));

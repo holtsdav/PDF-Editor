@@ -190,6 +190,7 @@ function originalFont(pdf: PDFDocument, field: PDFTextField): string | undefined
   return undefined;
 }
 
+/** Read editable forms and owned formatting while retaining stable widget identities and authored appearances. */
 export async function readTextPdf(bytes: Uint8Array): Promise<TextSnapshot> {
   const pdf = await loadWritable(bytes);
   const pages = pdf.getPages();

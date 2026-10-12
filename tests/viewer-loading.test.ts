@@ -63,6 +63,15 @@ test('gesture zoom anchors the actual PDF point through quarter turns, app scale
         assert(Math.hypot(before[0]! - after[0]!, before[1]! - after[1]!) < 1e-8); assert.equal(surface.zoomButton.textContent, '125%');
         surface.zoomAt(0.8, x, y); assert.equal(surface.zoomButton.textContent, '100%');
         surface.zoomAt(0.5, x, y); const smaller = point(); assert(Math.hypot(before[0]! - smaller[0]!, before[1]! - smaller[1]!) < 1e-8);
+        // Fit width can keep the viewport unchanged while removing the gesture's anchor margins.
+        const fitScale = 608 / proxy.getViewport({ scale: 1, rotation }).width;
+        surface.zoomAt(fitScale / surface.scale, x, y); scroller.scrollTop = topPadding() + 32;
+        const version = entry.version, fitPoint = point();
+        surface.scale = 'width'; surface.layout();
+        assert.equal(entry.version, version); assert.equal(surface.panSpace, false); assert.equal(scroller.scrollTop, 48);
+        const verticalAxis = rotation % 180 === 90 ? 0 : 1;
+        assert(Math.abs(point()[verticalAxis]! - fitPoint[verticalAxis]!) < 1e-8);
+        assert.equal(surface.zoomButton.textContent, 'Fit width');
         surface.zoomAt(100, x, y); assert.equal(surface.scale, 3); surface.zoomAt(0.001, x, y); assert.equal(surface.scale, 0.35);
         surface.scale = 'width'; surface.layout(); assert.equal(surface.zoomButton.textContent, 'Fit width');
       } finally { f.dom.window.close(); }

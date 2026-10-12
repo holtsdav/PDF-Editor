@@ -127,6 +127,7 @@ export class TextSession {
     field.value = value; this.changes.values.set(name, value); this.fitRuledField(name); this.changed();
   }
 
+  /** Return one printable grapheme's font advance and one line of height, including PDF insets. */
   minimumTextBoxSize(name: string): [number, number] {
     const field = this.snapshot.fields.find(field => field.name === name);
     if (!field) throw new Error('This text box no longer exists.');
@@ -226,6 +227,7 @@ export class TextSession {
     this.changed(); return true;
   }
 
+  /** Validate supported formatting and commit it to the shared text history without overriding ruled pitch. */
   formatField(name: string, format: Partial<TextFormat>): void {
     this.assertAvailable();
     const field = this.snapshot.fields.find(field => field.name === name);

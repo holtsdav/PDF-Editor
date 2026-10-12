@@ -16,6 +16,7 @@ import { authoredForms, legacyBlank, prefixBlank, prefixValue, uuidCollision } f
 import { orphanForms } from './fixtures/orphan-forms.ts';
 import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { rotatedHandle } from '../src/pdf/box-geometry.ts';
+import { bindSurfaceInput } from '../src/ui/surface-input.ts';
 
 // Exercise the actual editor and pointer handlers; only the host API/layout is mocked.
 const built = await build({ entryPoints: ['src/ui/text-editor.ts'], bundle: true, write: false, format: 'esm', platform: 'node', packages: 'external', plugins: [{ name: 'test-host', setup(builder) {
@@ -340,6 +341,30 @@ test('a newly placed empty box can move, resize and switch to Select before typi
     const outside = f.doc.querySelector<HTMLButtonElement>('#outside')!; f.pointer(outside, 'pointerdown'); outside.focus(); await pause(0);
     assert.equal(f.session.snapshot.fields.length, 0);
   } finally { f.dispose(); }
+});
+test('modifier-wheel zoom cancels text placement before changing its viewport and releases autosave', async () => {
+  for (const modifier of ['ctrlKey', 'metaKey']) {
+    const f = await fixture();
+    const layer = f.doc.querySelector<HTMLElement>('.pdf-form-studio-layer')!;
+    const stop = bindSurfaceInput(f.doc.querySelector<HTMLElement>('#page')!, {
+      interrupt: () => f.editor.cancelInteractions(),
+      zoom: () => {
+        assert.equal(f.doc.querySelector('.pdf-form-studio-placement'), null);
+        f.viewports[0]!.scale = 2; f.viewports[0]!.width = 1200; f.viewports[0]!.height = 1600;
+        f.editor.refresh();
+      }
+    });
+    try {
+      f.tool('Add text box'); f.pointer(layer, 'pointerdown', 80, 180); f.pointer(layer, 'pointermove', 240, 280);
+      assert(f.doc.querySelector('.pdf-form-studio-placement'));
+      layer.dispatchEvent(new f.doc.defaultView!.WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: -20, [modifier]: true }));
+      f.pointer(layer, 'pointerup', 240, 280);
+      assert.equal(f.session.snapshot.fields.length, 0); assert.equal(f.session.canUndoStroke, false);
+      const field = f.session.add(1, [80, 500, 340, 540], 14, true); f.session.setValue(field.name, 'Retained edit');
+      await Promise.race([f.session.saveWhenIdle(), pause(1000).then(() => { throw new Error('Cancelled placement blocked autosave'); })]);
+      assert.equal(f.writes(), 1); assert.equal((await readTextPdf(f.bytes())).fields[0]!.value, 'Retained edit');
+    } finally { stop(); f.dispose(); }
+  }
 });
 test('click and drag Text placement each return to Select after one box', async () => {
   const f = await fixture();

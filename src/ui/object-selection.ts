@@ -29,6 +29,7 @@ export class ObjectSelection extends Component {
   private scope?: Scope;
   private scopeActive = false;
   private claims: (() => void)[] = [];
+  /** Bind mixed-object selection and shortcut ownership to this document's focus proxy and shared session. */
   constructor(private session: TextSession, private root: HTMLElement, private options: Options, private app?: App) {
     super();
     const doc = root.ownerDocument;

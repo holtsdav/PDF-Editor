@@ -236,6 +236,7 @@ export class PdfSurface extends Component {
       if (this.task !== task) await task.destroy().catch(() => {});
     }
   }
+  /** Rebuild page viewports while retaining the current page-relative vertical position. */
   private layout(): void {
     if (this.closed || !this.entries.length || this.scroller.clientWidth < 20) return;
     const old = this.entries[this.currentPage - 1];
@@ -262,6 +263,7 @@ export class PdfSurface extends Component {
       entry.native.div.style.setProperty('--scale-factor', String(scale));
       entry.native.div.style.setProperty('--total-scale-factor', String(scale));
     }
+    const removedPanSpace = this.scale === 'width' && this.panSpace;
     if (this.scale === 'width') this.panSpace = false;
     if (this.panSpace) {
       // Room around the canvas lets a smaller-than-viewport page retain the pointer anchor.
@@ -270,7 +272,8 @@ export class PdfSurface extends Component {
     } else {
       this.stack.style.removeProperty('min-width'); this.stack.style.removeProperty('padding-top'); this.stack.style.removeProperty('padding-bottom');
     }
-    if (changed) { this.editor?.refresh(); if (old) this.scroller.scrollTop = old.native.div.offsetTop + fraction * old.native.viewport.height; }
+    if (changed) this.editor?.refresh();
+    if (old && (changed || removedPanSpace)) this.scroller.scrollTop = old.native.div.offsetTop + fraction * old.native.viewport.height;
     this.zoomButton.textContent = this.scale === 'width' ? 'Fit width' : `${Math.round(this.scale * 100)}%`;
     this.refreshSuggestions(); this.requestVisible();
     this.queueFloatingToolbar();
@@ -349,6 +352,7 @@ export class PdfSurface extends Component {
     this.floatingHost.classList.add('is-visible');
   }
   private zoom(delta: number): void { this.scale = Math.max(0.35, Math.min(3, (typeof this.scale === 'number' ? this.scale : this.entries[this.currentPage - 1]?.native.viewport.scale ?? 1) + delta)); this.layout(); }
+  /** Zoom within the existing bounds and keep the pointer's PDF point fixed using scrollable margins. */
   private zoomAt(factor: number, x: number, y: number): void {
     if (this.closed || !Number.isFinite(factor) || factor <= 0 || !this.entries.length) return;
     const entry = this.entries.reduce((best, candidate) => {
@@ -368,6 +372,7 @@ export class PdfSurface extends Component {
     this.scroller.scrollTop += (after.top + projected[1]! * after.height / viewport.height - y) / hostScale;
     this.requestVisible();
   }
+  /** Exclude gesture anchor margins from the PDF range consumed by ordinary vertical wheel input. */
   private scrollBounds(): [number, number] | undefined {
     if (!this.panSpace || !this.entries.length) return;
     const first = this.entries[0]!.native.div.offsetTop - 16, last = this.entries.at(-1)!;

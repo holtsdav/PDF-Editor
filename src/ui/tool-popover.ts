@@ -10,6 +10,7 @@ interface SpacingOptions {
 }
 interface Options { title: string; color: PdfColor; changeColor(color: PdfColor): void; widths?: { values: number[]; value: number; change(value: number): void }; text?: { font: FontFamily; size: number; disabled?: boolean; alignment: 'left' | 'center' | 'right'; align(value: 'left' | 'center' | 'right'): void; spacing: SpacingOptions; change(font: FontFamily, size: number): void }; toggles?: { label: string; description: string; value: boolean; change(value: boolean): void }[]; close(): void }
 
+/** Parse a finite decimal with a point or comma; leave range validation to each spacing control. */
 export function parseSpacing(value: string): number | undefined {
   if (!/^[+-]?(?:\d+(?:[.,]\d*)?|[.,]\d+)$/.test(value.trim())) return;
   const number = Number(value.trim().replace(',', '.')); return Number.isFinite(number) ? number : undefined;
@@ -19,7 +20,9 @@ export function parseSpacing(value: string): number | undefined {
 export class ToolPopover extends Component {
   readonly element: HTMLElement;
   private abortScrub?: () => void;
+  /** Cancel the current preview and report whether an active pointer interaction was released. */
   cancelScrub(): boolean { if (!this.abortScrub) return false; this.abortScrub(); return true; }
+  /** Mount controls in the anchor's window and register their listeners and portal for lifecycle disposal. */
   constructor(anchor: HTMLElement, options: Options) {
     super(); const doc = anchor.ownerDocument;
     const el = this.element = doc.createElement('div'); el.className = 'pfs-tool-popover';
@@ -101,6 +104,7 @@ export class ToolPopover extends Component {
     this.register(() => el.remove());
   }
 
+  /** Build editable spacing values and captured horizontal scrubs with one commit or a restored preview. */
   private spacingControls(parent: HTMLElement, options: SpacingOptions): void {
     const doc = parent.ownerDocument, win = doc.defaultView!;
     const row = parent.createDiv({ cls: 'pfs-spacing-row', attr: { role: 'group', 'aria-label': 'Text spacing' } });

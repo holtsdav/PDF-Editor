@@ -3,6 +3,7 @@ import type { FontFamily, PdfColor } from './text-format';
 export const MAX_TOOLBAR_TOP_OFFSET = 160;
 export const MAX_AUTO_DETECT_PAGES = 300;
 export interface ToolPreferences { fontSize: number; letterSpacing: number; lineSpacing: number; textAlignment: 'left' | 'center' | 'right'; textFamily: FontFamily; textColor: PdfColor; penColor: PdfColor; markerColor: PdfColor; penWidth: number; markerWidth: number; toolbarTopOffset: number; floatingToolbar: boolean; autoDetectPageLimit: number; keepOriginalBackups: boolean; smoothPen: boolean; holdShapes: boolean; holdHighlighter: boolean; autoDetectLines: boolean; flowAnswerLines: boolean }
+/** Normalize persisted tool defaults, replacing malformed or out-of-range values with supported defaults. */
 export function loadToolPreferences(value: unknown): ToolPreferences {
   const result: ToolPreferences = { fontSize: 14, letterSpacing: 0, lineSpacing: 1.2, textAlignment: 'left', textFamily: 'sans', textColor: [0.05, 0.05, 0.05], penColor: [0.085, 0.085, 0.085], markerColor: [1, 0.84, 0], penWidth: 2, markerWidth: 14, toolbarTopOffset: 0, floatingToolbar: true, autoDetectPageLimit: 50, keepOriginalBackups: true, smoothPen: true, holdShapes: false, holdHighlighter: true, autoDetectLines: false, flowAnswerLines: true };
   if (!value || typeof value !== 'object') return result;
