@@ -22,6 +22,7 @@ export class PdfSettingsTab extends PluginSettingTab {
     return [
       this.slider('toolbarTopOffset', 'PDF toolbar top offset', 'Move the PDF toolbar down. When it floats, the space above it covers the PDF.', 0, MAX_TOOLBAR_TOP_OFFSET),
       this.toggle('floatingToolbar', 'Floating PDF toolbar', 'Keep the PDF controls and editing tools visible at the top of a note while its PDF is on screen. You can also switch this from the PDF options menu.'),
+      this.toggle('trashImportedOriginals', 'Move original PDF to Trash after import', 'After dragging an external PDF into a note, verify its imported attachment and move the source to system Trash. Off by default. Failed, changed or unsupported imports keep the original. Vault PDFs and recovery copies are never removed.'),
       { type: 'group', heading: 'Answer lines', items: [
         this.toggle('autoDetectLines', 'Detect answer lines on PDF open', `Scan for blank answer lines when a PDF opens. For larger PDFs, use the scan button beside Add text box to scan up to ${MAX_AUTO_DETECT_PAGES} pages at a time.`),
         this.slider('autoDetectPageLimit', 'Automatic detection page limit', `Only scan automatically when the PDF has this many pages or fewer. Manual scans can cover larger PDFs in ${MAX_AUTO_DETECT_PAGES}-page sections.`, 1, MAX_AUTO_DETECT_PAGES),
@@ -82,7 +83,7 @@ export class PdfSettingsTab extends PluginSettingTab {
     modal.open();
   }
 
-  private toggle(key: 'floatingToolbar' | 'autoDetectLines' | 'flowAnswerLines' | 'keepOriginalBackups', name: string, desc: string): SettingDefinition {
+  private toggle(key: 'floatingToolbar' | 'autoDetectLines' | 'flowAnswerLines' | 'keepOriginalBackups' | 'trashImportedOriginals', name: string, desc: string): SettingDefinition {
     return { name, desc, render: setting => {
       setting.addToggle(toggle => toggle.setValue(this.sessions.preferences[key]).onChange(value => this.savePreference(key, value)));
     } };
@@ -94,7 +95,7 @@ export class PdfSettingsTab extends PluginSettingTab {
     } };
   }
 
-  private async savePreference(key: 'floatingToolbar' | 'autoDetectLines' | 'flowAnswerLines' | 'keepOriginalBackups' | 'toolbarTopOffset' | 'autoDetectPageLimit', value: boolean | number): Promise<void> {
+  private async savePreference(key: 'trashImportedOriginals' | 'floatingToolbar' | 'autoDetectLines' | 'flowAnswerLines' | 'keepOriginalBackups' | 'toolbarTopOffset' | 'autoDetectPageLimit', value: boolean | number): Promise<void> {
     if (this.unloaded) return;
     try { await this.sessions.updatePreferences({ ...this.sessions.preferences, [key]: value }); }
     catch (error) { if (!this.unloaded) new Notice(`Could not save settings: ${String(error)}`); }

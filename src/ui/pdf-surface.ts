@@ -10,6 +10,7 @@ import { decorativeFooterRules, excludeDecorativeFooters } from '../compat/pdf-a
 import { detectAnswerLines } from '../pdf/answer-lines';
 import { MAX_AUTO_DETECT_PAGES } from '../pdf/tool-preferences';
 import { labelOverlay } from './overlay-label';
+import { measureTextWords } from './text-geometry';
 import { pdfPoint, pdfRectangle } from './pdf-geometry';
 import type { Rect } from '../pdf/text-engine';
 import type { TextField } from '../pdf/text-engine';
@@ -356,7 +357,7 @@ export class PdfSurface extends Component {
       if (entry !== this.activeRender) entry.rendering?.cancel();
       entry.textTask?.cancel(); entry.textTask = undefined;
       entry.canvas.width = 0; entry.canvas.height = 0; entry.painted = -1;
-      entry.text.replaceChildren(); entry.links.replaceChildren(); this.paintedEntries.delete(entry);
+      entry.text.replaceChildren(); entry.native.textWords = undefined; entry.links.replaceChildren(); this.paintedEntries.delete(entry);
     }
     // Page shells stay in document order, so only pages near the viewport need
     // measurement or rendering on each scroll frame.
@@ -408,6 +409,7 @@ export class PdfSurface extends Component {
     entry.text.replaceChildren(); entry.textTask = new this.library!.TextLayer({ container: entry.text, viewport, textContentSource: content });
     await entry.textTask.render();
     if (this.closed || version !== entry.version || !this.nearViewport(entry)) return;
+    entry.native.textWords = measureTextWords(entry.text, entry.native);
     this.highlight(); entry.links.replaceChildren();
     const annotations = await entry.page.getAnnotations();
     if (this.closed || version !== entry.version || !this.nearViewport(entry)) return;

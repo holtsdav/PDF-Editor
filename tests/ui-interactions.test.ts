@@ -1201,3 +1201,120 @@ test('HTML object copies preserve whitespace safely without inline styles', asyn
     assert.equal(parsed.querySelector('[style], b, script'), null);
   } finally { f.dispose(); }
 });
+
+test('history shortcuts consume empty stacks and repeats, preserve text undo, and reject other windows', async () => {
+  const f = await fixture(1, true);
+  try {
+    const layer = f.doc.querySelector<HTMLElement>('.pdf-form-studio-layer')!; layer.focus();
+    const key = (target: Element, options: KeyboardEventInit = {}) => {
+      const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true, cancelable: true, ...options }); target.dispatchEvent(event); return event;
+    };
+    assert.equal(key(layer).defaultPrevented, true); assert.equal(key(layer, { shiftKey: true }).defaultPrevented, true);
+    const stroke = f.session.addStroke(1, 'scribble', [[50, 500], [80, 550]], 2);
+    assert.equal(key(layer, { repeat: true }).defaultPrevented, true); assert.equal(f.session.snapshot.strokes.length, 1);
+    assert.equal(key(layer).defaultPrevented, true); assert.equal(f.session.snapshot.strokes.length, 0);
+    assert.equal(key(layer, { shiftKey: true }).defaultPrevented, true); assert.equal(f.session.snapshot.strokes[0]!.id, stroke.id);
+    const field = f.session.add(1, [80, 580, 240, 610], 12, true); f.session.setValue(field.name, 'Typing');
+    const input = f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!; input.focus();
+    assert.equal(key(input).defaultPrevented, false); assert.equal(field.value, 'Typing');
+    f.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); assert.equal(key(f.doc.activeElement!).defaultPrevented, false);
+  } finally { f.dispose(); }
+});
+
+test('selected ink resize previews cancel cleanly and a completed gesture is one undoable saved edit', async () => {
+  const f = await fixture();
+  try {
+    const stroke = f.session.addStroke(1, 'scribble', [[100, 500], [160, 550], [200, 500]], 2); await f.session.save();
+    const before = structuredClone(stroke), group = f.doc.querySelector<SVGGElement>('[data-pdf-stroke]')!;
+    const layer = f.doc.querySelector<HTMLElement>('.pdf-form-studio-layer')!;
+    f.pointer(group, 'pointerdown', 150, 300); f.pointer(layer, 'pointerup', 150, 300);
+    const handle = group.querySelector<SVGRectElement>('[data-ink-resize="se"]')!; assert(handle.classList.contains('is-selected'));
+    f.pointer(handle, 'pointerdown', 201, 301); f.pointer(layer, 'pointermove', 250, 330);
+    assert.deepEqual(f.session.snapshot.strokes[0]!.points, before.points, 'preview never changes the document');
+    f.pointer(layer, 'pointercancel'); assert.deepEqual(f.session.snapshot.strokes[0]!.points, before.points);
+    f.pointer(handle, 'pointerdown', 201, 301); f.pointer(layer, 'pointermove', 250, 330); f.pointer(layer, 'pointerup', 250, 330);
+    assert.notDeepEqual(f.session.snapshot.strokes[0]!.points, before.points);
+    assert.equal(f.session.snapshot.strokes[0]!.width, before.width); assert.equal(f.session.snapshot.strokes[0]!.id, before.id);
+    f.session.undoStroke(); assert.deepEqual(f.session.snapshot.strokes[0]!.points, before.points);
+    f.session.redoStroke(); await f.session.save(); assert.equal((await readTextPdf(f.bytes())).strokes[0]!.id, before.id);
+  } finally { f.dispose(); }
+});
+
+test('snap-to-text creates separate editable marks per row with one shared history entry and freehand fallback', async () => {
+  const f = await fixture();
+  try {
+    const pages = f.native.pages(); pages[0]!.textWords = [
+      { start: [50, 600], end: [150, 600], height: 14, order: 0 }, { start: [50, 575], end: [150, 575], height: 14, order: 1 }
+    ]; f.native.pages = () => pages; f.editor.refresh();
+    f.tool('Highlighter');
+    f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
+    f.doc.querySelector<HTMLButtonElement>('[aria-label="Snap to text"]')!.click();
+    f.doc.querySelector<HTMLButtonElement>('[aria-label="Close tool settings"]')!.click();
+    const layer = f.doc.querySelector<HTMLElement>('.pdf-form-studio-layer')!;
+    f.pointer(layer, 'pointerdown', 60, 200); f.pointer(layer, 'pointermove', 140, 200); f.pointer(layer, 'pointermove', 140, 225); f.pointer(layer, 'pointerup', 60, 225);
+    assert.equal(f.session.snapshot.strokes.length, 2); assert(f.session.snapshot.strokes.every(stroke => stroke.points.length === 2));
+    f.session.undoStroke(); assert.equal(f.session.snapshot.strokes.length, 0); f.session.redoStroke(); assert.equal(f.session.snapshot.strokes.length, 2);
+    f.pointer(layer, 'pointerdown', 20, 500); f.pointer(layer, 'pointerup', 100, 500); assert.equal(f.session.snapshot.strokes.length, 3);
+    assert.deepEqual(f.session.snapshot.strokes[2]!.points, [[20, 300], [100, 300]]);
+  } finally { f.dispose(); }
+});
+
+test('Live Preview note keyboard targets undo the selected PDF, and typing in the note releases ownership', async () => {
+  const f = await fixture(1, true);
+  try {
+    const field = f.session.add(1, [80, 580, 240, 610], 12, true); f.session.setValue(field.name, 'Selected');
+    f.session.moveObjects([{ kind: 'text', id: field.name }], [10, 0]);
+    f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!.focus();
+    const note = f.doc.createElement('div'); note.contentEditable = 'true'; note.tabIndex = 0; f.doc.body.append(note);
+    const undo = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true, cancelable: true }); note.dispatchEvent(undo);
+    assert.equal(undo.defaultPrevented, true); assert.equal(f.session.snapshot.fields[0]!.widgets[0]!.rect[0], 80);
+    note.focus(); const own = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true, cancelable: true }); note.dispatchEvent(own);
+    assert.equal(own.defaultPrevented, false);
+  } finally { f.dispose(); }
+});
+
+test('text spacing options apply to the selected box, retain defaults, and show another box actual values', async () => {
+  const f = await fixture(1, true);
+  try {
+    const a = f.session.add(1, [80, 580, 240, 610], 12, true), b = f.session.add(1, [80, 520, 240, 550], 12, true);
+    f.session.setValue(a.name, 'First'); f.session.setValue(b.name, 'Second');
+    const frame = (name: string) => f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${name}"]`)!.parentElement!;
+    const open = () => f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
+    const value = (name: string) => f.doc.querySelector<HTMLInputElement>(`input[aria-label="${name}"]`)!;
+    frame(a.name).focus(); open();
+    const letter = value('Letter spacing (pt)'), line = value('Line spacing (×)');
+    letter.value = '1.5'; letter.dispatchEvent(new f.doc.defaultView!.Event('change', { bubbles: true }));
+    line.value = '1.8'; line.dispatchEvent(new f.doc.defaultView!.Event('change', { bubbles: true }));
+    assert.equal(f.session.snapshot.fields.find(field => field.name === a.name)!.letterSpacing, 1.5);
+    assert.equal(f.session.snapshot.fields.find(field => field.name === a.name)!.lineSpacing, 1.8);
+    f.doc.querySelector<HTMLButtonElement>('[aria-label="Close tool settings"]')!.click(); frame(b.name).focus(); open();
+    assert.equal(value('Letter spacing (pt)').value, '0'); assert.equal(value('Line spacing (×)').value, '1.2');
+    const native = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true, cancelable: true });
+    value('Letter spacing (pt)').dispatchEvent(native); assert.equal(native.defaultPrevented, false);
+    value('Letter spacing (pt)').value = '-1'; value('Letter spacing (pt)').dispatchEvent(new f.doc.defaultView!.Event('change', { bubbles: true }));
+    assert.equal(value('Letter spacing (pt)').getAttribute('aria-invalid'), 'true'); assert.equal(b.letterSpacing, undefined);
+  } finally { f.dispose(); }
+});
+
+test('undoing the focused drawing or text box retains PDF focus for a real subsequent redo', async () => {
+  for (const kind of ['ink', 'text'] as const) {
+    const f = await fixture(1, true);
+    try {
+      if (kind === 'ink') {
+        f.session.addStroke(1, 'scribble', [[80, 500], [120, 520]], 2); f.editor.refresh();
+        const layer = f.doc.querySelector<HTMLElement>('.pdf-form-studio-layer')!;
+        f.pointer(f.doc.querySelector('[data-pdf-stroke]')!, 'pointerdown', 100, 290); f.pointer(layer, 'pointerup', 100, 290);
+      } else {
+        const field = f.session.add(1, [80, 580, 240, 610], 12, true); f.session.setValue(field.name, 'Undo creation');
+        f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!.focus();
+      }
+      const shortcut = (redo: boolean) => {
+        const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'z', metaKey: true, shiftKey: redo, bubbles: true, cancelable: true });
+        f.doc.activeElement!.dispatchEvent(event); assert.equal(event.defaultPrevented, true);
+      };
+      shortcut(false); assert.equal(f.session.snapshot[kind === 'ink' ? 'strokes' : 'fields'].length, 0);
+      assert.equal(f.doc.activeElement!.classList.contains('pdf-form-studio-layer'), true);
+      shortcut(true); assert.equal(f.session.snapshot[kind === 'ink' ? 'strokes' : 'fields'].length, 1);
+    } finally { f.dispose(); }
+  }
+});

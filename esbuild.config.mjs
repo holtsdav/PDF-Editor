@@ -11,7 +11,7 @@ const build = await context({
   loader: { '.ttf': 'binary' },
   format: 'cjs',
   target: 'es2022',
-  external: ['obsidian', 'electron'],
+  external: ['obsidian', 'electron', 'node:fs/promises', 'node:path'],
   sourcemap: production ? false : 'inline',
   minify: production,
   logLevel: 'info',

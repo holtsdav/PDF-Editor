@@ -116,3 +116,12 @@ test('stroke simplification preserves endpoints, corners and short tap paths', (
   assert.deepEqual(simplifyStroke([[0, 0], [1, 0], [1, 2], [2, 2]], 0.1), [[0, 0], [1, 0], [1, 2], [2, 2]]);
   assert.deepEqual(simplifyStroke([[5, 5]]), [[5, 5]]);
 });
+
+test('a cancelled ink transaction preserves the existing redo stack and releases history ownership', async () => {
+  const f = await fixture(), session = await TextSession.open(f.store, font), stroke = session.addStroke(1, 'scribble', [[80, 400], [120, 450]], 2);
+  session.moveStroke(stroke.id, [10, 0]); session.undoStroke(); assert.equal(session.canRedoStroke, true);
+  const before = structuredClone(session.snapshot.strokes); assert.equal(session.beginInkAction(), true);
+  session.moveStroke(stroke.id, [0, 20]); session.finishInkAction(true);
+  assert.deepEqual(session.snapshot.strokes, before); assert.equal(session.canRedoStroke, true);
+  session.redoStroke(); assert.equal(session.snapshot.strokes[0]!.points[0]![0], 90);
+});

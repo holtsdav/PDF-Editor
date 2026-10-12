@@ -41,7 +41,7 @@ interface FieldControl {
 }
 interface PageLayer { page: NativePage; layer: HTMLElement; controls: Map<string, FieldControl>; ink: InkLayer; cancelPlacement?: () => void }
 interface EditorState {
-  tool: EditorTool; textFamily: FontFamily; textColor: PdfColor; fontSize: number; markerWidth: number; penWidth: number; markerColor: PdfColor; penColor: PdfColor; selected?: string; selectedStroke?: string;
+  tool: EditorTool; letterSpacing: number; lineSpacing: number; textFamily: FontFamily; textColor: PdfColor; fontSize: number; markerWidth: number; penWidth: number; markerColor: PdfColor; penColor: PdfColor; selected?: string; selectedStroke?: string;
   focused?: { input: HTMLInputElement | HTMLTextAreaElement; page: number; name: string };
 }
 
@@ -76,6 +76,9 @@ export class TextEditor extends Component {
   private loadError = '';
   private loaded = true;
   private fontSize = 14;
+  private letterSpacing = 0;
+  private lineSpacing = 1.2;
+  private snapToText = false;
   private selected?: string;
   private selectedStroke?: string;
   private focused?: { input: HTMLInputElement | HTMLTextAreaElement; page: number; name: string };
@@ -96,7 +99,7 @@ export class TextEditor extends Component {
   constructor(app: App, native: EditorSurface, sessions: VaultSessions, state?: EditorState) {
     super(); this.app = app; this.native = native; this.sessions = sessions;
     Object.assign(this, sessions.preferences);
-    if (state) { this.textFamily = state.textFamily; this.textColor = state.textColor; this.tool = state.tool; this.fontSize = state.fontSize; this.markerWidth = state.markerWidth; this.penWidth = state.penWidth; this.markerColor = state.markerColor; this.penColor = state.penColor;
+    if (state) { this.letterSpacing = state.letterSpacing; this.lineSpacing = state.lineSpacing; this.textFamily = state.textFamily; this.textColor = state.textColor; this.tool = state.tool; this.fontSize = state.fontSize; this.markerWidth = state.markerWidth; this.penWidth = state.penWidth; this.markerColor = state.markerColor; this.penColor = state.penColor;
       this.selected = state.selected; this.selectedStroke = state.selectedStroke; this.focused = state.focused; }
     const doc = native.element.ownerDocument;
     if (app.keymap) {
@@ -105,6 +108,7 @@ export class TextEditor extends Component {
         if (this.claimScopedShortcut(key, event)) return false;
         return undefined;
       });
+      for (const redo of [false, true]) scope.register(redo ? ['Mod', 'Shift'] : ['Mod'], 'z', event => this.claimHistoryShortcut(event) ? false : undefined);
       this.register(() => { if (this.objectScopeActive) app.keymap.popScope(scope); });
     }
     this.register(usePdfFont(doc));
@@ -132,11 +136,8 @@ export class TextEditor extends Component {
     this.propertiesButton.createSpan({ cls: 'pfs-tool-value' });
     this.saveButton = button(this.editControls, 'Save PDF', 'save', () => { void this.save(); });
     this.removeButton = button(this.editControls, 'Remove selection', 'trash-2', () => this.removeSelection());
-    this.undoButton = button(this.editControls, 'Undo · Cmd/Ctrl+Z', 'undo-2', () => {
-      try { this.session?.undoStroke(); this.selectedStroke = undefined; this.updateStatus(); this.refresh(); this.scheduleSave(); }
-      catch (error) { this.showError(error); }
-    });
-    this.redoButton = button(this.editControls, 'Redo · Shift+Cmd/Ctrl+Z', 'redo-2', () => { this.session?.redoStroke(); this.scheduleSave(); });
+    this.undoButton = button(this.editControls, 'Undo · Cmd/Ctrl+Z', 'undo-2', () => this.applyHistory(false));
+    this.redoButton = button(this.editControls, 'Redo · Shift+Cmd/Ctrl+Z', 'redo-2', () => this.applyHistory(true));
     this.status = doc.createElement('span'); this.status.className = 'pdf-form-studio-status'; this.status.setAttribute('role', 'status');
     this.toolbar.append(this.status);
     const more = button(this.toolbar, 'PDF options', 'ellipsis', () => this.openMenu(more));
@@ -176,6 +177,7 @@ export class TextEditor extends Component {
     // Claim Save at the window capture phase, scoped to this editor's controls.
     this.registerDomEvent(doc.defaultView!, 'keydown', event => {
       const target = event.target;
+      if (this.claimHistoryShortcut(event)) return;
       const objectKey = (event.metaKey || event.ctrlKey) && ['c', 'v', 'd'].includes(event.key.toLowerCase());
       if (!this.shortcutTarget(target) && !(objectKey && this.objectShortcutActive())
         && !(target === doc.body && event.key === 'Escape' && this.tool !== 'select')) return;
@@ -215,10 +217,6 @@ export class TextEditor extends Component {
       }
       if (event.key.toLowerCase() === 's') {
         event.preventDefault(); event.stopImmediatePropagation(); void this.save();
-      }
-      if (event.key.toLowerCase() === 'z' && (event.shiftKey ? this.session?.canRedoStroke : this.session?.canUndoStroke)
-        && !this.isTextTarget(target)) {
-        event.preventDefault(); event.stopImmediatePropagation(); if (event.shiftKey) this.session?.redoStroke(); else this.session?.undoStroke(); this.selectedStroke = undefined; this.scheduleSave();
       }
     }, true);
     this.registerDomEvent(doc.defaultView!, 'copy', event => {
@@ -304,7 +302,7 @@ export class TextEditor extends Component {
 
   get file() { return this.native.file; }
   captureState(native?: NativePdf): EditorState | undefined {
-    return !native || this.native.file === native.file ? { tool: this.tool, textFamily: this.textFamily, textColor: this.textColor, fontSize: this.fontSize, markerWidth: this.markerWidth, penWidth: this.penWidth, markerColor: this.markerColor, penColor: this.penColor,
+    return !native || this.native.file === native.file ? { tool: this.tool, letterSpacing: this.letterSpacing, lineSpacing: this.lineSpacing, textFamily: this.textFamily, textColor: this.textColor, fontSize: this.fontSize, markerWidth: this.markerWidth, penWidth: this.penWidth, markerColor: this.markerColor, penColor: this.penColor,
       selected: this.selected, selectedStroke: this.selectedStroke, focused: this.focused } : undefined;
   }
   private async openSession(): Promise<void> {
@@ -343,7 +341,7 @@ export class TextEditor extends Component {
     this.closePopover(); this.selection?.cancel(); this.selection?.clear();
     const retain = tool === 'select' || tool === 'text' ? this.activeBox : undefined;
     this.endTextEditing(retain);
-    for (const entry of this.layers.values()) { entry.cancelPlacement?.(); entry.ink.finishPending(); for (const control of entry.controls.values()) control.cancel?.(); }
+    for (const entry of this.layers.values()) { entry.cancelPlacement?.(); entry.ink.cancel(); for (const control of entry.controls.values()) control.cancel?.(); }
     this.releaseFocus(); this.focused = undefined;
     const active = this.native.element.ownerDocument.activeElement;
     if (active instanceof this.native.element.ownerDocument.defaultView!.HTMLElement && [...this.layers.values()].some(entry => entry.layer.contains(active))) active.blur();
@@ -429,7 +427,34 @@ export class TextEditor extends Component {
   private objectShortcutActive(): boolean {
     return this.objectScopeActive || !!this.selection?.objects.length;
   }
+  private applyHistory(redo: boolean): void {
+    const doc = this.native.element.ownerDocument, active = doc.activeElement;
+    const layer = active instanceof doc.defaultView!.Element && this.native.element.contains(active)
+      ? active.closest<HTMLElement>('.pdf-form-studio-layer') : undefined;
+    try {
+      if (redo) this.session?.redoStroke(); else this.session?.undoStroke();
+      this.selectedStroke = undefined; this.updateStatus(); this.refresh(); this.scheduleSave();
+      // Removing a focused object must keep the next Undo/Redo in this PDF, not the containing note.
+      if (layer?.isConnected && (doc.activeElement === doc.body || !doc.activeElement)) layer.focus({ preventScroll: true });
+    } catch (error) { this.showError(error); }
+  }
+  private claimHistoryShortcut(event: KeyboardEvent): boolean {
+    const target = event.target, view = this.native.element.ownerDocument.defaultView!;
+    const ownControl = target instanceof view.Element && this.ownsControl(target);
+    if (!this.loaded || !this.session || !(event.metaKey || event.ctrlKey) || event.altKey || event.isComposing || event.key.toLowerCase() !== 'z'
+      || !(target instanceof view.Node) || (!this.shortcutTarget(target) && !ownControl && !this.objectShortcutActive())) return false;
+    if (this.isTextTarget(target) && (this.shortcutTarget(target) || ownControl)) {
+      // Preserve the browser's text-edit history, while keeping the note's keymap out.
+      event.stopImmediatePropagation();
+      return false;
+    }
+    event.preventDefault(); event.stopImmediatePropagation();
+    // Consume exhausted/blocked object history too: it must never undo the enclosing note.
+    if (!event.repeat && (event.shiftKey ? this.session.canRedoStroke : this.session.canUndoStroke)) this.applyHistory(event.shiftKey);
+    return true;
+  }
   private claimScopedShortcut(key: string, event: KeyboardEvent): boolean {
+    if (key === 'z') return this.claimHistoryShortcut(event);
     const objects = this.shortcutObjects(event.target);
     if (!this.loaded || !this.session || !objects.length || event.shiftKey || event.altKey || event.isComposing) return false;
     const target = event.target;
@@ -626,7 +651,7 @@ export class TextEditor extends Component {
         const firstHeight = area[3] - area[1] - (block ? (block.layout.rows - 1) * block.layout.spacing : 0);
         const size = Math.min(this.fontSize, Math.max(6, (firstHeight - 2) / 1.2));
         field = this.session.add(page, area, size, !!block, 0, block?.layout);
-        this.session.formatField(field.name, { fontFamily: this.textFamily, color: this.textColor });
+        this.session.formatField(field.name, { fontFamily: this.textFamily, color: this.textColor, letterSpacing: this.letterSpacing, ...(!field.ruled ? { lineSpacing: this.lineSpacing } : {}) });
       }
       this.answerFields.add(field.name); this.selected = field.name; this.selectedStroke = undefined; this.updateStatus(); this.refresh();
       const input = entry.controls.get(`${field.name}:${this.answerWidget(field, line)}`)?.input;
@@ -644,7 +669,7 @@ export class TextEditor extends Component {
     } catch (error) { this.showError(error); }
   }
   private rememberPreferences(): void {
-    void this.sessions.updatePreferences({ ...this.sessions.preferences, fontSize: this.fontSize, textFamily: this.textFamily, textColor: this.textColor, penColor: this.penColor, markerColor: this.markerColor, penWidth: this.penWidth, markerWidth: this.markerWidth, smoothPen: this.smoothPen, holdShapes: this.holdShapes, holdHighlighter: this.holdHighlighter }).catch(error => this.showError(error));
+    void this.sessions.updatePreferences({ ...this.sessions.preferences, fontSize: this.fontSize, letterSpacing: this.letterSpacing, lineSpacing: this.lineSpacing, snapToText: this.snapToText, textFamily: this.textFamily, textColor: this.textColor, penColor: this.penColor, markerColor: this.markerColor, penWidth: this.penWidth, markerWidth: this.markerWidth, smoothPen: this.smoothPen, holdShapes: this.holdShapes, holdHighlighter: this.holdHighlighter }).catch(error => this.showError(error));
   }
   private closePopover(): void { if (this.popover) { this.removeChild(this.popover); this.popover = undefined; } this.propertiesButton.setAttribute('aria-expanded', 'false'); }
   private openProperties(): void {
@@ -658,6 +683,9 @@ export class TextEditor extends Component {
       changeColor: color => { this.textColor = color; this.rememberPreferences(); this.formatSelected({ color }); this.updateStatus(); },
       text: { font: field?.fontFamily ?? this.textFamily, size: field?.fontSize ?? this.fontSize,
         change: (fontFamily, fontSize) => { this.textFamily = fontFamily; this.fontSize = fontSize; this.rememberPreferences(); this.formatSelected({ fontFamily, fontSize }); this.updateStatus(); } },
+      ...(!field || field.owned ? { spacing: { letter: field ? field.letterSpacing ?? 0 : this.letterSpacing,
+        line: field?.ruled ? Number((field.ruled.spacing / field.fontSize).toFixed(2)) : field ? field.lineSpacing ?? 1.2 : this.lineSpacing, ruled: !!field?.ruled,
+        change: (kind: 'letterSpacing' | 'lineSpacing', value: number) => { this[kind] = value; this.rememberPreferences(); this.formatSelected({ [kind]: value }); this.updateStatus(); } } } : {}),
       close: () => this.closePopover()
     })); } finally { this.openingPopover = false; }
     this.updateStatus(); this.propertiesButton.setAttribute('aria-expanded', 'true');
@@ -670,7 +698,8 @@ export class TextEditor extends Component {
       changeColor: color => { if (kind === 'marker') this.markerColor = color; else this.penColor = color; this.rememberPreferences(); this.updateStatus(); },
       widths: { values: kind === 'marker' ? [8, 14, 22, 30] : [1, 2, 4, 6], value: kind === 'marker' ? this.markerWidth : this.penWidth,
         change: value => { if (kind === 'marker') this.markerWidth = value; else this.penWidth = value; this.rememberPreferences(); this.updateStatus(); } }, close: () => this.closePopover(),
-      toggles: kind === 'marker' ? [{ label: 'Hold for straight line', description: 'Pause at the end before lifting.', value: this.holdHighlighter, change: value => { this.holdHighlighter = value; this.rememberPreferences(); } }]
+      toggles: kind === 'marker' ? [{ label: 'Snap to text', description: 'Align highlights with selectable words. Scanned pages stay freehand.', value: this.snapToText, change: value => { this.snapToText = value; this.rememberPreferences(); } },
+        { label: 'Hold for straight line', description: 'Pause at the end before lifting.', value: this.holdHighlighter, change: value => { this.holdHighlighter = value; this.rememberPreferences(); } }]
         : [{ label: 'Smooth ink', description: 'Reduce wobble while keeping your handwriting.', value: this.smoothPen, change: value => { this.smoothPen = value; this.rememberPreferences(); } },
           { label: 'Draw & hold shapes', description: 'Lines, rectangles, triangles, circles, ellipses and arrows. Keep holding and drag to resize.', value: this.holdShapes, change: value => { this.holdShapes = value; this.rememberPreferences(); } }]
     })); } finally { this.openingPopover = false; }
@@ -824,7 +853,7 @@ export class TextEditor extends Component {
         page.div.append(layer);
         const ink = this.addChild(new InkLayer(page, layer, this.session, {
           tool: () => this.tool, width: kind => kind === 'marker' ? this.markerWidth : this.penWidth, color: kind => kind === 'marker' ? this.markerColor : this.penColor, selected: () => this.selectedStroke,
-          smooth: () => this.smoothPen, shapes: () => this.holdShapes, straightHold: () => this.holdHighlighter,
+          smooth: () => this.smoothPen, shapes: () => this.holdShapes, straightHold: () => this.holdHighlighter, snapText: () => this.snapToText,
           select: id => { if (id) this.clearBrowserSelection(); this.selection?.clear(); this.selectedStroke = id; this.selected = undefined; this.focused = undefined; this.updateStatus(); this.refresh(); },
           start: () => {
             this.focused = undefined; this.selected = undefined; this.selectedStroke = undefined;
@@ -905,7 +934,8 @@ export class TextEditor extends Component {
     frame.style.borderWidth = appearance?.borderStyle === 'underline' ? `0 0 ${borderWidth}px` : `${borderWidth}px`;
     input.style.padding = `${entry.page.viewport.scale}px`;
     const offset = field.ruled ? Math.max(0, (field.ruled.spacing - field.fontSize * 1.2) / 2) * entry.page.viewport.scale : 0;
-    input.style.lineHeight = field.ruled ? `${field.ruled.spacing * entry.page.viewport.scale}px` : '1.2';
+    input.style.letterSpacing = `${(field.letterSpacing ?? 0) * entry.page.viewport.scale}px`;
+    input.style.lineHeight = field.ruled ? `${field.ruled.spacing * entry.page.viewport.scale}px` : String(field.lineSpacing ?? 1.2);
     input.style.position = field.ruled ? 'relative' : '';
     input.style.top = field.ruled ? `${-offset}px` : '';
     input.style.height = field.ruled ? `calc(100% + ${offset * 2}px)` : '';
@@ -977,11 +1007,11 @@ export class TextEditor extends Component {
       width: style.width, height: '0', minHeight: '0', maxHeight: 'none', minWidth: '0',
       fontFamily: style.fontFamily, fontSize: style.fontSize, fontWeight: style.fontWeight,
       fontKerning: style.fontKerning, fontVariantLigatures: style.fontVariantLigatures,
-      lineHeight: style.lineHeight, padding: style.padding, border: '0', boxSizing: 'border-box',
+      letterSpacing: style.letterSpacing, lineHeight: style.lineHeight, padding: style.padding, border: '0', boxSizing: 'border-box',
       whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', overflow: 'hidden', margin: '0'
     });
     measure.tabIndex = -1; measure.setAttribute('aria-hidden', 'true'); doc.body.append(measure);
-    const height = Math.max(measure.scrollHeight + 1, (field.fontSize * 1.2 + 2) * entry.page.viewport.scale);
+    const height = Math.max(measure.scrollHeight + 1, (field.fontSize * (field.lineSpacing ?? 1.2) + 2) * entry.page.viewport.scale);
     measure.remove();
     const viewport = entry.page.viewport;
     const angle = ((viewport.rotation - widget.rotation) % 360 + 360) % 360;
@@ -1095,7 +1125,7 @@ export class TextEditor extends Component {
       const widget = field.widgets[0]!; const viewport = entry.page.viewport; const end = point(event);
       if (!control.preview && Math.hypot(end[0] - gesture.start[0], end[1] - gesture.start[1]) < 3) return;
       const angle = ((viewport.rotation - widget.rotation) % 360 + 360) % 360;
-      const minimum: [number, number] = [40 * viewport.scale, (field.fontSize * 1.2 + 2) * viewport.scale];
+      const minimum: [number, number] = [40 * viewport.scale, (field.fontSize * (field.lineSpacing ?? 1.2) + 2) * viewport.scale];
       if (angle === 90 || angle === 270) minimum.reverse();
       control.preview = transformBox(gesture.rect, [0, 0, viewport.width, viewport.height], [end[0] - gesture.start[0], end[1] - gesture.start[1]], gesture.handle, minimum);
       this.positionField(entry, control, field, pdfRectangle(viewport, [control.preview[0], control.preview[1]], [control.preview[2], control.preview[3]]), widget.rotation);
@@ -1133,7 +1163,7 @@ export class TextEditor extends Component {
       const viewport = entry.page.viewport; const step = viewport.scale * (event.shiftKey ? 10 : 1);
       const handle = event.altKey ? (delta[0] ? 'e' : 's') : undefined;
       const rect = transformBox(screenRectangle(viewport, widget.rect), [0, 0, viewport.width, viewport.height], [delta[0] * step, delta[1] * step], handle,
-        [40 * viewport.scale, (field.fontSize * 1.2 + 2) * viewport.scale]);
+        [40 * viewport.scale, (field.fontSize * (field.lineSpacing ?? 1.2) + 2) * viewport.scale]);
       this.session!.updateBox(name, pdfRectangle(viewport, [rect[0], rect[1]], [rect[2], rect[3]]));
       if (handle) this.growField(entry, control);
       this.scheduleSave();
@@ -1183,7 +1213,7 @@ export class TextEditor extends Component {
       try {
         if (rect[2] - rect[0] < 8 || rect[3] - rect[1] < 8) return;
         const field = this.session.add(entry.page.number, rect, this.fontSize, true, entry.page.viewport.rotation);
-        this.session.formatField(field.name, { fontFamily: this.textFamily, color: this.textColor });
+        this.session.formatField(field.name, { fontFamily: this.textFamily, color: this.textColor, letterSpacing: this.letterSpacing, ...(!field.ruled ? { lineSpacing: this.lineSpacing } : {}) });
         this.setTool('select');
         this.selected = field.name; this.selectedStroke = undefined; this.updateStatus(); this.refresh();
         entry.controls.get(`${field.name}:0`)?.input.focus({ preventScroll: true });
@@ -1203,7 +1233,7 @@ export class TextEditor extends Component {
   onunload(): void {
     this.closePopover(); this.selection?.cancel(); this.selection?.clear();
     this.endTextEditing();
-    for (const entry of this.layers.values()) entry.ink.finishPending();
+    for (const entry of this.layers.values()) entry.ink.cancel();
     this.loaded = false;
     this.releaseFocus();
     if (this.timer !== undefined) this.native.element.ownerDocument.defaultView!.clearTimeout(this.timer);

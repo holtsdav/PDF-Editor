@@ -6,6 +6,7 @@ import { VaultSessions } from './pdf/vault-sessions';
 import { isRecoveryPath, loadBackups } from './pdf/recovery';
 import { loadToolPreferences } from './pdf/tool-preferences';
 import { PdfSettingsTab } from './ui/plugin-settings';
+import { watchPdfImportCleanup } from './compat/pdf-import';
 import type { BackupRecord } from './pdf/recovery';
 import fontBytes from '../assets/fonts/NotoSans-Regular.ttf';
 import serifBytes from '../assets/fonts/NotoSerif-Regular.ttf';
@@ -47,6 +48,7 @@ export default class PdfEditor extends Plugin {
     }, this.preferences);
     await this.sessions.initialize();
     this.addSettingTab(new PdfSettingsTab(this.app, this, this.sessions));
+    this.register(watchPdfImportCleanup(this.app, () => this.sessions.preferences.trashImportedOriginals, this.sessions.root));
     this.addCommand({
       id: 'inspect-pdf-form-fields',
       name: 'Inspect PDF form fields',

@@ -90,7 +90,7 @@ test('all existing settings expose searchable names without reading storage duri
   try {
     const definitions = f.tab.getSettingDefinitions();
     const names = definitions.flatMap(item => 'items' in item ? item.items?.flatMap(child => 'name' in child ? [child.name] : []) ?? [] : 'name' in item ? [item.name] : []);
-    assert.deepEqual(names, ['PDF toolbar top offset', 'Floating PDF toolbar', 'Detect answer lines on PDF open', 'Automatic detection page limit', 'Wrap across consecutive answer lines', 'Keep one backup of each PDF you edit', 'Backup folder', 'Delete backups']);
+    assert.deepEqual(names, ['PDF toolbar top offset', 'Floating PDF toolbar', 'Move original PDF to Trash after import', 'Detect answer lines on PDF open', 'Automatic detection page limit', 'Wrap across consecutive answer lines', 'Keep one backup of each PDF you edit', 'Backup folder', 'Delete backups']);
     assert.equal(f.usageReads(), 0); assert.equal(f.writes.length, 0);
     assert.equal(Object.hasOwn(PdfSettingsTab.prototype, 'display'), false);
   } finally { f.dispose(); }

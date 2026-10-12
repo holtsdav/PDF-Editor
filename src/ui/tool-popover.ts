@@ -3,7 +3,7 @@ import { cssColor, parseColor, fontFaces } from '../pdf/text-format';
 import type { FontFamily, PdfColor } from '../pdf/text-format';
 
 export const colors = [['Black', '#161616'], ['Gray', '#64748b'], ['Red', '#c62828'], ['Orange', '#ee7900'], ['Yellow', '#ffd600'], ['Green', '#22813e'], ['Blue', '#1769ce'], ['Purple', '#8347b5']] as const;
-interface Options { title: string; color: PdfColor; changeColor(color: PdfColor): void; widths?: { values: number[]; value: number; change(value: number): void }; text?: { font: FontFamily; size: number; change(font: FontFamily, size: number): void }; toggles?: { label: string; description: string; value: boolean; change(value: boolean): void }[]; close(): void }
+interface Options { title: string; color: PdfColor; changeColor(color: PdfColor): void; widths?: { values: number[]; value: number; change(value: number): void }; text?: { font: FontFamily; size: number; change(font: FontFamily, size: number): void }; spacing?: { letter: number; line: number; ruled: boolean; change(kind: 'letterSpacing' | 'lineSpacing', value: number): void }; toggles?: { label: string; description: string; value: boolean; change(value: boolean): void }[]; close(): void }
 
 /** Document-local portal: remains usable in clipped embeds and pop-out windows. */
 export class ToolPopover extends Component {
@@ -53,6 +53,25 @@ export class ToolPopover extends Component {
         this.registerDomEvent(b, 'click', () => { size = value; text.change(font, size); for (const item of sizes.querySelectorAll('button')) item.setAttribute('aria-pressed', String(item === b)); });
       }
     }
+    if (options.spacing) {
+      const spacing = options.spacing;
+      for (const [kind, label, value, min, max, step, unit] of [
+        ['letterSpacing', 'Letter spacing', spacing.letter, 0, 20, 0.1, 'pt'],
+        ['lineSpacing', 'Line spacing', spacing.line, 0.8, 3, 0.1, '×']
+      ] as const) {
+        const row = el.createEl('label', { cls: 'pfs-spacing-row' }); row.createSpan({ text: label });
+        const control = row.createSpan({ cls: 'pfs-spacing-value' });
+        const input = control.createEl('input', { attr: { type: 'number', min: String(min), max: String(max), step: String(step), 'aria-label': `${label} (${unit})` } });
+        input.value = String(value); input.disabled = kind === 'lineSpacing' && spacing.ruled;
+        control.createSpan({ text: unit });
+        this.registerDomEvent(input, 'change', () => {
+          const next = input.valueAsNumber;
+          if (!Number.isFinite(next) || next < min || next > max) { input.setAttribute('aria-invalid', 'true'); return; }
+          input.removeAttribute('aria-invalid'); spacing.change(kind, next);
+        });
+      }
+      if (spacing.ruled) el.createEl('p', { cls: 'pfs-spacing-description', text: 'Answer lines keep their printed spacing. Resize the box to use custom line spacing.' });
+    }
     for (const toggle of options.toggles ?? []) {
       const row = el.createEl('button', { cls: 'pfs-assist-toggle', attr: { role: 'switch', 'aria-label': toggle.label, 'aria-checked': String(toggle.value) } });
       const copy = row.createSpan(); copy.createEl('strong', { text: toggle.label }); copy.createSpan({ cls: 'pfs-assist-description', text: toggle.description });
@@ -70,9 +89,9 @@ export class ToolPopover extends Component {
     this.registerDomEvent(el, 'keydown', event => {
       event.stopPropagation();
       if (event.key === 'Escape') { event.preventDefault(); options.close(); anchor.focus({ preventScroll: true }); return; }
-      const buttons = [...el.querySelectorAll<HTMLButtonElement>('button')], index = buttons.indexOf(doc.activeElement as HTMLButtonElement);
-      if (['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'].includes(event.key)) { event.preventDefault(); buttons[(index + (event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? -1 : 1) + buttons.length) % buttons.length]?.focus(); }
-      if (event.key === 'Tab') { event.preventDefault(); buttons[(index + (event.shiftKey ? -1 : 1) + buttons.length) % buttons.length]?.focus(); }
+      const controls = [...el.querySelectorAll<HTMLElement>('button, input:not(:disabled)')], index = controls.indexOf(doc.activeElement as HTMLElement);
+      if (!(event.target instanceof doc.defaultView!.HTMLInputElement) && ['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'].includes(event.key)) { event.preventDefault(); controls[(index + (event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? -1 : 1) + controls.length) % controls.length]?.focus(); }
+      if (event.key === 'Tab') { event.preventDefault(); controls[(index + (event.shiftKey ? -1 : 1) + controls.length) % controls.length]?.focus(); }
     });
     this.register(() => el.remove());
   }

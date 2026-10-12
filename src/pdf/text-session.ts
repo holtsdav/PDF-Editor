@@ -1,7 +1,7 @@
 import { FIELD_PREFIX, readTextPdf, renderTextPdf, writeTextPdf } from './text-engine.ts';
 import type { AddedField, BoxUpdate, Rect, TextChanges, TextField, TextSnapshot } from './text-engine.ts';
 import { hash } from './recovery.ts';
-import { validColor } from './text-format.ts';
+import { validColor, validSpacing, spacedWidth } from './text-format.ts';
 import type { PdfColor, PdfFonts, TextFormat } from './text-format.ts';
 import type { BackupPurpose } from './recovery.ts';
 import { InteractionGate } from './interaction-gate.ts';
@@ -23,7 +23,7 @@ export interface PdfStore {
 type TextState = { fields: TextField[]; values: TextChanges['values']; added: TextChanges['added']; boxes: TextChanges['boxes']; deleted: TextChanges['deleted']; formats: TextChanges['formats'] };
 export interface PdfObject { kind: 'text' | 'ink'; id: string }
 export type CopiedPdfObject =
-  | { kind: 'text'; page: number; rect: Rect; rotation: number; value: string; fontSize: number; fontFamily: FontFamily; color: PdfColor; multiline: boolean; ruled?: RuledLayout }
+  | { kind: 'text'; page: number; rect: Rect; rotation: number; value: string; fontSize: number; fontFamily: FontFamily; color: PdfColor; multiline: boolean; ruled?: RuledLayout; letterSpacing?: number; lineSpacing?: number }
   | { kind: 'ink'; page: number; rect: Rect; points: Point[]; strokeKind: InkKind; width: number; color: PdfColor; opacity: number };
 type UndoEntry = { kind: 'objects'; state: TextState; strokes: InkStroke[] } | { kind: 'ink'; strokes: InkStroke[] } | { kind: 'text'; state: TextState; key: string; time: number };
 
@@ -137,7 +137,7 @@ export class TextSession {
     if (!font) { font = fontkit.create(this.font instanceof Uint8Array ? this.font : this.font[field.fontFamily]); this.metrics.set(field.fontFamily, font); }
     const widget = field.widgets[0]!;
     const rows = Math.max(minimumRows, wrapText(field.value, widget.rect[2] - widget.rect[0] - 2,
-      text => font.layout(text).glyphs.reduce((sum, glyph) => sum + glyph.advanceWidth, 0) * field.fontSize / font.unitsPerEm).length);
+      text => spacedWidth(text, part => font.layout(part, { liga: false, clig: false, kern: false }).glyphs.reduce((sum, glyph) => sum + glyph.advanceWidth, 0) * field.fontSize / font.unitsPerEm, field.letterSpacing)).length);
     const next = growRuledBlock(widget.rect, field.ruled, rows, field.fontSize, this.snapshot.pages[widget.page - 1]!);
     if (widget.rect.every((n, i) => Math.abs(n - next.rect[i]!) < 0.001) && next.layout?.spacing === field.ruled.spacing && next.layout?.rows === field.ruled.rows) return;
     this.rememberText(name);
@@ -197,7 +197,7 @@ export class TextSession {
     widget.rect = [...rect]; field.fontSize = fontSize; field.multiline = multiline;
     this.changes.boxes.set(name, { rect: [...rect], fontSize, multiline, ...(field.ruled ? { ruled: { ...field.ruled } } : {}) });
     this.changes.values.set(name, field.value);
-    if (this.changes.formats.has(name)) this.changes.formats.set(name, { fontFamily: field.fontFamily, fontSize, color: [...field.color] });
+    if (this.changes.formats.has(name)) this.changes.formats.set(name, { ...this.changes.formats.get(name)!, fontSize });
     this.changed();
   }
 
@@ -220,13 +220,16 @@ export class TextSession {
     this.assertAvailable();
     const field = this.snapshot.fields.find(field => field.name === name);
     if (!field || field.readOnly || this.conflicted) throw new Error('This text cannot be formatted.');
-    const next = { fontFamily: field.fontFamily, fontSize: field.fontSize, color: [...field.color] as PdfColor, ...format };
+    if (!field.owned && (format.letterSpacing !== undefined || format.lineSpacing !== undefined)) throw new Error('Spacing is supported only for added text boxes.');
+    if (field.ruled && format.lineSpacing !== undefined && format.lineSpacing !== field.lineSpacing) throw new Error('Answer lines use their printed line spacing. Resize the box to change it.');
+    const next = { fontFamily: field.fontFamily, fontSize: field.fontSize, color: [...field.color] as PdfColor,
+      ...(field.letterSpacing !== undefined ? { letterSpacing: field.letterSpacing } : {}), ...(field.lineSpacing !== undefined ? { lineSpacing: field.lineSpacing } : {}), ...format };
     if (field.autoSize && format.fontSize === undefined) next.autoSize = true; else delete next.autoSize;
     if (!field.owned && format.fontSize === undefined && (!this.changes.formats.has(name) || this.changes.formats.get(name)?.preserveWidgetSizes)) next.preserveWidgetSizes = true;
     else delete next.preserveWidgetSizes;
-    if (!['sans', 'serif', 'mono'].includes(next.fontFamily) || !Number.isFinite(next.fontSize) || next.fontSize < 1 || next.fontSize > 200 || !validColor(next.color)) throw new Error('Invalid text formatting.');
-    if (next.fontFamily === field.fontFamily && next.fontSize === field.fontSize && next.color.every((v, i) => v === field.color[i]) && next.autoSize === field.autoSize) return;
-    this.rememberText(name);
+    if (!['sans', 'serif', 'mono'].includes(next.fontFamily) || !Number.isFinite(next.fontSize) || next.fontSize < 1 || next.fontSize > 200 || !validColor(next.color) || !validSpacing(next.letterSpacing, next.lineSpacing)) throw new Error('Invalid text formatting.');
+    if (next.fontFamily === field.fontFamily && next.fontSize === field.fontSize && next.color.every((v, i) => v === field.color[i]) && next.autoSize === field.autoSize && next.letterSpacing === field.letterSpacing && next.lineSpacing === field.lineSpacing) return;
+    this.rememberText(name, false);
     Object.assign(field, next);
     if (!next.autoSize) delete field.autoSize;
     for (const widget of field.widgets) { if (!next.preserveWidgetSizes) delete widget.fontSize; if (format.color) delete widget.color; }
@@ -256,8 +259,7 @@ export class TextSession {
   }
   private rememberInk(owner: object = this): void {
     if (this.inkOwner && this.inkOwner !== owner) throw new Error('Finish the current drawing gesture first.');
-    this.strokeFuture = [];
-    if (!this.inkAction) { this.strokeHistory.push({ kind: 'ink', strokes: structuredClone(this.snapshot.strokes) }); if (this.strokeHistory.length > 50) this.strokeHistory.shift(); }
+    if (!this.inkAction) { this.strokeFuture = []; this.strokeHistory.push({ kind: 'ink', strokes: structuredClone(this.snapshot.strokes) }); if (this.strokeHistory.length > 50) this.strokeHistory.shift(); }
   }
   beginInkAction(owner: object = this): boolean {
     if (this.replacing || this.conflicted) return false;
@@ -270,7 +272,7 @@ export class TextSession {
     const before = this.inkAction; this.inkAction = undefined; this.inkOwner = undefined;
     if (!before || JSON.stringify(before) === JSON.stringify(this.snapshot.strokes)) return;
     if (cancel) this.restoreInk(before);
-    else { this.strokeHistory.push({ kind: 'ink', strokes: before }); if (this.strokeHistory.length > 50) this.strokeHistory.shift(); this.notify(); }
+    else { this.strokeFuture = []; this.strokeHistory.push({ kind: 'ink', strokes: before }); if (this.strokeHistory.length > 50) this.strokeHistory.shift(); this.notify(); }
   }
   private restoreInk(strokes: InkStroke[]): void {
     this.snapshot.strokes = structuredClone(strokes);
@@ -291,6 +293,19 @@ export class TextSession {
     const points = stroke.points.map(([x, y]) => [x + dx, y + dy] as Point);
     const next = { ...stroke, points, rect: strokeBounds(points, stroke.width, b) };
     this.snapshot.strokes[index] = next; this.changes.strokes.set(id, next); this.changed();
+  }
+
+  /** Commit geometry once; the UI keeps interrupted resize previews out of the document. */
+  resizeStroke(id: string, points: Point[], owner: object = this): void {
+    this.assertAvailable();
+    if (this.conflicted) throw new Error('Reload the PDF before resizing marks.');
+    const index = this.snapshot.strokes.findIndex(stroke => stroke.id === id), stroke = this.snapshot.strokes[index];
+    if (!stroke || stroke.readOnly || stroke.hidden) throw new Error('This mark cannot be resized.');
+    const bounds = this.snapshot.pages[stroke.page - 1]!;
+    const next = { ...stroke, points: points.map<Point>(point => [...point]), rect: strokeBounds(points, stroke.width, bounds) };
+    validateStroke(next, bounds);
+    if (JSON.stringify(stroke.points) === JSON.stringify(next.points)) return;
+    this.rememberInk(owner); this.snapshot.strokes[index] = next; this.changes.strokes.set(id, next); this.changed();
   }
 
   get canEditObjects(): boolean { return !this.conflicted && !this.replacing && !this.inkAction; }
@@ -317,6 +332,7 @@ export class TextSession {
         const field = this.snapshot.fields.find(field => field.name === object.id)!;
         return { kind: 'text', page, rect: [...rect], rotation: field.widgets[0]!.rotation, value: field.value,
           fontSize: field.fontSize, fontFamily: field.fontFamily, color: [...field.color], multiline: field.multiline,
+          ...(field.letterSpacing !== undefined ? { letterSpacing: field.letterSpacing } : {}), ...(field.lineSpacing !== undefined ? { lineSpacing: field.lineSpacing } : {}),
           ...(field.ruled ? { ruled: { ...field.ruled } } : {}) };
       }
       const stroke = this.snapshot.strokes.find(stroke => stroke.id === object.id)!;
@@ -337,7 +353,7 @@ export class TextSession {
         || item.rect[2] <= item.rect[0] || item.rect[3] <= item.rect[1]) throw new Error('Copied object does not fit on this PDF page.');
       if (item.kind === 'text') {
         if (!Number.isFinite(item.fontSize) || item.fontSize < 1 || item.fontSize > 200 || item.rotation % 90 !== 0
-          || !validColor(item.color) || !['sans', 'serif', 'mono'].includes(item.fontFamily)
+          || !validColor(item.color) || !validSpacing(item.letterSpacing, item.lineSpacing) || !['sans', 'serif', 'mono'].includes(item.fontFamily)
           || (item.ruled && !validRuledLayout(item.ruled, item.rect))) throw new Error('Invalid copied text box.');
       } else if (item.kind === 'ink') {
         validateStroke({ id: INK_PREFIX + 'copy', page: item.page, kind: item.strokeKind, points: item.points, width: item.width,
@@ -357,9 +373,11 @@ export class TextSession {
           ...(item.ruled ? { ruled: { ...item.ruled } } : {}) };
         this.snapshot.fields.push({ name, value: item.value, fontSize: item.fontSize, fontFamily: item.fontFamily,
           color: [...item.color], multiline: item.multiline, readOnly: false, owned: true,
+          ...(item.letterSpacing !== undefined ? { letterSpacing: item.letterSpacing } : {}), ...(item.lineSpacing !== undefined ? { lineSpacing: item.lineSpacing } : {}),
           widgets: [{ page: item.page, rect: [...rect], rotation: item.rotation }], ...(item.ruled ? { ruled: { ...item.ruled } } : {}) });
         this.changes.added.set(name, added); this.changes.values.set(name, item.value);
-        this.changes.formats.set(name, { fontFamily: item.fontFamily, fontSize: item.fontSize, color: [...item.color] });
+        this.changes.formats.set(name, { fontFamily: item.fontFamily, fontSize: item.fontSize, color: [...item.color],
+          ...(item.letterSpacing !== undefined ? { letterSpacing: item.letterSpacing } : {}), ...(item.lineSpacing !== undefined ? { lineSpacing: item.lineSpacing } : {}) });
         created.push({ kind: 'text', id: name });
       } else {
         const id = INK_PREFIX + globalThis.crypto.randomUUID(), bounds = this.snapshot.pages[item.page - 1]!;
