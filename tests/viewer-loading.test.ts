@@ -79,6 +79,7 @@ test('gesture zoom anchors the actual PDF point through quarter turns, app scale
   } finally { await task.destroy(); }
 });
 
+/** Provide a disposable native-host DOM and workspace events without performing session I/O. */
 function fixture() {
   const dom = new JSDOM('<body><main></main></body>', { pretendToBeVisual: true }); const doc = dom.window.document;
   Object.assign(dom.window.HTMLElement.prototype, {

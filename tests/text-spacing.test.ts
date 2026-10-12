@@ -20,6 +20,7 @@ test('interrupting an ink transaction to begin a pinch retains redo and does not
   f.session.finishInkAction(true, owner); assert.equal(f.session.snapshot.strokes.length, 0); assert.equal(f.session.canRedoStroke, true);
   f.session.redoStroke(); assert.equal(f.session.snapshot.strokes[0]!.id, first.id);
 });
+/** Open an anonymous PDF with an authored right-aligned field and an in-memory session store. */
 async function fixture(fonts: PdfFonts = font) {
   const pdf = await PDFDocument.create(), page = pdf.addPage([600, 800]);
   const authored = pdf.getForm().createTextField('Authored'); authored.setText('Untouched'); authored.setAlignment(TextAlignment.Right); authored.addToPage(page, { x: 30, y: 40, width: 200, height: 20 });

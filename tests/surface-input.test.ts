@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { bindSurfaceInput, scrollHandoff, wheelPixels } from '../src/ui/surface-input.ts';
 
+/** Bind real input routing to a disposable nested PDF/note DOM with controlled scroll ranges. */
 function fixture() {
   const dom = new JSDOM('<main style="overflow-y:auto"><div class="pdf" style="overflow-y:auto"><div id="page"></div></div></main>', { pretendToBeVisual: true });
   const doc = dom.window.document, note = doc.querySelector<HTMLElement>('main')!, pdf = doc.querySelector<HTMLElement>('.pdf')!, page = doc.querySelector<HTMLElement>('#page')!;

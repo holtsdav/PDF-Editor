@@ -51,6 +51,7 @@ const { TextEditor } = await import(moduleUrl.href) as { TextEditor: typeof Edit
 const font = new Uint8Array(await readFile(new URL('../assets/fonts/NotoSans-Regular.ttf', import.meta.url)));
 
 interface MockScope { handlers: { key: string; func(event: KeyboardEvent): unknown }[] }
+/** Mount the real editor on an anonymous session, mocking only host APIs, clipboard and page layout. */
 async function fixture(pageCount = 1, withKeymap = false, rotation = 0, seed?: Uint8Array, shared?: TextSession) {
   const pdf = await PDFDocument.create(); for (let i = 0; i < pageCount; i++) pdf.addPage([600, 800]).setRotation(degrees(rotation)); let bytes = await pdf.save();
   if (seed) bytes = seed.slice(); let writes = 0;
