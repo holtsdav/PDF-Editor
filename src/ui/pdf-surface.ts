@@ -402,6 +402,7 @@ export class PdfSurface extends Component {
     const width = this.scroller.clientWidth, height = this.scroller.clientHeight;
     if (!width || !height) return;
     const top = this.scroller.scrollTop, bottom = top + height;
+    /** Return whether the page lies entirely outside the viewport and its 600-pixel prefetch margin. */
     const outside = (entry: PageEntry): boolean => entry.native.div.offsetTop + entry.native.div.offsetHeight < top - 600
       || entry.native.div.offsetTop > bottom + 600;
     const selection = this.selectedTextRange(); this.retainedSelection = false;
