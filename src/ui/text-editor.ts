@@ -42,6 +42,7 @@ interface FieldControl {
 interface PageLayer { page: NativePage; layer: HTMLElement; controls: Map<string, FieldControl>; ink: InkLayer; cancelPlacement?: () => void }
 interface EditorState {
   tool: EditorTool; textFamily: FontFamily; textColor: PdfColor; fontSize: number; markerWidth: number; penWidth: number; markerColor: PdfColor; penColor: PdfColor; selected?: string; selectedStroke?: string;
+  letterSpacing: number; lineSpacing: number; textAlignment: 'left' | 'center' | 'right';
   focused?: { input: HTMLInputElement | HTMLTextAreaElement; page: number; name: string };
 }
 
@@ -76,6 +77,10 @@ export class TextEditor extends Component {
   private loadError = '';
   private loaded = true;
   private fontSize = 14;
+  private letterSpacing = 0;
+  private lineSpacing = 1.2;
+  private textAlignment: 'left' | 'center' | 'right' = 'left';
+  private formatPreview?: { name?: string; letterSpacing: number; lineSpacing: number };
   private selected?: string;
   private selectedStroke?: string;
   private focused?: { input: HTMLInputElement | HTMLTextAreaElement; page: number; name: string };
@@ -96,15 +101,17 @@ export class TextEditor extends Component {
   constructor(app: App, native: EditorSurface, sessions: VaultSessions, state?: EditorState) {
     super(); this.app = app; this.native = native; this.sessions = sessions;
     Object.assign(this, sessions.preferences);
-    if (state) { this.textFamily = state.textFamily; this.textColor = state.textColor; this.tool = state.tool; this.fontSize = state.fontSize; this.markerWidth = state.markerWidth; this.penWidth = state.penWidth; this.markerColor = state.markerColor; this.penColor = state.penColor;
+    if (state) { this.letterSpacing = state.letterSpacing; this.lineSpacing = state.lineSpacing; this.textAlignment = state.textAlignment; this.textFamily = state.textFamily; this.textColor = state.textColor; this.tool = state.tool; this.fontSize = state.fontSize; this.markerWidth = state.markerWidth; this.penWidth = state.penWidth; this.markerColor = state.markerColor; this.penColor = state.penColor;
       this.selected = state.selected; this.selectedStroke = state.selectedStroke; this.focused = state.focused; }
     const doc = native.element.ownerDocument;
+    this.registerDomEvent(doc.defaultView!, 'blur', () => this.cancelInteractions());
     if (app.keymap) {
       const scope = this.objectScope = new Scope(app.scope);
       for (const key of ['c', 'v', 'd']) scope.register(['Mod'], key, event => {
         if (this.claimScopedShortcut(key, event)) return false;
         return undefined;
       });
+      for (const redo of [false, true]) scope.register(redo ? ['Mod', 'Shift'] : ['Mod'], 'z', event => this.claimHistoryShortcut(event) ? false : undefined);
       this.register(() => { if (this.objectScopeActive) app.keymap.popScope(scope); });
     }
     this.register(usePdfFont(doc));
@@ -132,11 +139,8 @@ export class TextEditor extends Component {
     this.propertiesButton.createSpan({ cls: 'pfs-tool-value' });
     this.saveButton = button(this.editControls, 'Save PDF', 'save', () => { void this.save(); });
     this.removeButton = button(this.editControls, 'Remove selection', 'trash-2', () => this.removeSelection());
-    this.undoButton = button(this.editControls, 'Undo · Cmd/Ctrl+Z', 'undo-2', () => {
-      try { this.session?.undoStroke(); this.selectedStroke = undefined; this.updateStatus(); this.refresh(); this.scheduleSave(); }
-      catch (error) { this.showError(error); }
-    });
-    this.redoButton = button(this.editControls, 'Redo · Shift+Cmd/Ctrl+Z', 'redo-2', () => { this.session?.redoStroke(); this.scheduleSave(); });
+    this.undoButton = button(this.editControls, 'Undo · Cmd/Ctrl+Z', 'undo-2', () => this.applyHistory(false));
+    this.redoButton = button(this.editControls, 'Redo · Shift+Cmd/Ctrl+Z', 'redo-2', () => this.applyHistory(true));
     this.status = doc.createElement('span'); this.status.className = 'pdf-form-studio-status'; this.status.setAttribute('role', 'status');
     this.toolbar.append(this.status);
     const more = button(this.toolbar, 'PDF options', 'ellipsis', () => this.openMenu(more));
@@ -161,6 +165,7 @@ export class TextEditor extends Component {
       // a PDF input over the quick switcher, command palette or another note.
       if (this.focused && event.target !== this.focused.input) this.focused = undefined;
       if (event.target instanceof doc.defaultView!.Element && !this.native.element.contains(event.target) && !this.ownsControl(event.target)) {
+        this.closePopover();
         this.endTextEditing();
         this.selected = undefined; this.selectedStroke = undefined; this.updateStatus(); this.refresh();
       }
@@ -176,6 +181,8 @@ export class TextEditor extends Component {
     // Claim Save at the window capture phase, scoped to this editor's controls.
     this.registerDomEvent(doc.defaultView!, 'keydown', event => {
       const target = event.target;
+      if (this.claimHistoryShortcut(event)) return;
+      if (event.key === 'Escape' && this.popover?.cancelScrub()) { event.preventDefault(); event.stopImmediatePropagation(); return; }
       const objectKey = (event.metaKey || event.ctrlKey) && ['c', 'v', 'd'].includes(event.key.toLowerCase());
       if (!this.shortcutTarget(target) && !(objectKey && this.objectShortcutActive())
         && !(target === doc.body && event.key === 'Escape' && this.tool !== 'select')) return;
@@ -216,10 +223,7 @@ export class TextEditor extends Component {
       if (event.key.toLowerCase() === 's') {
         event.preventDefault(); event.stopImmediatePropagation(); void this.save();
       }
-      if (event.key.toLowerCase() === 'z' && (event.shiftKey ? this.session?.canRedoStroke : this.session?.canUndoStroke)
-        && !this.isTextTarget(target)) {
-        event.preventDefault(); event.stopImmediatePropagation(); if (event.shiftKey) this.session?.redoStroke(); else this.session?.undoStroke(); this.selectedStroke = undefined; this.scheduleSave();
-      }
+
     }, true);
     this.registerDomEvent(doc.defaultView!, 'copy', event => {
       const target = event.target;
@@ -304,7 +308,7 @@ export class TextEditor extends Component {
 
   get file() { return this.native.file; }
   captureState(native?: NativePdf): EditorState | undefined {
-    return !native || this.native.file === native.file ? { tool: this.tool, textFamily: this.textFamily, textColor: this.textColor, fontSize: this.fontSize, markerWidth: this.markerWidth, penWidth: this.penWidth, markerColor: this.markerColor, penColor: this.penColor,
+    return !native || this.native.file === native.file ? { tool: this.tool, letterSpacing: this.letterSpacing, lineSpacing: this.lineSpacing, textAlignment: this.textAlignment, textFamily: this.textFamily, textColor: this.textColor, fontSize: this.fontSize, markerWidth: this.markerWidth, penWidth: this.penWidth, markerColor: this.markerColor, penColor: this.penColor,
       selected: this.selected, selectedStroke: this.selectedStroke, focused: this.focused } : undefined;
   }
   private async openSession(): Promise<void> {
@@ -319,7 +323,7 @@ export class TextEditor extends Component {
       shortcut: (key, event) => this.claimScopedShortcut(key, event),
       endTyping: () => { this.selected = undefined; this.selectedStroke = undefined; this.focused = undefined; this.endTextEditing(); }
     }, this.app));
-    this.unsubscribe = session.subscribe(() => { this.updateStatus(); this.refresh(); });
+    this.unsubscribe = session.subscribe(() => { if (session.replacing || session.status === 'conflict') this.closePopover(); this.updateStatus(); this.refresh(); });
   }
 
   private activateBox(name: string): void {
@@ -429,7 +433,34 @@ export class TextEditor extends Component {
   private objectShortcutActive(): boolean {
     return this.objectScopeActive || !!this.selection?.objects.length;
   }
+  private applyHistory(redo: boolean): void {
+    const doc = this.native.element.ownerDocument, active = doc.activeElement;
+    const layer = active instanceof doc.defaultView!.Element && this.native.element.contains(active)
+      ? active.closest<HTMLElement>('.pdf-form-studio-layer') : undefined;
+    try {
+      if (redo) this.session?.redoStroke(); else this.session?.undoStroke();
+      this.selectedStroke = undefined; this.updateStatus(); this.refresh(); this.scheduleSave();
+      // Removing a focused object must keep the next Undo/Redo in this PDF, not the containing note.
+      if (layer?.isConnected && (doc.activeElement === doc.body || !doc.activeElement)) layer.focus({ preventScroll: true });
+    } catch (error) { this.showError(error); }
+  }
+  private claimHistoryShortcut(event: KeyboardEvent): boolean {
+    const target = event.target, view = this.native.element.ownerDocument.defaultView!;
+    const ownControl = target instanceof view.Element && this.ownsControl(target);
+    if (!this.loaded || !this.session || !(event.metaKey || event.ctrlKey) || event.altKey || event.isComposing || event.key.toLowerCase() !== 'z'
+      || !(target instanceof view.Node) || (!this.shortcutTarget(target) && !ownControl && !this.objectShortcutActive())) return false;
+    if (this.isTextTarget(target) && (this.shortcutTarget(target) || ownControl)) {
+      // Preserve the browser's text-edit history, while keeping the note's keymap out.
+      event.stopImmediatePropagation();
+      return false;
+    }
+    event.preventDefault(); event.stopImmediatePropagation();
+    // Consume exhausted/blocked object history too: it must never undo the enclosing note.
+    if (!event.repeat && (event.shiftKey ? this.session.canRedoStroke : this.session.canUndoStroke)) this.applyHistory(event.shiftKey);
+    return true;
+  }
   private claimScopedShortcut(key: string, event: KeyboardEvent): boolean {
+    if (key === 'z') return this.claimHistoryShortcut(event);
     const objects = this.shortcutObjects(event.target);
     if (!this.loaded || !this.session || !objects.length || event.shiftKey || event.altKey || event.isComposing) return false;
     const target = event.target;
@@ -587,7 +618,7 @@ export class TextEditor extends Component {
       const rect: Rect = [x, top - height, x + width, top];
       const rotation = this.native.pages().find(page => page.number === anchor.page)?.viewport.rotation ?? 0;
       const text: CopiedPdfObject = { kind: 'text', page: anchor.page, rect, rotation, value,
-        fontSize: this.fontSize, fontFamily: this.textFamily, color: [...this.textColor], multiline: true };
+        fontSize: this.fontSize, fontFamily: this.textFamily, color: [...this.textColor], letterSpacing: this.letterSpacing, lineSpacing: this.lineSpacing, alignment: this.textAlignment, multiline: true };
       this.selectCreated(this.session.pasteObjects([text], [0, 0])); this.scheduleSave();
     } catch (error) { this.showError(error); }
   }
@@ -626,7 +657,7 @@ export class TextEditor extends Component {
         const firstHeight = area[3] - area[1] - (block ? (block.layout.rows - 1) * block.layout.spacing : 0);
         const size = Math.min(this.fontSize, Math.max(6, (firstHeight - 2) / 1.2));
         field = this.session.add(page, area, size, !!block, 0, block?.layout);
-        this.session.formatField(field.name, { fontFamily: this.textFamily, color: this.textColor });
+        this.session.formatField(field.name, { fontFamily: this.textFamily, color: this.textColor, alignment: this.textAlignment, letterSpacing: this.letterSpacing, ...(field.ruled ? {} : { lineSpacing: this.lineSpacing }) });
       }
       this.answerFields.add(field.name); this.selected = field.name; this.selectedStroke = undefined; this.updateStatus(); this.refresh();
       const input = entry.controls.get(`${field.name}:${this.answerWidget(field, line)}`)?.input;
@@ -635,16 +666,16 @@ export class TextEditor extends Component {
     } catch (error) { this.showError(error); }
   }
 
-  private formatSelected(format: Partial<TextFormat>): void {
-    if (!this.selected) return;
+  private formatSelected(format: Partial<TextFormat>, name = this.selected): void {
+    if (!name) return;
     try {
-      this.session?.formatField(this.selected, format);
-      for (const entry of this.layers.values()) for (const control of entry.controls.values()) if (control.input.dataset.pdfField === this.selected) this.growField(entry, control);
+      this.session?.formatField(name, format);
+      for (const entry of this.layers.values()) for (const control of entry.controls.values()) if (control.input.dataset.pdfField === name) this.growField(entry, control);
       this.scheduleSave();
     } catch (error) { this.showError(error); }
   }
   private rememberPreferences(): void {
-    void this.sessions.updatePreferences({ ...this.sessions.preferences, fontSize: this.fontSize, textFamily: this.textFamily, textColor: this.textColor, penColor: this.penColor, markerColor: this.markerColor, penWidth: this.penWidth, markerWidth: this.markerWidth, smoothPen: this.smoothPen, holdShapes: this.holdShapes, holdHighlighter: this.holdHighlighter }).catch(error => this.showError(error));
+    void this.sessions.updatePreferences({ ...this.sessions.preferences, letterSpacing: this.letterSpacing, lineSpacing: this.lineSpacing, textAlignment: this.textAlignment, fontSize: this.fontSize, textFamily: this.textFamily, textColor: this.textColor, penColor: this.penColor, markerColor: this.markerColor, penWidth: this.penWidth, markerWidth: this.markerWidth, smoothPen: this.smoothPen, holdShapes: this.holdShapes, holdHighlighter: this.holdHighlighter }).catch(error => this.showError(error));
   }
   private closePopover(): void { if (this.popover) { this.removeChild(this.popover); this.popover = undefined; } this.propertiesButton.setAttribute('aria-expanded', 'false'); }
   private openProperties(): void {
@@ -652,12 +683,50 @@ export class TextEditor extends Component {
     if (this.tool === 'marker' || this.tool === 'scribble') { this.openBrushMenu(this.tool, this.propertiesButton); return; }
     const field = this.session?.snapshot.fields.find(field => field.name === this.selected);
     if (!field && this.tool !== 'text') return;
+    const session = this.session!, epoch = session.renderEpoch;
+    let signature: string | undefined;
+    const valid = () => this.session === session && session.renderEpoch === epoch && !session.replacing && session.status !== 'conflict'
+      && (field ? session.snapshot.fields.includes(field) && (!signature || JSON.stringify(field) === signature) : !this.selected && this.tool === 'text');
+    const formatTarget = (format: Partial<TextFormat>) => { if (valid()) this.formatSelected(format, field?.name); };
+    let release: (() => void) | undefined;
+    const changeSpacing = (letterSpacing: number, lineSpacing: number) => {
+      this.letterSpacing = letterSpacing; this.lineSpacing = lineSpacing; this.rememberPreferences();
+      formatTarget({ letterSpacing, ...(field?.ruled ? {} : { lineSpacing }) }); this.updateStatus();
+    };
     this.openingPopover = true;
     try { this.popover = this.addChild(new ToolPopover(this.propertiesButton, {
       title: 'Text', color: field?.color ?? this.textColor,
-      changeColor: color => { this.textColor = color; this.rememberPreferences(); this.formatSelected({ color }); this.updateStatus(); },
-      text: { font: field?.fontFamily ?? this.textFamily, size: field?.fontSize ?? this.fontSize,
-        change: (fontFamily, fontSize) => { this.textFamily = fontFamily; this.fontSize = fontSize; this.rememberPreferences(); this.formatSelected({ fontFamily, fontSize }); this.updateStatus(); } },
+      changeColor: color => { this.textColor = color; this.rememberPreferences(); formatTarget({ color }); this.updateStatus(); },
+      text: { font: field?.fontFamily ?? this.textFamily, size: field?.fontSize ?? this.fontSize, disabled: field?.readOnly,
+        alignment: field ? field.alignment ?? 'left' : this.textAlignment,
+        align: alignment => { this.textAlignment = alignment; this.rememberPreferences(); formatTarget({ alignment }); },
+        spacing: { letter: field ? field.letterSpacing ?? 0 : this.letterSpacing, line: field ? field.lineSpacing ?? 1.2 : this.lineSpacing,
+          disabled: field ? !field.owned || field.readOnly : false, lineLocked: !!field?.ruled,
+          change: changeSpacing,
+          begin: () => {
+            if (!valid()) return false;
+            if (field) this.selected = field.name;
+            signature = field ? JSON.stringify(field) : undefined;
+            release = session.beginInteraction();
+            for (const entry of this.layers.values()) for (const control of entry.controls.values()) if (this.editing === field?.name && control.input.dataset.pdfField === field?.name) {
+              const start = control.input.selectionStart, end = control.input.selectionEnd;
+              control.input.focus({ preventScroll: true }); if (start !== null && end !== null) control.input.setSelectionRange(start, end);
+            }
+            return true;
+          },
+          preview: (letterSpacing, lineSpacing) => {
+            if (!valid()) return false;
+            this.formatPreview = { name: field?.name, letterSpacing, lineSpacing }; this.refresh();
+            for (const entry of this.layers.values()) for (const control of entry.controls.values()) if (control.input.dataset.pdfField === field?.name) this.growField(entry, control, true);
+            return true;
+          },
+          finish: cancel => {
+            const preview = this.formatPreview; this.formatPreview = undefined;
+            try { if (!cancel && preview && valid()) changeSpacing(preview.letterSpacing, preview.lineSpacing); }
+            finally { signature = undefined; release?.(); release = undefined; this.refresh(); }
+          }
+        },
+        change: (fontFamily, fontSize) => { this.textFamily = fontFamily; this.fontSize = fontSize; this.rememberPreferences(); formatTarget({ fontFamily, fontSize }); this.updateStatus(); } },
       close: () => this.closePopover()
     })); } finally { this.openingPopover = false; }
     this.updateStatus(); this.propertiesButton.setAttribute('aria-expanded', 'true');
@@ -883,6 +952,7 @@ export class TextEditor extends Component {
   }
 
   private positionField(entry: PageLayer, control: FieldControl, field: TextField, rect: Rect, rotation: number, widget?: TextWidget): void {
+    if (this.formatPreview?.name === field.name) field = { ...field, ...this.formatPreview };
     const { frame, input } = control;
     const [left, top, right, bottom] = screenRectangle(entry.page.viewport, rect);
     // PDF widget appearance rotation is counterclockwise; viewport/CSS is clockwise.
@@ -905,7 +975,8 @@ export class TextEditor extends Component {
     frame.style.borderWidth = appearance?.borderStyle === 'underline' ? `0 0 ${borderWidth}px` : `${borderWidth}px`;
     input.style.padding = `${entry.page.viewport.scale}px`;
     const offset = field.ruled ? Math.max(0, (field.ruled.spacing - field.fontSize * 1.2) / 2) * entry.page.viewport.scale : 0;
-    input.style.lineHeight = field.ruled ? `${field.ruled.spacing * entry.page.viewport.scale}px` : '1.2';
+    input.style.lineHeight = field.ruled ? `${field.ruled.spacing * entry.page.viewport.scale}px` : String(field.lineSpacing ?? 1.2);
+    input.style.letterSpacing = `${(field.letterSpacing ?? 0) * entry.page.viewport.scale}px`;
     input.style.position = field.ruled ? 'relative' : '';
     input.style.top = field.ruled ? `${-offset}px` : '';
     input.style.height = field.ruled ? `calc(100% + ${offset * 2}px)` : '';
@@ -963,9 +1034,10 @@ export class TextEditor extends Component {
     control.dispose = this.bindBox(entry, control, field.name);
   }
 
-  private growField(entry: PageLayer, control: FieldControl): void {
-    const field = this.session?.snapshot.fields.find(field => field.name === control.input.dataset.pdfField);
+  private growField(entry: PageLayer, control: FieldControl, preview = false): void {
+    let field = this.session?.snapshot.fields.find(field => field.name === control.input.dataset.pdfField);
     if (!field?.owned || field.readOnly || field.widgets.length !== 1 || (this.session?.status === 'conflict' || this.session?.replacing) || this.composing.has(control.input)) return;
+    if (preview && this.formatPreview?.name === field.name) field = { ...field, ...this.formatPreview };
     const widget = field.widgets[0]!;
     const doc = control.input.ownerDocument;
     const style = doc.defaultView!.getComputedStyle(control.input);
@@ -977,25 +1049,28 @@ export class TextEditor extends Component {
       width: style.width, height: '0', minHeight: '0', maxHeight: 'none', minWidth: '0',
       fontFamily: style.fontFamily, fontSize: style.fontSize, fontWeight: style.fontWeight,
       fontKerning: style.fontKerning, fontVariantLigatures: style.fontVariantLigatures,
-      lineHeight: style.lineHeight, padding: style.padding, border: '0', boxSizing: 'border-box',
+      lineHeight: style.lineHeight, letterSpacing: style.letterSpacing, padding: style.padding, border: '0', boxSizing: 'border-box',
       whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', overflow: 'hidden', margin: '0'
     });
     measure.tabIndex = -1; measure.setAttribute('aria-hidden', 'true'); doc.body.append(measure);
-    const height = Math.max(measure.scrollHeight + 1, (field.fontSize * 1.2 + 2) * entry.page.viewport.scale);
+    const height = Math.max(measure.scrollHeight + 1, (field.fontSize * (field.lineSpacing ?? 1.2) + 2) * entry.page.viewport.scale);
+    const widthOverflow = measure.scrollWidth > measure.clientWidth + 1;
     measure.remove();
     const viewport = entry.page.viewport;
     const angle = ((viewport.rotation - widget.rotation) % 360 + 360) % 360;
     // scrollHeight is rounded to screen pixels; count whole rows before
     // comparing so fractional zoom cannot create a spare row/false warning.
     const measuredRows = field.ruled ? Math.max(1, Math.round((height / viewport.scale - 2) / field.ruled.spacing)) : 0;
-    if (field.ruled) this.session!.fitRuledField(field.name, measuredRows);
+    if (field.ruled && !preview) this.session!.fitRuledField(field.name, measuredRows);
     if (!field.ruled) {
       const screen = growBox(screenRectangle(viewport, widget.rect), [0, 0, viewport.width, viewport.height], height, angle);
-      this.session!.updateBox(field.name, pdfRectangle(viewport, [screen[0], screen[1]], [screen[2], screen[3]]), { multiline: true });
+      const rect = pdfRectangle(viewport, [screen[0], screen[1]], [screen[2], screen[3]]);
+      if (preview) this.positionField(entry, control, field, rect, widget.rotation);
+      else this.session!.updateBox(field.name, rect, { multiline: true });
     }
-    const overflow = field.ruled ? measuredRows > field.ruled.rows : height / viewport.scale > widget.rect[3] - widget.rect[1] + 1;
+    const overflow = widthOverflow || (field.ruled ? measuredRows > field.ruled.rows : height / viewport.scale > widget.rect[3] - widget.rect[1] + 1);
     control.frame.classList.toggle('is-overflow', overflow);
-    if (overflow) control.frame.setAttribute('aria-description', 'Text reaches the page edge. Widen the box or reduce the text size.');
+    if (overflow) control.frame.setAttribute('aria-description', 'Text exceeds the box or page edge. Widen the box or reduce the text size.');
     else control.frame.removeAttribute('aria-description');
   }
 
@@ -1095,7 +1170,7 @@ export class TextEditor extends Component {
       const widget = field.widgets[0]!; const viewport = entry.page.viewport; const end = point(event);
       if (!control.preview && Math.hypot(end[0] - gesture.start[0], end[1] - gesture.start[1]) < 3) return;
       const angle = ((viewport.rotation - widget.rotation) % 360 + 360) % 360;
-      const minimum: [number, number] = [40 * viewport.scale, (field.fontSize * 1.2 + 2) * viewport.scale];
+      const minimum = this.session!.minimumTextBoxSize(name).map(value => value * viewport.scale) as [number, number];
       if (angle === 90 || angle === 270) minimum.reverse();
       control.preview = transformBox(gesture.rect, [0, 0, viewport.width, viewport.height], [end[0] - gesture.start[0], end[1] - gesture.start[1]], gesture.handle, minimum);
       this.positionField(entry, control, field, pdfRectangle(viewport, [control.preview[0], control.preview[1]], [control.preview[2], control.preview[3]]), widget.rotation);
@@ -1132,8 +1207,11 @@ export class TextEditor extends Component {
       const widget = field.widgets[0]!;
       const viewport = entry.page.viewport; const step = viewport.scale * (event.shiftKey ? 10 : 1);
       const handle = event.altKey ? (delta[0] ? 'e' : 's') : undefined;
+      const minimum = this.session!.minimumTextBoxSize(name).map(value => value * viewport.scale) as [number, number];
+      const angle = ((viewport.rotation - widget.rotation) % 360 + 360) % 360;
+      if (angle === 90 || angle === 270) minimum.reverse();
       const rect = transformBox(screenRectangle(viewport, widget.rect), [0, 0, viewport.width, viewport.height], [delta[0] * step, delta[1] * step], handle,
-        [40 * viewport.scale, (field.fontSize * 1.2 + 2) * viewport.scale]);
+        minimum);
       this.session!.updateBox(name, pdfRectangle(viewport, [rect[0], rect[1]], [rect[2], rect[3]]));
       if (handle) this.growField(entry, control);
       this.scheduleSave();
@@ -1183,7 +1261,7 @@ export class TextEditor extends Component {
       try {
         if (rect[2] - rect[0] < 8 || rect[3] - rect[1] < 8) return;
         const field = this.session.add(entry.page.number, rect, this.fontSize, true, entry.page.viewport.rotation);
-        this.session.formatField(field.name, { fontFamily: this.textFamily, color: this.textColor });
+        this.session.formatField(field.name, { fontFamily: this.textFamily, color: this.textColor, alignment: this.textAlignment, letterSpacing: this.letterSpacing, ...(field.ruled ? {} : { lineSpacing: this.lineSpacing }) });
         this.setTool('select');
         this.selected = field.name; this.selectedStroke = undefined; this.updateStatus(); this.refresh();
         entry.controls.get(`${field.name}:0`)?.input.focus({ preventScroll: true });
@@ -1218,5 +1296,10 @@ export class TextEditor extends Component {
     this.native.element.classList.remove('pdf-form-studio-view', 'pdf-form-studio-editing');
     delete this.native.element.dataset.pdfTool;
 
+  }
+
+  cancelInteractions(): void {
+    this.popover?.cancelScrub(); this.selection?.cancel();
+    for (const entry of this.layers.values()) { entry.cancelPlacement?.(); entry.ink.cancel(); for (const control of entry.controls.values()) control.cancel?.(); }
   }
 }

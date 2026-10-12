@@ -1,10 +1,10 @@
-import { PDFDocument, PDFHexString, PDFString, PDFDict, PDFArray, PDFName, PDFNumber, PDFRef, PDFStream, PDFTextField, StandardFonts, rgb, setFontAndSize, setFillingRgbColor } from 'pdf-lib';
+import { PDFDocument, PDFHexString, PDFString, PDFDict, PDFArray, PDFName, PDFNumber, PDFRef, PDFStream, PDFTextField, StandardFonts, TextAlignment, rgb, setFontAndSize, setFillingRgbColor } from 'pdf-lib';
 import type { PDFFont } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import { multilineAppearance } from './text-appearance.ts';
 import { readInk, verifyInk, writeInk } from './ink-engine.ts';
 import type { InkStroke } from './ink-engine.ts';
-import { defaultColor, validColor } from './text-format.ts';
+import { defaultColor, validColor, validSpacing } from './text-format.ts';
 import type { FontFamily, PdfColor, PdfFonts, TextFormat } from './text-format.ts';
 import { referencedObjects, pruneReplacedObjects } from './object-references.ts';
 import { validRuledLayout } from './ruled-text.ts';
@@ -32,6 +32,8 @@ export interface TextField {
   maxLength?: number;
   widgets: TextWidget[];
   ruled?: RuledLayout;
+  letterSpacing?: number;
+  lineSpacing?: number;
 }
 export interface TextSnapshot { pages: Rect[]; fields: TextField[]; strokes: InkStroke[] }
 export interface AddedField { name: string; page: number; rect: Rect; fontSize: number; multiline: boolean; rotation: number; ruled?: RuledLayout }
@@ -229,8 +231,11 @@ export async function readTextPdf(bytes: Uint8Array): Promise<TextSnapshot> {
       multiline: field.isMultiline(), readOnly: !editableText(field),
       owned, alignment: field.getAlignment() === 1 ? 'center' : field.getAlignment() === 2 ? 'right' : 'left',
       ...(!owned && size !== undefined && Number(size) === 0 ? { autoSize: true as const } : {}),
-      maxLength: field.getMaxLength(), widgets, ...(ruled ? { ruled } : {})
+      maxLength: field.getMaxLength(), widgets, ...(ruled ? { ruled } : {}),
+      ...(owned && field.acroField.dict.has(PDFName.of('PFSLetterSpacing')) ? { letterSpacing: field.acroField.dict.lookup(PDFName.of('PFSLetterSpacing'), PDFNumber).asNumber() } : {}),
+      ...(owned && field.acroField.dict.has(PDFName.of('PFSLineSpacing')) ? { lineSpacing: field.acroField.dict.lookup(PDFName.of('PFSLineSpacing'), PDFNumber).asNumber() } : {})
     });
+    if (!validSpacing(fields.at(-1)!.letterSpacing, fields.at(-1)!.lineSpacing)) throw new Error('Invalid PDF text spacing.');
   }
   return {
     pages: pages.map(page => {
@@ -251,7 +256,7 @@ export async function writeTextPdf(seed: Uint8Array, changes: TextChanges, fontB
   const embedded = new Map<FontFamily, PDFFont>();
   const getFont = async (family: FontFamily): Promise<PDFFont> => {
     let font = embedded.get(family);
-    if (!font) { font = await pdf.embedFont(fontBytes instanceof Uint8Array ? fontBytes : fontBytes[family], { subset: true }); embedded.set(family, font); }
+    if (!font) { font = await pdf.embedFont(fontBytes instanceof Uint8Array ? fontBytes : fontBytes[family], { subset: true, features: { liga: false, clig: false, kern: false } }); embedded.set(family, font); }
     return font;
   };
   for (const name of changes.deleted) {
@@ -330,6 +335,18 @@ export async function writeTextPdf(seed: Uint8Array, changes: TextChanges, fontB
     if (maximum !== undefined && value.length > maximum) throw new Error(`Field ${name} allows at most ${maximum} characters.`);
     field.setText(value);
     const format = changes.formats.get(name);
+    if (format && !validSpacing(format.letterSpacing, format.lineSpacing)) throw new Error('Invalid text spacing.');
+    if (format && !owned && (format.letterSpacing !== undefined || format.lineSpacing !== undefined)) throw new Error('Spacing is supported only for added text boxes.');
+    if (owned && format) {
+      for (const [key, value] of [['PFSLetterSpacing', format.letterSpacing], ['PFSLineSpacing', format.lineSpacing]] as const) {
+        if (value !== undefined) field.acroField.dict.set(PDFName.of(key), PDFNumber.of(value));
+      }
+    }
+    if (format?.alignment !== undefined) {
+      const alignment = { left: TextAlignment.Left, center: TextAlignment.Center, right: TextAlignment.Right }[format.alignment];
+      if (alignment === undefined) throw new Error('Invalid text alignment.');
+      field.setAlignment(alignment);
+    }
     const color = format?.color ?? defaultColor(originalDa);
     const originalSize = /([\d.]+)\s+Tf/.exec(originalDa)?.[1];
     const size = format?.autoSize ? 0 : format?.fontSize ?? changes.boxes.get(name)?.fontSize ?? (originalSize !== undefined ? Number(originalSize) : 14);
@@ -346,7 +363,7 @@ export async function writeTextPdf(seed: Uint8Array, changes: TextChanges, fontB
     field.acroField.dict.set(PDFName.of('PFSKind'), PDFName.of(owned ? 'Text' : 'Form'));
     // Capture stream refs now: PDF-LIB mutates the AP dictionary in place.
     for (const ref of referencedObjects(pdf, field.acroField.getWidgets().flatMap(widget => widget.dict.lookupMaybe(PDFName.of('AP'), PDFDict)?.values() ?? []))) replaced.add(ref);
-    field.updateAppearances(font, owned && field.isMultiline() ? multilineAppearance : undefined);
+    field.updateAppearances(font, owned ? multilineAppearance : undefined);
     // PDF-LIB resolves auto-size (0) while drawing. Retain that form option for future edits.
     if (!owned && (!format || format.preserveWidgetSizes)) {
       field.acroField.setDefaultAppearance(da);
@@ -377,7 +394,12 @@ export async function writeTextPdf(seed: Uint8Array, changes: TextChanges, fontB
     if (field.acroField.dict.get(PDFName.of('PFSFont'))?.toString() !== '/' + format.fontFamily
       || Math.abs(Number(/([\d.]+)\s+Tf/.exec(da)?.[1]) - (format.autoSize ? 0 : format.fontSize)) > 0.001
       || defaultColor(da).some((value, i) => Math.abs(value - format.color[i]!) > 0.001)) throw new Error('PDF text formatting verification failed.');
+    for (const [key, value] of [['PFSLetterSpacing', format.letterSpacing], ['PFSLineSpacing', format.lineSpacing]] as const) {
+      const stored = field.acroField.dict.lookupMaybe(PDFName.of(key), PDFNumber)?.asNumber();
+      if (value !== undefined && (stored === undefined || !Number.isFinite(stored) || Math.abs(stored - value) > 0.001)) throw new Error('PDF text spacing verification failed.');
+    }
   }
+  for (const [name, format] of changes.formats) if (format.alignment !== undefined && verified.getForm().getTextField(name).getAlignment() !== { left: 0, center: 1, right: 2 }[format.alignment]) throw new Error('PDF alignment verification failed.');
   for (const name of changes.deleted) {
     if (verified.getForm().getFieldMaybe(name)) throw new Error(`PDF deletion verification failed for ${name}.`);
   }
