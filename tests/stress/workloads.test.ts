@@ -26,6 +26,7 @@ function comparable(snapshot: Awaited<ReturnType<typeof readTextPdf>>) {
   return { fields: snapshot.fields.map(field => ({ name: field.name, value: field.value, widgets: field.widgets, color: field.color, fontSize: field.fontSize })).sort((a, b) => a.name.localeCompare(b.name)),
     strokes: snapshot.strokes.map(stroke => ({ id: stroke.id, page: stroke.page, points: stroke.points.length === 1 ? [...stroke.points, ...stroke.points] : stroke.points, color: stroke.color, width: stroke.width })).sort((a, b) => a.id.localeCompare(b.id)) };
 }
+/** Generate anonymous quarter-turned pages with editable forms and links for preservation workloads. */
 async function fixture(pages = 8) {
   const pdf = await PDFDocument.create(); pdf.setTitle('Anonymous stress fixture');
   for (let i = 0; i < pages; i++) {

@@ -95,6 +95,7 @@ export class ObjectSelection extends Component {
     const b = entry.page.div.getBoundingClientRect(), v = entry.page.viewport;
     return [Math.max(0, Math.min(v.width, (event.clientX - b.left) * v.width / b.width)), Math.max(0, Math.min(v.height, (event.clientY - b.top) * v.height / b.height))];
   }
+  /** Reconcile mounted selection overlays while retaining valid selected identities across page virtualization. */
   update(pages: NativePage[]): void {
     const alive = new Set(pages.map(page => page.div));
     for (const [div, entry] of this.pages) if (!alive.has(div)) { if (this.gesture?.entry === entry) this.cancel(); entry.dispose(); this.pages.delete(div); }

@@ -642,6 +642,7 @@ export class TextEditor extends Component {
       for (const entry of this.layers.values()) entry.controls.get(`${objects[0]!.id}:0`)?.frame.focus({ preventScroll: true });
     }
   }
+  /** Reveal an offscreen answer page before mounting its editable field and transferring focus. */
   addSuggestedField(page: number, rect: Rect, scroll = false): void {
     if (!this.session || this.session.replacing || this.session.status === 'conflict') return;
     try {

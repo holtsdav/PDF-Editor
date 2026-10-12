@@ -208,6 +208,7 @@ export class PdfSurface extends Component {
       else await this.detectLines();
     }
   }
+  /** Replace page shells only after loading succeeds, then release resources from the previous document. */
   private async loadDocument(): Promise<void> {
     this.cancelLineScan(); this.clearSuggestions();
     const generation = ++this.generation; this.epoch = this.session!.renderEpoch;
@@ -396,6 +397,7 @@ export class PdfSurface extends Component {
     if (this.frame !== undefined || this.closed) return;
     this.frame = this.root.ownerDocument.defaultView!.requestAnimationFrame(() => { this.frame = undefined; this.paintVisible(); });
   }
+  /** Refresh the viewport queue and counter, retaining offscreen resources only for printed-text selection. */
   private paintVisible(): void {
     const width = this.scroller.clientWidth, height = this.scroller.clientHeight;
     if (!width || !height) return;
@@ -403,6 +405,7 @@ export class PdfSurface extends Component {
     const outside = (entry: PageEntry): boolean => entry.native.div.offsetTop + entry.native.div.offsetHeight < top - 600
       || entry.native.div.offsetTop > bottom + 600;
     const selection = this.selectedTextRange(); this.retainedSelection = false;
+    /** Empty shells must not retain a bitmap merely because the selection crosses their page. */
     const selected = (entry: PageEntry): boolean => !!selection && entry.text.hasChildNodes() && selection.intersectsNode(entry.text);
     if (this.activeRender && outside(this.activeRender) && !selected(this.activeRender)) this.releasePage(this.activeRender);
     for (const entry of this.paintedEntries) if (outside(entry)) {
@@ -437,6 +440,7 @@ export class PdfSurface extends Component {
   private selectedTextRange(): Range | undefined {
     const selection = this.root.ownerDocument.getSelection();
     if (!selection || selection.isCollapsed || !selection.rangeCount) return;
+    /** Another viewer or a note owns its own selection and must not be cleared during this viewer's layout. */
     const inText = (node: Node | null) => node && this.root.contains(node)
       && (node.nodeType === 1 ? node as Element : node.parentElement)?.closest('.pfs-text-layer');
     if (inText(selection.anchorNode) || inText(selection.focusNode)) return selection.getRangeAt(0);
@@ -477,6 +481,7 @@ export class PdfSurface extends Component {
     entry.text.replaceChildren(); entry.links.replaceChildren(); this.paintedEntries.delete(entry);
     entry.page.cleanup();
   }
+  /** Apply the same fixed prefetch margin when admitting work and checking asynchronous render results. */
   private nearViewport(entry: PageEntry): boolean {
     const top = this.scroller.scrollTop, div = entry.native.div;
     return this.scroller.clientWidth > 0 && this.scroller.clientHeight > 0
@@ -669,7 +674,9 @@ export class PdfSurface extends Component {
     this.matchesFound = matches; this.searchStatus.textContent = matches.length ? `${matches.length} matching page${matches.length === 1 ? '' : 's'}` : 'No matches'; this.nextMatch(1);
   }
   private nextMatch(delta: number): void { if (!this.matchesFound.length) return; this.matchIndex = (this.matchIndex + delta + this.matchesFound.length) % this.matchesFound.length; this.go(this.matchesFound[this.matchIndex]!); }
+  /** Refresh search styling on rendered text without querying every empty page shell. */
   private highlight(only?: PageEntry): void { const query = this.search.value.trim().toLocaleLowerCase(); for (const entry of only ? [only] : this.paintedEntries) for (const span of entry.text.querySelectorAll('span')) span.classList.toggle('pfs-search-hit', !!query && (span.textContent ?? '').toLocaleLowerCase().includes(query)); }
+  /** Cancel pending work and release retained page resources before restoring the native host. */
   onunload(): void {
     this.cancelLineScan(); this.clearSuggestions();
     this.closed = true; this.generation++; this.searchGeneration++;
