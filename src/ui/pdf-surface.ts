@@ -91,11 +91,11 @@ export class PdfSurface extends Component {
     applyToolbarOffset();
     this.register(sessions.subscribePreferences(applyToolbarOffset));
     if (native.embedHeight && native.embedHeight > 0) native.element.style.setProperty('--pfs-embed-height', `${Math.max(240, native.embedHeight)}px`);
-    this.root.setAttribute('aria-label', `Edit ${native.file.name}`);
+    labelOverlay(this.root, `Edit ${native.file.name}`);
     this.navigation = this.root.createDiv({ cls: 'pfs-navigation' });
     const titleArea = this.navigation.createDiv({ cls: 'pfs-title-area' });
     this.title = titleArea.createEl('button', { cls: 'pfs-document-title', text: native.file.basename, attr: { 'aria-label': 'Rename PDF' } });
-    this.title.title = `Rename ${native.file.name}`;
+    setTooltip(this.title, 'Rename PDF');
     this.titleInput = titleArea.createEl('input', { cls: 'pfs-title-input', attr: { 'aria-label': 'PDF file name', spellcheck: 'false' } }); this.titleInput.hidden = true;
     this.registerDomEvent(this.title, 'click', () => { this.title.hidden = true; this.titleInput.hidden = false; this.titleInput.value = this.file.basename; this.titleInput.focus(); this.titleInput.select(); });
     const cancelRename = () => { if (this.renaming) return; this.titleInput.hidden = true; this.title.hidden = false; this.titleInput.removeAttribute('aria-invalid'); };
@@ -115,7 +115,7 @@ export class PdfSurface extends Component {
     this.navigation.createSpan({ cls: 'pfs-divider' });
     this.button(this.navigation, 'Zoom out', 'minus', () => this.zoom(-0.15));
     this.zoomButton = this.navigation.createEl('button', { cls: 'pfs-zoom', text: 'Fit width' });
-    setTooltip(this.zoomButton, 'Fit page width'); this.registerDomEvent(this.zoomButton, 'click', () => { this.scale = 'width'; this.layout(); });
+    setTooltip(this.zoomButton, 'Fit width'); this.registerDomEvent(this.zoomButton, 'click', () => { this.scale = 'width'; this.layout(); });
     this.button(this.navigation, 'Zoom in', 'plus', () => this.zoom(0.15));
     this.button(this.navigation, 'Rotate clockwise', 'rotate-cw', () => { this.rotation = (this.rotation + 90) % 360; this.layout(); });
     this.button(this.navigation, 'Find in PDF', 'search', () => this.showSearch());
@@ -136,6 +136,7 @@ export class PdfSurface extends Component {
     this.registerDomEvent(this.search, 'keydown', event => { event.stopPropagation(); if (event.key === 'Enter') { event.preventDefault(); this.nextMatch(event.shiftKey ? -1 : 1); } if (event.key === 'Escape') { this.searchRow.hidden = true; this.scroller.focus(); this.queueFloatingToolbar(); } });
     this.message = this.root.createDiv({ cls: 'pfs-surface-message', text: 'Opening PDF…', attr: { role: 'status' } });
     this.scroller = this.root.createDiv({ cls: 'pfs-pages', attr: { tabindex: '0', 'aria-label': 'PDF pages' } });
+    labelOverlay(this.scroller, 'PDF pages');
     this.stack = this.scroller.createDiv({ cls: 'pfs-page-stack' });
     this.register(bindSurfaceInput(this.scroller, { zoom: (factor, x, y) => this.zoomAt(factor, x, y), interrupt: () => this.editor?.cancelInteractions(), verticalBounds: () => this.scrollBounds() }));
     // A previous hot-reloaded build can leave its own surface in this host.
@@ -161,7 +162,7 @@ export class PdfSurface extends Component {
     void this.open().catch(error => this.fail(error));
   }
   get file(): TFile { return this.native.file; }
-  private updateTitle(): void { this.title.textContent = this.file.basename; this.title.title = `Rename ${this.file.name}`; this.root.setAttribute('aria-label', `Edit ${this.file.name}`); }
+  private updateTitle(): void { this.title.textContent = this.file.basename; labelOverlay(this.root, `Edit ${this.file.name}`); }
   private async rename(): Promise<void> {
     if (this.renaming) return;
     try {
@@ -179,7 +180,8 @@ export class PdfSurface extends Component {
   captureState(native?: NativePdf): ReturnType<TextEditor['captureState']> { return this.editor?.captureState(native); }
   refresh(): void { /* Session and ResizeObserver updates drive rendering, not discovery polls. */ }
   private button(parent: HTMLElement, label: string, icon: string, action: () => void): HTMLButtonElement {
-    const b = parent.createEl('button', { cls: 'clickable-icon pfs-nav-button', attr: { 'aria-label': label } }); setIcon(b, icon); setTooltip(b, label);
+    const b = parent.createEl('button', { cls: 'clickable-icon pfs-nav-button', attr: { 'aria-label': label } }); setIcon(b, icon);
+    setTooltip(b, label, ['chevron-up', 'chevron-down', 'minus', 'plus', 'x'].includes(icon) ? { classes: ['pfs-overlay-tooltip'] } : {});
     this.registerDomEvent(b, 'click', action); return b;
   }
   private fail(error: unknown): void {
@@ -223,7 +225,7 @@ export class PdfSurface extends Component {
       // Only page metadata is loaded here. Canvas/text rendering is limited to the viewport.
       for (let number = 1; number <= pdf.numPages; number++) {
         const page = await pdf.getPage(number); if (this.closed || generation !== this.generation) return;
-        const div = this.root.ownerDocument.createElement('div'); div.className = 'pfs-page'; div.setAttribute('aria-label', `Page ${number}`);
+        const div = this.root.ownerDocument.createElement('div'); div.className = 'pfs-page'; labelOverlay(div, `Page ${number}`);
         const canvas = div.createEl('canvas', { cls: 'pfs-page-canvas', attr: { 'aria-hidden': 'true' } });
         const text = div.createDiv({ cls: 'textLayer pfs-text-layer' });
         const links = div.createDiv({ cls: 'pfs-links' });

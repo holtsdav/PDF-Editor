@@ -92,6 +92,7 @@ export class TextEditor extends Component {
   private selection?: ObjectSelection;
   private objectScope?: Scope;
   private objectScopeActive = false;
+  private windowFocused = false;
   private openingPopover = false;
   private activeBox?: string;
   private answerLines: AnswerLine[] = [];
@@ -105,7 +106,9 @@ export class TextEditor extends Component {
     if (state) { this.letterSpacing = state.letterSpacing; this.lineSpacing = state.lineSpacing; this.textAlignment = state.textAlignment; this.textFamily = state.textFamily; this.textColor = state.textColor; this.tool = state.tool; this.fontSize = state.fontSize; this.markerWidth = state.markerWidth; this.penWidth = state.penWidth; this.markerColor = state.markerColor; this.penColor = state.penColor;
       this.selected = state.selected; this.selectedStroke = state.selectedStroke; this.focused = state.focused; }
     const doc = native.element.ownerDocument;
-    this.registerDomEvent(doc.defaultView!, 'blur', () => this.cancelInteractions());
+    this.windowFocused = doc.hasFocus();
+    this.registerDomEvent(doc.defaultView!, 'blur', () => { this.windowFocused = false; this.cancelInteractions(); this.syncObjectScope(); });
+    this.registerDomEvent(doc.defaultView!, 'focus', () => { this.windowFocused = true; this.syncObjectScope(); });
     if (app.keymap) {
       const scope = this.objectScope = new Scope(app.scope);
       for (const key of ['c', 'v', 'd']) scope.register(['Mod'], key, event => {
@@ -119,14 +122,15 @@ export class TextEditor extends Component {
     native.element.classList.add('pdf-form-studio-view');
     this.toolbar = doc.createElement('div'); this.toolbar.className = 'pdf-form-studio-toolbar';
     this.toolbar.setAttribute('role', 'toolbar'); this.toolbar.setAttribute('aria-label', 'PDF editor');
-    const button = (parent: HTMLElement, label: string, icon: string, callback: () => void): HTMLButtonElement => {
+    setTooltip(this.toolbar, 'PDF editor', { classes: ['pfs-overlay-tooltip'] });
+    const button = (parent: HTMLElement, label: string, icon: string, callback: () => void, tooltip = true): HTMLButtonElement => {
       const element = doc.createElement('button'); element.type = 'button'; element.className = 'clickable-icon pdf-form-studio-icon';
-      setIcon(element, icon); setTooltip(element, label);
+      setIcon(element, icon); setTooltip(element, label, tooltip ? {} : { classes: ['pfs-overlay-tooltip'] });
       this.registerDomEvent(element, 'click', callback); parent.append(element); return element;
     };
     for (const [tool, label, icon] of [
-      ['select', 'Select — drag blank space for objects; drag printed text to select text', 'mouse-pointer-2'], ['text', 'Add text box — click or drag on the PDF', 'type'],
-      ['marker', 'Highlighter — draw and hold for a straight line', 'highlighter'], ['scribble', 'Pen — draw', 'pencil'], ['eraser', 'Eraser — drag over marks to remove them', 'eraser']
+      ['select', 'Select', 'mouse-pointer-2'], ['text', 'Add text box', 'type'],
+      ['marker', 'Highlighter', 'highlighter'], ['scribble', 'Pen', 'pencil'], ['eraser', 'Eraser', 'eraser']
     ] as const) {
       this.tools.set(tool, button(this.toolbar, label, icon, () => { if (this.tool === tool) this.closePopover(); else this.setTool(tool); }));
       if (tool === 'text') this.toolbar.append(this.native.answerLineButton());
@@ -138,10 +142,12 @@ export class TextEditor extends Component {
     settingsIcon.append(this.propertiesButton.querySelector('svg')!);
     settingsIcon.createSpan({ cls: 'pfs-settings-color' });
     this.propertiesButton.createSpan({ cls: 'pfs-tool-value' });
-    this.saveButton = button(this.editControls, 'Save PDF', 'save', () => { void this.save(); });
-    this.removeButton = button(this.editControls, 'Remove selection', 'trash-2', () => this.removeSelection());
-    this.undoButton = button(this.editControls, 'Undo · Cmd/Ctrl+Z', 'undo-2', () => this.applyHistory(false));
-    this.redoButton = button(this.editControls, 'Redo · Shift+Cmd/Ctrl+Z', 'redo-2', () => this.applyHistory(true));
+    this.saveButton = button(this.editControls, 'Save PDF', 'save', () => { void this.save(); }, false);
+    this.removeButton = button(this.editControls, 'Remove selection', 'trash-2', () => this.removeSelection(), false);
+    this.undoButton = button(this.editControls, 'Undo', 'undo-2', () => this.applyHistory(false), false);
+    this.redoButton = button(this.editControls, 'Redo', 'redo-2', () => this.applyHistory(true), false);
+    this.undoButton.setAttribute('aria-keyshortcuts', 'Meta+Z Control+Z');
+    this.redoButton.setAttribute('aria-keyshortcuts', 'Meta+Shift+Z Control+Shift+Z');
     this.status = doc.createElement('span'); this.status.className = 'pdf-form-studio-status'; this.status.setAttribute('role', 'status');
     this.toolbar.append(this.status);
     const more = button(this.toolbar, 'PDF options', 'ellipsis', () => this.openMenu(more));
@@ -173,7 +179,9 @@ export class TextEditor extends Component {
       if (event.target instanceof doc.defaultView!.HTMLElement && this.toolbar.contains(event.target) && this.session) {
         this.releaseFocus(); this.focusInteraction = { input: event.target, release: this.session.beginInteraction() };
       }
+      this.syncObjectScope();
     });
+    this.registerDomEvent(doc, 'focusout', () => this.syncObjectScope());
     this.registerDomEvent(this.toolbar, 'focusout', event => {
       if (this.focusInteraction?.input === event.target) this.releaseFocus();
       if (this.loaded && this.session?.dirty) this.scheduleSave();
@@ -563,7 +571,11 @@ export class TextEditor extends Component {
   }
   private syncObjectScope(): void {
     if (!this.objectScope) return;
-    const active = !!this.session && !this.selection?.objects.length && !!(this.selected || this.selectedStroke);
+    const focused = this.native.element.ownerDocument.activeElement;
+    // Obsidian's window capture handler runs before ours. Own its public keymap
+    // scope for the focused PDF canvas too, even when no object is selected.
+    const focusedPdf = !!focused && (this.shortcutTarget(focused) || this.ownsControl(focused));
+    const active = this.windowFocused && !!this.session && !this.selection?.objects.length && (!!(this.selected || this.selectedStroke) || focusedPdf);
     if (active === this.objectScopeActive) return;
     this.objectScopeActive = active;
     if (active) this.app.keymap.pushScope(this.objectScope); else this.app.keymap.popScope(this.objectScope);
@@ -790,7 +802,7 @@ export class TextEditor extends Component {
     this.propertiesButton.style.setProperty('--pdf-tool-color', cssColor(color));
     this.propertiesButton.setAttribute('aria-haspopup', 'dialog');
     const width = brush ? this.tool === 'marker' ? this.markerWidth : this.penWidth : selected?.fontSize ?? this.fontSize;
-    this.propertiesButton.setAttribute('aria-label', brush ? `Brush settings, ${width} point` : 'Text settings');
+    this.propertiesButton.setAttribute('aria-label', brush ? 'Brush settings' : 'Text settings');
     this.propertiesButton.querySelector('.pfs-tool-value')!.textContent = `${Number(width.toFixed(1))} pt`;
     for (const [tool, button] of this.tools) {
       if (tool === 'marker' || tool === 'scribble') button.style.setProperty('--pdf-tool-color', cssColor(tool === 'marker' ? this.markerColor : this.penColor));
@@ -803,13 +815,13 @@ export class TextEditor extends Component {
     const stroke = session?.snapshot.strokes.find(stroke => stroke.id === this.selectedStroke);
     this.removeButton.disabled = (!this.selection?.objects.length && !selected?.owned && !stroke) || !!selected?.readOnly || !!stroke?.readOnly || blocked;
     this.removeButton.hidden = false;
-    setTooltip(this.removeButton, this.selection?.objects.length ? `Remove ${this.selection.objects.length} selected objects` : stroke ? 'Remove mark' : 'Remove text box');
+    setTooltip(this.removeButton, this.selection?.objects.length ? 'Remove selection' : stroke ? 'Remove mark' : 'Remove text box', { classes: ['pfs-overlay-tooltip'] });
     this.undoButton.disabled = !session?.canUndoStroke || blocked;
     this.redoButton.disabled = !session?.canRedoStroke || blocked;
     const status = session ? ({ saved: 'Saved to PDF', saving: 'Saving…', unsaved: session.drafted ? 'Draft saved locally · Saving PDF…' : 'Unsaved changes', error: 'Save failed', conflict: 'File changed' }[session.status]) : 'Loading…';
     this.status.replaceChildren();
     setIcon(this.status, session?.status === 'saved' ? 'check' : session?.status === 'error' || blocked ? 'triangle-alert' : 'loader-circle');
-    setTooltip(this.status, status); this.status.dataset.state = session?.status;
+    this.status.removeAttribute('aria-label'); this.status.dataset.state = session?.status;
     const accessible = this.status.ownerDocument.createElement('span'); accessible.className = 'pdf-form-studio-sr-only'; accessible.textContent = status;
     this.status.append(accessible);
     { accessible.className = 'pfs-save-label'; accessible.textContent = session?.status === 'saved' ? 'Saved' : session?.status === 'saving' ? 'Saving…' : session?.status === 'unsaved' ? 'Unsaved' : status; }

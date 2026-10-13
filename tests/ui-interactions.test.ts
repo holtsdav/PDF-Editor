@@ -35,7 +35,7 @@ const built = await build({ entryPoints: ['src/ui/text-editor.ts'], bundle: true
     export class Menu { hide() {} }
     export class Modal extends Component {}
     export class Notice { constructor(text) { throw new Error(text); } }
-    export function setTooltip(el, text) { el.setAttribute('aria-label', text); }
+    export function setTooltip(el, text, options = {}) { el.setAttribute('aria-label', text); el.setAttribute('data-tooltip-classes', (options.classes ?? []).join(' ')); }
     export function setIcon(el) { el.append(el.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'svg')); }
     export const loadPdfJs = () => { throw new Error('Not used by editor fixture'); };
     export class TFile {}
@@ -50,14 +50,19 @@ await writeFile(moduleUrl, built.outputFiles[0]!.text);
 const { TextEditor } = await import(moduleUrl.href) as { TextEditor: typeof Editor };
 const font = new Uint8Array(await readFile(new URL('../assets/fonts/NotoSans-Regular.ttf', import.meta.url)));
 
-interface MockScope { handlers: { key: string; func(event: KeyboardEvent): unknown }[] }
+interface MockScope { handlers: { key: string; modifiers: string[]; func(event: KeyboardEvent): unknown }[] }
 /** Mount the real editor on an anonymous session, mocking only host APIs, clipboard and page layout. */
-async function fixture(pageCount = 1, withKeymap = false, rotation = 0, seed?: Uint8Array, shared?: TextSession, visible?: number[]) {
+async function fixture(pageCount = 1, withKeymap = false, rotation = 0, seed?: Uint8Array, shared?: TextSession, visible?: number[], hostFirst = false,
+  initialFocus: { windowFocused?: boolean; pdfFocused?: boolean } = {}) {
   const pdf = await PDFDocument.create(); for (let i = 0; i < pageCount; i++) pdf.addPage([600, 800]).setRotation(degrees(rotation)); let bytes = await pdf.save();
   if (seed) bytes = seed.slice(); let writes = 0;
   const session = shared ?? await TextSession.open({ read: async () => bytes, write: async value => { bytes = value; writes++; }, backup: async () => 'original.pdf' }, font);
   const dom = new JSDOM(`<body><div id="editor"><div id="tools"></div>${Array.from({ length: pageCount }, (_, i) => `<div id="${i ? 'page' + (i + 1) : 'page'}"></div>`).join('')}</div><button id="outside">Outside</button></body>`, { pretendToBeVisual: true });
   const doc = dom.window.document;
+  let windowFocused = initialFocus.windowFocused ?? true;
+  Object.defineProperty(doc, 'hasFocus', { value: () => windowFocused });
+  dom.window.addEventListener('focus', () => { windowFocused = true; });
+  dom.window.addEventListener('blur', () => { windowFocused = false; });
   Object.assign(dom.window.Node.prototype, { instanceOf(this: Node, type: typeof Node) { return this instanceof type; } });
   let clipboardText = '';
   Object.defineProperty(dom.window.navigator, 'clipboard', { configurable: true, value: {
@@ -92,6 +97,19 @@ async function fixture(pageCount = 1, withKeymap = false, rotation = 0, seed?: U
     pushScope(scope: MockScope) { scopes.push(scope); },
     popScope(scope: MockScope) { const index = scopes.lastIndexOf(scope); if (index >= 0) scopes.splice(index, 1); }
   } } : {};
+  let noteUndos = 0;
+  if (hostFirst) dom.window.addEventListener('keydown', event => {
+    if (!(event.metaKey || event.ctrlKey) || event.altKey || event.key.toLowerCase() !== 'z') return;
+    const handler = scopes.at(-1)?.handlers.find(handler => handler.key === 'z' && handler.modifiers.includes('Shift') === event.shiftKey);
+    // A matched public Scope handler stops parent lookup even when it permits
+    // native input undo. The host capture listener predates the PDF editor.
+    if (handler) { if (handler.func(event) === false) { event.preventDefault(); event.stopPropagation(); } }
+    else { noteUndos++; event.preventDefault(); event.stopImmediatePropagation(); }
+  }, true);
+  if (initialFocus.pdfFocused) {
+    const page = native.pages()[0]!.div;
+    page.tabIndex = 0; page.focus();
+  }
   const editor = new TextEditor(app as unknown as App, native, sessions);
   await pause(0);
   const pointer = (target: Element, name: string, x = 0, y = 0, shiftKey = false) => {
@@ -103,7 +121,7 @@ async function fixture(pageCount = 1, withKeymap = false, rotation = 0, seed?: U
     pointer(button, 'pointerdown'); button.focus(); button.click();
   };
   const dispose = () => { (editor as Editor & { unload(): void }).unload(); dom.window.close(); };
-  return { doc, session, editor, sessions, scopes, pointer, tool, dispose, native, viewports, bytes: () => bytes, writes: () => writes,
+  return { doc, session, editor, sessions, scopes, pointer, tool, dispose, native, viewports, bytes: () => bytes, writes: () => writes, noteUndos: () => noteUndos,
     clipboard: { get text() { return clipboardText; }, set text(value: string) { clipboardText = value; } } };
 }
 
@@ -147,7 +165,7 @@ test('spacing scrubs preview without mutating history, retain the caret and comm
     const field = f.session.add(1, [80, 400, 340, 620], 14, true); f.session.setValue(field.name, 'Unicode café e\u0301\nSecond row');
     const input = f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!;
     input.focus(); input.setSelectionRange(2, 8); f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
-    const scrub = f.doc.querySelector<HTMLButtonElement>('[aria-label="Letter spacing: drag horizontally to adjust"]')!;
+    const scrub = f.doc.querySelector<HTMLButtonElement>('[aria-label="Letter spacing"]')!;
     f.pointer(scrub, 'pointerdown', 100); f.pointer(scrub, 'pointermove', 130);
     assert.equal(field.letterSpacing, undefined); assert.equal(input.style.letterSpacing, '0.6px'); assert.equal(f.doc.activeElement, input);
     assert.equal(input.selectionStart, 2); assert.equal(input.selectionEnd, 8);
@@ -164,7 +182,7 @@ test('spacing cancels on Escape, capture loss, blur, disposal and replacement; d
     const f = await fixture(); try {
       const field = f.session.add(1, [80, 400, 340, 620], 14, true); f.session.setValue(field.name, 'Kept'); await f.session.save();
       f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!.focus(); f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
-      const scrub = f.doc.querySelector<HTMLButtonElement>('[aria-label="Line spacing: drag horizontally to adjust"]')!;
+      const scrub = f.doc.querySelector<HTMLButtonElement>('[aria-label="Line spacing"]')!;
       f.pointer(scrub, 'pointerdown', 100); f.pointer(scrub, 'pointermove', 200);
       if (interruption === 'Escape') f.doc.activeElement!.dispatchEvent(new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
       else if (interruption === 'blur') f.doc.defaultView!.dispatchEvent(new f.doc.defaultView!.Event('blur'));
@@ -181,7 +199,7 @@ test('spacing cancels on Escape, capture loss, blur, disposal and replacement; d
     input.value = '1,75'; input.dispatchEvent(new f.doc.defaultView!.Event('change', { bubbles: true })); assert.equal(input.value, '1.75');
     input.dispatchEvent(new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true })); assert.equal(input.value, '1.8');
     input.value = 'Infinity'; input.dispatchEvent(new f.doc.defaultView!.Event('change')); assert.equal(input.getAttribute('aria-invalid'), 'true');
-    const scrub = f.doc.querySelector<HTMLButtonElement>('[aria-label="Letter spacing: drag horizontally to adjust"]')!;
+    const scrub = f.doc.querySelector<HTMLButtonElement>('[aria-label="Letter spacing"]')!;
     f.pointer(scrub, 'pointerdown', 100); f.pointer(scrub, 'pointermove', 102); f.pointer(scrub, 'pointerup', 102);
     assert.equal(f.doc.activeElement?.getAttribute('aria-label'), 'Letter spacing (PDF points)');
   } finally { f.dispose(); }
@@ -295,6 +313,7 @@ test('reset controls preserve authored forms and follow ruled-pitch locks across
     const input = authored.doc.querySelector<HTMLInputElement>('.is-form-field [data-pdf-field]')!, before = JSON.stringify(authored.session.snapshot.fields);
     input.focus(); authored.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
     for (const reset of authored.doc.querySelectorAll<HTMLButtonElement>('.pfs-spacing-reset')) { assert.equal(reset.disabled, true); reset.click(); }
+    for (const control of authored.doc.querySelectorAll<HTMLElement>('.pfs-spacing-value, .pfs-spacing-scrub, .pfs-spacing-reset')) assert.equal(control.getAttribute('aria-description'), 'Spacing is unavailable for this field.');
     assert.equal(JSON.stringify(authored.session.snapshot.fields), before); assert.equal(authored.session.dirty, false);
   } finally { authored.dispose(); }
   const f = await fixture(); try {
@@ -302,9 +321,18 @@ test('reset controls preserve authored forms and follow ruled-pitch locks across
     const field = f.session.snapshot.fields.find(item => item.name === added.name)!;
     f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!.focus(); f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
     const reset = f.doc.querySelector<HTMLButtonElement>('[aria-label="Reset line spacing to 1.2 ×"]')!;
+    const value = f.doc.querySelector<HTMLInputElement>('[aria-label="Line spacing (multiplier)"]')!;
+    const scrub = f.doc.querySelector<HTMLButtonElement>('[aria-label="Line spacing"]')!;
+    const warning = 'Printed line spacing. Resize the box to change it.';
+    for (const control of [value, scrub, reset]) assert.equal(control.getAttribute('aria-description'), warning);
     assert.equal(reset.disabled, true); reset.click(); assert.deepEqual(field.ruled, { spacing: 24, rows: 3 });
     f.session.updateBox(field.name, [80, 400, 340, 520]); assert.equal(reset.disabled, false);
+    const editingDescription = value.getAttribute('aria-description'); assert(editingDescription?.startsWith('Drag horizontally to adjust'));
+    assert.equal(scrub.getAttribute('aria-description'), 'Drag left or right to adjust.'); assert.equal(reset.hasAttribute('aria-description'), false);
     f.session.undoStroke(); assert.equal(reset.disabled, true); assert.deepEqual(f.session.snapshot.fields.find(item => item.name === field.name)!.ruled, { spacing: 24, rows: 3 });
+    for (const control of [value, scrub, reset]) assert.equal(control.getAttribute('aria-description'), warning);
+    f.session.redoStroke(); assert.equal(reset.disabled, false); assert.equal(value.getAttribute('aria-description'), editingDescription);
+    assert.equal(scrub.getAttribute('aria-description'), 'Drag left or right to adjust.'); assert.equal(reset.hasAttribute('aria-description'), false);
   } finally { f.dispose(); }
 });
 
@@ -476,6 +504,25 @@ test('answer-line scan button sits beside Add text box in the editing toolbar', 
     const text = labels.findIndex(label => label?.startsWith('Add text box'));
     assert.equal(labels[text + 1], 'Detect answer lines in PDF');
     assert(labels[text + 2]?.startsWith('Highlighter'));
+  } finally { f.dispose(); }
+});
+
+test('tool hover labels stay concise while routine controls retain names without hover help', async () => {
+  const f = await fixture();
+  try {
+    const labels = [...f.doc.querySelectorAll<HTMLButtonElement>('.pdf-form-studio-toolbar > button')].map(button => button.getAttribute('aria-label'));
+    for (const label of ['Select', 'Add text box', 'Highlighter', 'Pen', 'Eraser']) assert(labels.includes(label));
+    assert.equal(f.doc.querySelector('.pdf-form-studio-status')!.hasAttribute('aria-label'), false, 'visible save status does not become a hover tooltip');
+    const field = f.session.add(1, [80, 580, 240, 610], 12, true); f.session.setValue(field.name, 'Settings');
+    f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!.focus(); f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
+    for (const selector of ['.pfs-spacing-value', '.pfs-swatch', '.pfs-alignment button', '.pfs-text-sizes button']) {
+      const controls = f.doc.querySelectorAll<HTMLElement>(selector); assert(controls.length);
+      for (const control of controls) { assert(control.getAttribute('aria-label')); assert.equal(control.getAttribute('data-tooltip-classes'), 'pfs-overlay-tooltip'); assert.equal(control.hasAttribute('title'), false); }
+    }
+    const scrub = f.doc.querySelector<HTMLButtonElement>('.pfs-spacing-scrub')!;
+    assert.equal(scrub.getAttribute('aria-label'), 'Letter spacing'); assert.notEqual(scrub.getAttribute('data-tooltip-classes'), 'pfs-overlay-tooltip');
+    assert.equal(scrub.getAttribute('aria-description'), 'Drag left or right to adjust.');
+    assert(f.doc.querySelector<HTMLButtonElement>('.pfs-spacing-reset')!.getAttribute('aria-label')!.startsWith('Reset'));
   } finally { f.dispose(); }
 });
 
@@ -1423,7 +1470,7 @@ test('floating toolbar actions retain a selected group until the action runs', a
     f.pointer(frames[0]!, 'pointerdown', 100, 200, true);
     f.pointer(frames[1]!, 'pointerdown', 250, 200, true);
     assert.equal(f.doc.querySelectorAll('.is-multi-selected').length, 2);
-    const remove = host.querySelector<HTMLButtonElement>('button[aria-label^="Remove 2 selected objects"]')!;
+    const remove = host.querySelector<HTMLButtonElement>('button[aria-label="Remove selection"]')!;
     f.pointer(remove, 'pointerdown'); remove.focus(); remove.click();
     assert.equal(f.session.snapshot.fields.length, 0);
   } finally { f.dispose(); }
@@ -1492,6 +1539,72 @@ test('HTML object copies preserve whitespace safely without inline styles', asyn
     assert.equal(parsed.body.textContent, value);
     assert.equal(parsed.querySelector('[style], b, script'), null);
   } finally { f.dispose(); }
+});
+
+test('host-first preview shortcuts undo unselected drawings once, retain redo after deletion and release the note', async () => {
+  for (const modifier of ['metaKey', 'ctrlKey']) {
+    const f = await fixture(1, true, 0, undefined, undefined, undefined, true);
+    try {
+      f.tool('Pen'); const layer = f.doc.querySelector<HTMLElement>('.pdf-form-studio-layer')!;
+      for (const x of [80, 180]) { f.pointer(layer, 'pointerdown', x, 200); f.pointer(layer, 'pointermove', x + 30, 220); f.pointer(layer, 'pointerup', x + 30, 220); }
+      assert.equal(f.session.snapshot.strokes.length, 2); assert.equal(f.doc.activeElement, layer);
+      assert.equal(f.scopes.length, 1, 'a focused canvas owns the host scope without an object selection');
+      const shortcut = (options: KeyboardEventInit = {}) => {
+        const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'z', [modifier]: true, bubbles: true, cancelable: true, ...options });
+        f.doc.activeElement!.dispatchEvent(event); return event;
+      };
+      assert.equal(shortcut().defaultPrevented, true); assert.equal(f.session.snapshot.strokes.length, 1);
+      assert.equal(shortcut({ repeat: true }).defaultPrevented, true); assert.equal(f.session.snapshot.strokes.length, 1);
+      shortcut(); assert.equal(f.session.snapshot.strokes.length, 0);
+      shortcut(); assert.equal(f.noteUndos(), 0, 'empty PDF history cannot undo the note');
+      shortcut({ shiftKey: true }); assert.equal(f.session.snapshot.strokes.length, 1);
+      assert.equal(f.noteUndos(), 0);
+      const outside = f.doc.querySelector<HTMLButtonElement>('#outside')!; f.pointer(outside, 'pointerdown'); outside.focus();
+      assert.equal(f.scopes.length, 0); shortcut(); assert.equal(f.noteUndos(), 1);
+      layer.focus(); assert.equal(f.scopes.length, 1);
+      f.doc.defaultView!.dispatchEvent(new f.doc.defaultView!.Event('blur')); assert.equal(f.scopes.length, 0);
+      f.doc.defaultView!.dispatchEvent(new f.doc.defaultView!.Event('focus')); assert.equal(f.scopes.length, 1);
+      await f.session.saveWhenIdle(); assert.equal((await readTextPdf(f.bytes())).strokes.length, 1);
+      const task = getDocument({ data: f.bytes().slice() });
+      try {
+        const saved = await task.promise, annotations = await (await saved.getPage(1)).getAnnotations();
+        assert.equal(annotations.filter(annotation => annotation.subtype === 'Ink').length, 1, 'PDF.js independently sees the single redone drawing');
+      } finally { await task.destroy(); }
+    } finally { f.dispose(); }
+  }
+});
+
+test('an editor constructed after window handoff waits for owning-window focus before pushing its scope', async () => {
+  for (const windowFocused of [false, true]) {
+    const f = await fixture(1, true, 0, undefined, undefined, undefined, true, { windowFocused, pdfFocused: true });
+    try {
+      assert.equal(f.doc.activeElement, f.native.pages()[0]!.div, 'an inactive window can retain its PDF focus target during loading');
+      assert.equal(f.doc.hasFocus(), windowFocused);
+      assert.equal(f.scopes.length, windowFocused ? 1 : 0, 'session synchronization must respect actual initial window focus');
+      f.editor.refresh(); assert.equal(f.scopes.length, windowFocused ? 1 : 0);
+      for (let i = 0; i < 2; i++) f.doc.defaultView!.dispatchEvent(new f.doc.defaultView!.Event('focus'));
+      assert.equal(f.scopes.length, 1, 'returning to the owner pushes one scope');
+      f.doc.defaultView!.dispatchEvent(new f.doc.defaultView!.Event('blur'));
+      f.editor.refresh(); assert.equal(f.scopes.length, 0, 'handoff releases the scope even after later synchronization');
+    } finally { f.dispose(); assert.equal(f.scopes.length, 0); }
+  }
+});
+
+test('host-first preview routing preserves typing undo and guards toolbar, composition and disposal', async () => {
+  const f = await fixture(1, true, 0, undefined, undefined, undefined, true);
+  try {
+    const field = f.session.add(1, [80, 580, 240, 610], 12, true); f.session.setValue(field.name, 'Typing');
+    const input = f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!; input.focus();
+    const shortcut = (target: Element, options: KeyboardEventInit = {}) => {
+      const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true, cancelable: true, ...options }); target.dispatchEvent(event); return event;
+    };
+    assert.equal(shortcut(input).defaultPrevented, false); assert.equal(f.noteUndos(), 0); assert.equal(field.value, 'Typing');
+    const pen = f.doc.querySelector<HTMLButtonElement>('[aria-label="Pen"]')!; pen.focus();
+    assert.equal(shortcut(pen, { isComposing: true }).defaultPrevented, false); assert.equal(f.session.snapshot.fields.length, 1);
+    assert.equal(shortcut(pen).defaultPrevented, true); assert.equal(f.session.snapshot.fields.length, 0); assert.equal(f.noteUndos(), 0);
+    const toolbar = f.doc.querySelector<HTMLElement>('.pdf-form-studio-toolbar')!; f.doc.body.append(toolbar);
+    pen.focus(); shortcut(pen, { shiftKey: true }); assert.equal(f.session.snapshot.fields.length, 1);
+  } finally { f.dispose(); assert.equal(f.scopes.length, 0); }
 });
 
 test('Live Preview note keyboard targets undo the selected PDF, and typing in the note releases ownership', async () => {
