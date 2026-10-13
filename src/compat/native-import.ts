@@ -11,13 +11,14 @@ interface NativeImportOptions<S> {
   skipped(): void;
   failed(error: unknown): void;
 }
-interface NativeAttachment { filepath?: string; extension?: string; data?: Promise<ArrayBuffer> }
+type NativeImportBytes = ArrayBuffer | Uint8Array;
+interface NativeAttachment { filepath?: string; extension?: string; data?: Promise<NativeImportBytes> }
 interface ClipboardManager {
   info: MarkdownView | MarkdownFileInfo;
   insertFiles(items: NativeAttachment[]): Promise<void>;
   insertAttachmentEmbed(file: TFile, trailing?: boolean): void;
 }
-type AttachmentSaver = (name: string, extension: string, bytes: ArrayBuffer) => Promise<TFile>;
+type AttachmentSaver = (name: string, extension: string, bytes: NativeImportBytes) => Promise<TFile>;
 
 /** Observe exact native buffers/results; never take over the drop or guess a source by its filename. */
 export function observeNativePdfImports<S>(app: App, options: NativeImportOptions<S>): () => void {
@@ -25,7 +26,7 @@ export function observeNativePdfImports<S>(app: App, options: NativeImportOption
   const originalSave = host.saveAttachment;
   if (typeof originalSave !== 'function') return () => {};
   type Ticket = { source: Promise<S | null>; info: MarkdownView | MarkdownFileInfo; note: TFile | null; editor: Editor; bytes: Uint8Array; claimed: boolean; cancelled: boolean };
-  const buffers = new WeakMap<ArrayBuffer, Ticket>(), destinations = new Map<TFile, Ticket>();
+  const buffers = new WeakMap<NativeImportBytes, Ticket>(), destinations = new Map<TFile, Ticket>();
   const contexts = new Set<() => void>(), busy = new WeakSet<ClipboardManager>(); let closed = false;
   const active = () => !closed && options.enabled();
   const save: AttachmentSaver = function(this: App, name, extension, bytes) {
@@ -47,7 +48,12 @@ export function observeNativePdfImports<S>(app: App, options: NativeImportOption
     }
     if (!files.size) return;
     if (files.size > 32 || [...files.values()].reduce((sum, file) => sum + file.size, 0) > 100_000_000) { options.skipped(); return; }
-    const manager = record(record(info)?.sourceMode)?.clipboardManager as ClipboardManager | undefined;
+    // Current hosts keep the manager on the callback editor's component; older hosts expose sourceMode.
+    // Accept a shared alias, but never choose between different managers for the same drop.
+    const candidates = [record(record(record(editor)?.editorComponent)?.clipboardManager), record(record(record(info)?.sourceMode)?.clipboardManager)]
+      .filter((value): value is Record<string, unknown> => !!value);
+    const managers = new Set(candidates);
+    const manager = managers.size === 1 ? [...managers][0] as unknown as ClipboardManager : undefined;
     if (!manager || manager.info !== info || typeof manager.insertFiles !== 'function' || typeof manager.insertAttachmentEmbed !== 'function') { options.skipped(); return; }
     // A second drop may finish after the first and restore its already-disposed wrapper.
     // Keep native import intact, but do not observe overlapping work on one manager.
@@ -87,10 +93,14 @@ export function observeNativePdfImports<S>(app: App, options: NativeImportOption
         if (!file || item.extension?.toLowerCase() !== 'pdf' || !item.data || typeof item.data.then !== 'function') continue;
         const source = Promise.resolve().then(() => options.prepare(item.filepath!, file)).catch(() => null);
         void item.data.then(bytes => {
-          if (ended || !active() || Object.prototype.toString.call(bytes) !== '[object ArrayBuffer]') return;
+          if (ended || !active()) return;
+          const tag = Object.prototype.toString.call(bytes);
+          if (tag !== '[object ArrayBuffer]' && !(ArrayBuffer.isView(bytes) && tag === '[object Uint8Array]')) return;
           if (bytes.byteLength !== file.size || bytes.byteLength > 100_000_000) { options.skipped(); return; }
           if (buffers.has(bytes)) { buffers.get(bytes)!.cancelled = true; return; }
-          const ticket: Ticket = { source, info, note, editor, bytes: new Uint8Array(bytes.slice(0)), claimed: false, cancelled: false };
+          const view = bytes as Uint8Array;
+          const content = tag === '[object ArrayBuffer]' ? new Uint8Array(bytes as ArrayBuffer) : new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+          const ticket: Ticket = { source, info, note, editor, bytes: content.slice(), claimed: false, cancelled: false };
           tickets.add(ticket); buffers.set(bytes, ticket);
         }).catch(() => {});
       }
