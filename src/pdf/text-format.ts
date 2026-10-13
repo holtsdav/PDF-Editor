@@ -1,6 +1,18 @@
 export type FontFamily = 'sans' | 'serif' | 'mono';
 export type PdfColor = [number, number, number];
-export interface TextFormat { fontFamily: FontFamily; fontSize: number; color: PdfColor; autoSize?: true; preserveWidgetSizes?: true }
+export interface TextFormat { fontFamily: FontFamily; fontSize: number; color: PdfColor; alignment?: 'left' | 'center' | 'right'; letterSpacing?: number; lineSpacing?: number; autoSize?: true; preserveWidgetSizes?: true }
+export const DEFAULT_LINE_SPACING = 1.2;
+/** Accept only finite tracking in PDF points and leading multipliers within supported limits. */
+export function validSpacing(letter = 0, line = DEFAULT_LINE_SPACING): boolean {
+  return Number.isFinite(letter) && letter >= 0 && letter <= 20 && Number.isFinite(line) && line >= 0.8 && line <= 3;
+}
+const graphemes = new Intl.Segmenter('und', { granularity: 'grapheme' });
+/** Keep combining marks with their base when measuring and drawing tracked text. */
+export function textGraphemes(text: string): string[] { return [...graphemes.segment(text)].map(part => part.segment); }
+/** CSS tracking includes the trailing space; use identical widths for wrapping and alignment. */
+export function spacedWidth(text: string, measure: (text: string) => number, letter = 0): number {
+  return letter ? textGraphemes(text).reduce((sum, part) => sum + measure(part) + letter, 0) : measure(text);
+}
 export type PdfFonts = Uint8Array | Record<FontFamily, Uint8Array>;
 export const fontNames: Record<FontFamily, string> = { sans: 'Sans', serif: 'Serif', mono: 'Mono' };
 export const fontFaces: Record<FontFamily, string> = { sans: 'PDF Form Studio Text', serif: 'PDF Form Studio Serif', mono: 'PDF Form Studio Mono' };

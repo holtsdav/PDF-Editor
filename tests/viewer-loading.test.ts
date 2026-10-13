@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { JSDOM } from 'jsdom';
+import { PDFDocument } from 'pdf-lib';
+import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
 
 // Exercise actual discovery and startup against DOM, deferring PDF/session I/O.
 const host = `
@@ -29,6 +31,55 @@ const { findNativePdfs, watchNativePdfs } = await import(new URL('native-pdf.mjs
 const { PdfSurface } = await import(new URL('pdf-surface.mjs', output).href);
 const css = await readFile(new URL('../styles.css', import.meta.url), 'utf8');
 
+test('gesture zoom anchors the actual PDF point through quarter turns, app scale and rapid reversals, and updates the label', async () => {
+  const pdf = await PDFDocument.create(); pdf.addPage([600, 800]);
+  const task = getDocument({ data: await pdf.save() });
+  try {
+    const proxy = await (await task.promise).getPage(1);
+    for (const rotation of [0, 90, 180, 270]) for (const hostScale of [1, 1.25]) {
+      const f = fixture(), scroller = f.doc.createElement('div'), stack = f.doc.createElement('div'), div = f.doc.createElement('div'); stack.append(div); scroller.append(stack); f.doc.body.append(scroller);
+      const entry = { page: proxy, native: { div, number: 1, viewport: proxy.getViewport({ scale: 1, rotation }) }, version: 0 };
+      Object.defineProperties(scroller, { clientWidth: { value: 640 }, offsetWidth: { value: 640 }, clientHeight: { value: 400 } });
+      const canvasWidth = () => Math.max(640, parseFloat(stack.style.minWidth) || 0, entry.native.viewport.width + 32);
+      const topPadding = () => parseFloat(stack.style.paddingTop) || 16;
+      const bottomPadding = () => parseFloat(stack.style.paddingBottom) || 16;
+      let scrollX = 0, scrollY = 0;
+      Object.defineProperties(scroller, {
+        scrollLeft: { get: () => scrollX, set: value => { scrollX = Math.max(0, Math.min(canvasWidth() - 640, value)); } },
+        scrollTop: { get: () => scrollY, set: value => { scrollY = Math.max(0, Math.min(topPadding() + entry.native.viewport.height + bottomPadding() - 400, value)); } }
+      });
+      scroller.getBoundingClientRect = () => ({ left: 40, top: 80, width: 640 * hostScale, height: 400 * hostScale, right: 40 + 640 * hostScale, bottom: 80 + 400 * hostScale, x: 40, y: 80, toJSON() {} });
+      Object.defineProperty(div, 'offsetTop', { get: topPadding });
+      div.getBoundingClientRect = () => {
+        const width = parseFloat(div.style.width), height = parseFloat(div.style.height), left = 40 + ((canvasWidth() - width) / 2 - scroller.scrollLeft) * hostScale, top = 80 + (topPadding() - scroller.scrollTop) * hostScale;
+        return { left, top, width: width * hostScale, height: height * hostScale, right: left + width * hostScale, bottom: top + height * hostScale, x: left, y: top, toJSON() {} };
+      };
+      const surface = Object.assign(Object.create(PdfSurface.prototype), { root: f.doc.createElement('div'), native: { element: f.doc.createElement('div') }, scroller, stack, entries: [entry], currentPage: 1, rotation, scale: 1, zoomButton: f.doc.createElement('button'), closed: false, refreshSuggestions() {}, requestVisible() {}, queueFloatingToolbar() {} });
+      try {
+        surface.layout(); scroller.scrollTop = 160; scroller.scrollLeft = 50;
+        const x = 40 + 300 * hostScale, y = 80 + 200 * hostScale;
+        const point = () => { const r = div.getBoundingClientRect(), v = entry.native.viewport; return v.convertToPdfPoint((x - r.left) * v.width / r.width, (y - r.top) * v.height / r.height); };
+        const before = point(); surface.zoomAt(1.25, x, y); const after = point();
+        assert(Math.hypot(before[0]! - after[0]!, before[1]! - after[1]!) < 1e-8); assert.equal(surface.zoomButton.textContent, '125%');
+        surface.zoomAt(0.8, x, y); assert.equal(surface.zoomButton.textContent, '100%');
+        surface.zoomAt(0.5, x, y); const smaller = point(); assert(Math.hypot(before[0]! - smaller[0]!, before[1]! - smaller[1]!) < 1e-8);
+        // Fit width can keep the viewport unchanged while removing the gesture's anchor margins.
+        const fitScale = 608 / proxy.getViewport({ scale: 1, rotation }).width;
+        surface.zoomAt(fitScale / surface.scale, x, y); scroller.scrollTop = topPadding() + 32;
+        const version = entry.version, fitPoint = point();
+        surface.scale = 'width'; surface.layout();
+        assert.equal(entry.version, version); assert.equal(surface.panSpace, false); assert.equal(scroller.scrollTop, 48);
+        const verticalAxis = rotation % 180 === 90 ? 0 : 1;
+        assert(Math.abs(point()[verticalAxis]! - fitPoint[verticalAxis]!) < 1e-8);
+        assert.equal(surface.zoomButton.textContent, 'Fit width');
+        surface.zoomAt(100, x, y); assert.equal(surface.scale, 3); surface.zoomAt(0.001, x, y); assert.equal(surface.scale, 0.35);
+        surface.scale = 'width'; surface.layout(); assert.equal(surface.zoomButton.textContent, 'Fit width');
+      } finally { f.dom.window.close(); }
+    }
+  } finally { await task.destroy(); }
+});
+
+/** Provide a disposable native-host DOM and workspace events without performing session I/O. */
 function fixture() {
   const dom = new JSDOM('<body><main></main></body>', { pretendToBeVisual: true }); const doc = dom.window.document;
   Object.assign(dom.window.HTMLElement.prototype, {

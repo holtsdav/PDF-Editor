@@ -29,15 +29,14 @@ export class ObjectSelection extends Component {
   private scope?: Scope;
   private scopeActive = false;
   private claims: (() => void)[] = [];
+  /** Bind mixed-object selection and shortcut ownership to this document's focus proxy and shared session. */
   constructor(private session: TextSession, private root: HTMLElement, private options: Options, private app?: App) {
     super();
     const doc = root.ownerDocument;
     if (app?.keymap) {
       const scope = this.scope = new Scope(app.scope);
       for (const redo of [false, true]) scope.register(redo ? ['Mod', 'Shift'] : ['Mod'], 'z', event => {
-        try { if (redo) this.session.redoStroke(); else this.session.undoStroke(); this.options.save(); }
-        catch (error) { this.options.error(error); }
-        event.preventDefault(); event.stopImmediatePropagation(); return false;
+        return this.options.shortcut('z', event) ? false : undefined;
       });
       for (const key of ['c', 'v', 'd']) scope.register(['Mod'], key, event => {
         if (this.options.shortcut(key, event)) return false;

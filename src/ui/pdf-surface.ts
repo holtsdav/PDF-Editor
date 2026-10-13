@@ -11,6 +11,7 @@ import { detectAnswerLines } from '../pdf/answer-lines';
 import { MAX_AUTO_DETECT_PAGES } from '../pdf/tool-preferences';
 import { labelOverlay } from './overlay-label';
 import { pdfPoint, pdfRectangle } from './pdf-geometry';
+import { bindSurfaceInput } from './surface-input';
 import type { Rect } from '../pdf/text-engine';
 import type { TextField } from '../pdf/text-engine';
 
@@ -51,6 +52,7 @@ export class PdfSurface extends Component {
   private generation = 0;
   private closed = false;
   private scale: number | 'width' = 'width';
+  private panSpace = false;
   private rotation = 0;
   private frame?: number;
   private renderQueue = Promise.resolve();
@@ -131,6 +133,7 @@ export class PdfSurface extends Component {
     this.message = this.root.createDiv({ cls: 'pfs-surface-message', text: 'Opening PDF…', attr: { role: 'status' } });
     this.scroller = this.root.createDiv({ cls: 'pfs-pages', attr: { tabindex: '0', 'aria-label': 'PDF pages' } });
     this.stack = this.scroller.createDiv({ cls: 'pfs-page-stack' });
+    this.register(bindSurfaceInput(this.scroller, { zoom: (factor, x, y) => this.zoomAt(factor, x, y), interrupt: () => this.editor?.cancelInteractions(), verticalBounds: () => this.scrollBounds() }));
     // A previous hot-reloaded build can leave its own surface in this host.
     for (const child of [...native.element.children]) if (child.classList.contains('pfs-surface')) child.remove();
     native.element.append(this.root);
@@ -233,6 +236,7 @@ export class PdfSurface extends Component {
       if (this.task !== task) await task.destroy().catch(() => {});
     }
   }
+  /** Rebuild page viewports while retaining the current page-relative vertical position. */
   private layout(): void {
     if (this.closed || !this.entries.length || this.scroller.clientWidth < 20) return;
     const old = this.entries[this.currentPage - 1];
@@ -259,7 +263,17 @@ export class PdfSurface extends Component {
       entry.native.div.style.setProperty('--scale-factor', String(scale));
       entry.native.div.style.setProperty('--total-scale-factor', String(scale));
     }
-    if (changed) { this.editor?.refresh(); if (old) this.scroller.scrollTop = old.native.div.offsetTop + fraction * old.native.viewport.height; }
+    const removedPanSpace = this.scale === 'width' && this.panSpace;
+    if (this.scale === 'width') this.panSpace = false;
+    if (this.panSpace) {
+      // Room around the canvas lets a smaller-than-viewport page retain the pointer anchor.
+      this.stack.style.minWidth = `${Math.max(this.scroller.clientWidth, ...this.entries.map(entry => entry.native.viewport.width + 32)) + 2 * this.scroller.clientWidth}px`;
+      this.stack.style.paddingTop = this.stack.style.paddingBottom = `${16 + this.scroller.clientHeight}px`;
+    } else {
+      this.stack.style.removeProperty('min-width'); this.stack.style.removeProperty('padding-top'); this.stack.style.removeProperty('padding-bottom');
+    }
+    if (changed) this.editor?.refresh();
+    if (old && (changed || removedPanSpace)) this.scroller.scrollTop = old.native.div.offsetTop + fraction * old.native.viewport.height;
     this.zoomButton.textContent = this.scale === 'width' ? 'Fit width' : `${Math.round(this.scale * 100)}%`;
     this.refreshSuggestions(); this.requestVisible();
     this.queueFloatingToolbar();
@@ -338,6 +352,33 @@ export class PdfSurface extends Component {
     this.floatingHost.classList.add('is-visible');
   }
   private zoom(delta: number): void { this.scale = Math.max(0.35, Math.min(3, (typeof this.scale === 'number' ? this.scale : this.entries[this.currentPage - 1]?.native.viewport.scale ?? 1) + delta)); this.layout(); }
+  /** Zoom within the existing bounds and keep the pointer's PDF point fixed using scrollable margins. */
+  private zoomAt(factor: number, x: number, y: number): void {
+    if (this.closed || !Number.isFinite(factor) || factor <= 0 || !this.entries.length) return;
+    const entry = this.entries.reduce((best, candidate) => {
+      const distance = (item: PageEntry) => { const r = item.native.div.getBoundingClientRect(); return Math.max(r.top - y, y - r.bottom, 0); };
+      return distance(candidate) < distance(best) ? candidate : best;
+    });
+    const before = entry.native.div.getBoundingClientRect();
+    if (!before.width || !before.height) return;
+    const point = entry.native.viewport.convertToPdfPoint((x - before.left) * entry.native.viewport.width / before.width, (y - before.top) * entry.native.viewport.height / before.height);
+    const scale = Math.max(0.35, Math.min(3, entry.native.viewport.scale * factor));
+    if (scale === entry.native.viewport.scale) return;
+    this.panSpace = true; this.scale = scale; this.layout();
+    const after = entry.native.div.getBoundingClientRect(), viewport = entry.native.viewport;
+    const projected = viewport.convertToViewportRectangle([point[0]!, point[1]!, point[0]!, point[1]!]);
+    const hostScale = this.scroller.offsetWidth ? this.scroller.getBoundingClientRect().width / this.scroller.offsetWidth : 1;
+    this.scroller.scrollLeft += (after.left + projected[0]! * after.width / viewport.width - x) / hostScale;
+    this.scroller.scrollTop += (after.top + projected[1]! * after.height / viewport.height - y) / hostScale;
+    this.requestVisible();
+  }
+  /** Exclude gesture anchor margins from the PDF range consumed by ordinary vertical wheel input. */
+  private scrollBounds(): [number, number] | undefined {
+    if (!this.panSpace || !this.entries.length) return;
+    const first = this.entries[0]!.native.div.offsetTop - 16, last = this.entries.at(-1)!;
+    // Zoom's anchor margins must never trap ordinary wheel input in blank space.
+    return [first, Math.max(first, last.native.div.offsetTop + last.native.viewport.height + 16 - this.scroller.clientHeight)];
+  }
   private requestVisible(): void {
     if (this.frame !== undefined || this.closed) return;
     this.frame = this.root.ownerDocument.defaultView!.requestAnimationFrame(() => { this.frame = undefined; this.paintVisible(); });
