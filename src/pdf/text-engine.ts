@@ -7,6 +7,7 @@ import type { InkStroke } from './ink-engine.ts';
 import { defaultColor, validColor, validSpacing } from './text-format.ts';
 import type { FontFamily, PdfColor, PdfFonts, TextFormat } from './text-format.ts';
 import { referencedObjects, pruneReplacedObjects } from './object-references.ts';
+import { loadPdfDocument, pdfSaveOptions } from './pdf-load.ts';
 import { validRuledLayout } from './ruled-text.ts';
 import type { RuledLayout } from './ruled-text';
 
@@ -45,7 +46,7 @@ export interface TextChanges {
 }
 
 async function loadWritable(bytes: Uint8Array): Promise<PDFDocument> {
-  const pdf = await PDFDocument.load(bytes, { updateMetadata: false });
+  const pdf = await loadPdfDocument(bytes);
   const acroForm = pdf.catalog.lookupMaybe(PDFName.of('AcroForm'), PDFDict);
   if (acroForm?.has(PDFName.of('XFA'))) throw new Error('XFA PDFs are read only in this version.');
   const pending = pdf.context.enumerateIndirectObjects().map(([, object]) => object), visited = new Set();
@@ -375,9 +376,9 @@ export async function writeTextPdf(seed: Uint8Array, changes: TextChanges, fontB
   await pdf.flush();
   // Embedded fonts may only resolve after flush; expand the captured refs then.
   pruneReplacedObjects(pdf, referencedObjects(pdf, [...replaced]));
-  const bytes = await pdf.save({ updateFieldAppearances: false });
+  const bytes = await pdf.save(pdfSaveOptions(pdf));
   // Reopen and verify logical values, widget appearances, and page count before any vault write.
-  const verified = await PDFDocument.load(bytes, { updateMetadata: false });
+  const verified = await loadPdfDocument(bytes);
   if (verified.getPageCount() !== pdf.getPageCount()) throw new Error('PDF page verification failed.');
   verifyInk(verified, changes.strokes, changes.deletedStrokes);
   for (const [name, value] of changes.values) {
@@ -443,7 +444,7 @@ export async function renderTextPdf(seed: Uint8Array): Promise<Uint8Array> {
         && readInkId(dict)?.startsWith('pdf-form-studio-ink-')) annotations.remove(i);
     }
   }
-  return pdf.save({ updateFieldAppearances: false });
+  return pdf.save(pdfSaveOptions(pdf));
 }
 function readInkId(dict: PDFDict): string | undefined {
   const value = dict.lookup(PDFName.of('NM'));
