@@ -304,6 +304,7 @@ test('reset controls preserve authored forms and follow ruled-pitch locks across
     const input = authored.doc.querySelector<HTMLInputElement>('.is-form-field [data-pdf-field]')!, before = JSON.stringify(authored.session.snapshot.fields);
     input.focus(); authored.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
     for (const reset of authored.doc.querySelectorAll<HTMLButtonElement>('.pfs-spacing-reset')) { assert.equal(reset.disabled, true); reset.click(); }
+    for (const control of authored.doc.querySelectorAll<HTMLElement>('.pfs-spacing-value, .pfs-spacing-scrub, .pfs-spacing-reset')) assert.equal(control.getAttribute('aria-description'), 'Spacing is unavailable for this field.');
     assert.equal(JSON.stringify(authored.session.snapshot.fields), before); assert.equal(authored.session.dirty, false);
   } finally { authored.dispose(); }
   const f = await fixture(); try {
@@ -311,9 +312,18 @@ test('reset controls preserve authored forms and follow ruled-pitch locks across
     const field = f.session.snapshot.fields.find(item => item.name === added.name)!;
     f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!.focus(); f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
     const reset = f.doc.querySelector<HTMLButtonElement>('[aria-label="Reset line spacing to 1.2 ×"]')!;
+    const value = f.doc.querySelector<HTMLInputElement>('[aria-label="Line spacing (multiplier)"]')!;
+    const scrub = f.doc.querySelector<HTMLButtonElement>('[aria-label="Line spacing"]')!;
+    const warning = 'Printed line spacing. Resize the box to change it.';
+    for (const control of [value, scrub, reset]) assert.equal(control.getAttribute('aria-description'), warning);
     assert.equal(reset.disabled, true); reset.click(); assert.deepEqual(field.ruled, { spacing: 24, rows: 3 });
     f.session.updateBox(field.name, [80, 400, 340, 520]); assert.equal(reset.disabled, false);
+    const editingDescription = value.getAttribute('aria-description'); assert(editingDescription?.startsWith('Drag horizontally to adjust'));
+    assert.equal(scrub.getAttribute('aria-description'), 'Drag left or right to adjust.'); assert.equal(reset.hasAttribute('aria-description'), false);
     f.session.undoStroke(); assert.equal(reset.disabled, true); assert.deepEqual(f.session.snapshot.fields.find(item => item.name === field.name)!.ruled, { spacing: 24, rows: 3 });
+    for (const control of [value, scrub, reset]) assert.equal(control.getAttribute('aria-description'), warning);
+    f.session.redoStroke(); assert.equal(reset.disabled, false); assert.equal(value.getAttribute('aria-description'), editingDescription);
+    assert.equal(scrub.getAttribute('aria-description'), 'Drag left or right to adjust.'); assert.equal(reset.hasAttribute('aria-description'), false);
   } finally { f.dispose(); }
 });
 

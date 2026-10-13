@@ -138,7 +138,8 @@ export class ToolPopover extends Component {
       const group = row.createDiv({ cls: 'pfs-spacing-control' });
       const scrub = group.createEl('button', { cls: 'pfs-spacing-scrub', attr: { 'aria-label': label, 'aria-description': 'Drag left or right to adjust.' } });
       setIcon(scrub, icon);
-      const input = group.createEl('input', { cls: 'pfs-spacing-value', attr: { type: 'text', inputmode: 'decimal', 'aria-label': `${label} (${unit === 'pt' ? 'PDF points' : 'multiplier'})`, 'aria-description': `Drag horizontally to adjust, including while focused. Click and use the keyboard to edit or select text. Range ${minimum} to ${maximum}. Up and Down adjust by ${step}.`, spellcheck: 'false' } });
+      const editingDescription = `Drag horizontally to adjust, including while focused. Click and use the keyboard to edit or select text. Range ${minimum} to ${maximum}. Up and Down adjust by ${step}.`;
+      const input = group.createEl('input', { cls: 'pfs-spacing-value', attr: { type: 'text', inputmode: 'decimal', 'aria-label': `${label} (${unit === 'pt' ? 'PDF points' : 'multiplier'})`, 'aria-description': editingDescription, spellcheck: 'false' } });
       group.createSpan({ cls: 'pfs-spacing-unit', text: unit, attr: { 'aria-hidden': 'true' } });
       const defaultValue = index ? 1.2 : 0;
       const reset = group.createEl('button', { cls: 'pfs-spacing-reset', attr: { 'aria-label': `Reset ${label.toLowerCase()} to ${defaultValue} ${unit}` } });
@@ -148,6 +149,10 @@ export class ToolPopover extends Component {
         const locked = index === 1 && !!options.lineLocked;
         scrub.disabled = input.disabled = reset.disabled = !!options.disabled || locked;
         const warning = 'Printed line spacing. Resize the box to change it.';
+        const unavailable = options.disabled ? 'Spacing is unavailable for this field.' : locked ? warning : undefined;
+        input.setAttribute('aria-description', unavailable ?? editingDescription);
+        scrub.setAttribute('aria-description', unavailable ?? 'Drag left or right to adjust.');
+        if (unavailable) reset.setAttribute('aria-description', unavailable); else reset.removeAttribute('aria-description');
         for (const control of [scrub, input, reset]) {
           if (locked) control.title = warning; else control.removeAttribute('title');
         }
