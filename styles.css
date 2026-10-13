@@ -216,7 +216,7 @@
 .pfs-page-stack { display: flex; flex-direction: column; align-items: center; gap: 16px; padding: 16px; width: max-content; min-width: 100%; }
 .pfs-page { position: relative; contain: layout paint; background: white; flex-shrink: 0; box-shadow: 0 2px 8px rgb(0 0 0 / 12%); color: #161616; overflow: hidden; --user-unit: 1; --min-font-size: 1; }
 .pfs-page-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
-.pfs-text-layer { position: absolute; inset: 0; overflow: clip; opacity: 1; line-height: 1; text-align: initial; transform-origin: 0 0; caret-color: CanvasText; z-index: 2; }
+.pfs-text-layer { position: absolute; inset: 0; overflow: clip; opacity: 1; line-height: 1; text-align: initial; transform-origin: 0 0; caret-color: CanvasText; z-index: 2; user-select: text; -webkit-user-select: text; }
 .pfs-text-layer :is(span, br) { color: transparent; position: absolute; white-space: pre; cursor: text; transform-origin: 0% 0%; }
 .pfs-text-layer > :not(.markedContent), .pfs-text-layer .markedContent span:not(.markedContent) { z-index: 1; }
 .pfs-text-layer ::selection { background: rgb(55 130 235 / 30%); }
@@ -255,12 +255,16 @@
 .pfs-spacing-control { display: flex; align-items: center; min-width: 0; height: 34px; border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s); background: var(--background-secondary); }
 .pfs-spacing-control:focus-within, .pfs-spacing-control.is-scrubbing { border-color: var(--interactive-accent); }
 .pfs-spacing-control:hover { background: var(--background-modifier-hover); }
-.pfs-tool-popover .pfs-spacing-scrub { display: flex; align-items: center; justify-content: center; flex: 0 0 30px; height: 32px; min-width: 0; padding: 4px; border: 0; box-shadow: none; background: transparent; cursor: ew-resize; touch-action: none; }
+.pfs-tool-popover .pfs-spacing-scrub { display: flex; align-items: center; justify-content: center; flex: 0 0 26px; height: 32px; min-width: 0; padding: 4px; border: 0; box-shadow: none; background: transparent; cursor: ew-resize; touch-action: none; }
 .pfs-spacing-scrub svg { width: 18px; height: 18px; }
-.pfs-tool-popover input.pfs-spacing-value { flex: 1 1 0; width: 0; min-width: 0; height: 32px; padding: 0 2px; border: 0; box-shadow: none; background: transparent; text-align: right; font-variant-numeric: tabular-nums; color: var(--text-normal); }
+.pfs-tool-popover input.pfs-spacing-value { flex: 1 1 0; width: 0; min-width: 0; height: 32px; padding: 0 2px; border: 0; box-shadow: none; background: transparent; text-align: right; font-variant-numeric: tabular-nums; color: var(--text-normal); cursor: ew-resize; touch-action: none; }
+.pfs-spacing-value:focus { user-select: text; -webkit-user-select: text; }
 .pfs-spacing-value:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: -2px; }
 .pfs-spacing-value[aria-invalid="true"] { color: var(--text-error); }
-.pfs-spacing-unit { flex: 0 0 auto; padding: 0 8px 0 4px; color: var(--text-muted); font-size: var(--font-ui-smaller); }
+.pfs-spacing-unit { flex: 0 0 auto; padding: 0 4px; color: var(--text-muted); font-size: var(--font-ui-smaller); }
+.pfs-tool-popover .pfs-spacing-reset { display: flex; align-items: center; justify-content: center; flex: 0 0 24px; height: 30px; min-width: 0; padding: 4px; margin-right: 2px; border: 0; box-shadow: none; background: transparent; border-radius: var(--radius-s); }
+.pfs-spacing-reset svg { width: 14px; height: 14px; }
+.pfs-spacing-reset:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: -2px; }
 .pfs-tool-popover button:hover { filter: brightness(0.94); }
 @media (prefers-reduced-motion: no-preference) { .pfs-tool-popover button, .pfs-tools-host button { transition: background-color 120ms ease-out; } }
 .pfs-recovery-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; border-top: 1px solid var(--background-modifier-border); }

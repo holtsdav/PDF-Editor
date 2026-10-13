@@ -5,6 +5,7 @@ import type { FontFamily, PdfColor } from '../pdf/text-format';
 export const colors = [['Black', '#161616'], ['Gray', '#64748b'], ['Red', '#c62828'], ['Orange', '#ee7900'], ['Yellow', '#ffd600'], ['Green', '#22813e'], ['Blue', '#1769ce'], ['Purple', '#8347b5']] as const;
 interface SpacingOptions {
   letter: number; line: number; disabled?: boolean; lineLocked?: boolean;
+  read?(): { letter: number; line: number; disabled?: boolean; lineLocked?: boolean };
   begin(): boolean; preview(letter: number, line: number): boolean; finish(cancel: boolean): void;
   change(letter: number, line: number): void;
 }
@@ -20,6 +21,9 @@ export function parseSpacing(value: string): number | undefined {
 export class ToolPopover extends Component {
   readonly element: HTMLElement;
   private abortScrub?: () => void;
+  private syncSpacing?: () => void;
+  /** Read the captured field's current history state without replacing a draft value or drag preview. */
+  refreshSpacing(): void { this.syncSpacing?.(); }
   /** Cancel the current preview and report whether an active pointer interaction was released. */
   cancelScrub(): boolean { if (!this.abortScrub) return false; this.abortScrub(); return true; }
   /** Mount controls in the anchor's window and register their listeners and portal for lifecycle disposal. */
@@ -110,7 +114,18 @@ export class ToolPopover extends Component {
     const row = parent.createDiv({ cls: 'pfs-spacing-row', attr: { role: 'group', 'aria-label': 'Text spacing' } });
     let letter = options.letter, line = options.line;
     const values: HTMLInputElement[] = [];
+    const updateDisabled: (() => void)[] = [];
     const display = () => { values[0]!.value = String(letter); values[1]!.value = String(line); };
+    this.syncSpacing = () => {
+      if (this.abortScrub) return;
+      const current = options.read?.(); if (!current) return;
+      const previous = [letter, line];
+      letter = current.letter; line = current.line; options.disabled = current.disabled; options.lineLocked = current.lineLocked;
+      for (const [index, input] of values.entries()) if (doc.activeElement !== input || input.value === String(previous[index])) {
+        const value = String(index ? line : letter); if (input.value !== value) input.value = value;
+      }
+      for (const update of updateDisabled) update();
+    };
     for (const [index, label, icon, unit, minimum, maximum, step, precision] of [
       [0, 'Letter spacing', 'between-vertical-start', 'pt', 0, 20, 0.1, 0.02],
       [1, 'Line spacing', 'between-horizontal-start', '×', 0.8, 3, 0.05, 0.005]
@@ -118,12 +133,24 @@ export class ToolPopover extends Component {
       const group = row.createDiv({ cls: 'pfs-spacing-control' });
       const scrub = group.createEl('button', { cls: 'pfs-spacing-scrub', attr: { 'aria-label': `${label}: drag horizontally to adjust`, title: `${label} · drag left or right` } });
       setIcon(scrub, icon);
-      const input = group.createEl('input', { cls: 'pfs-spacing-value', attr: { type: 'text', inputmode: 'decimal', 'aria-label': `${label} (${unit === 'pt' ? 'PDF points' : 'multiplier'})`, 'aria-description': `Range ${minimum} to ${maximum}. Up and Down adjust by ${step}.`, spellcheck: 'false' } });
+      const input = group.createEl('input', { cls: 'pfs-spacing-value', attr: { type: 'text', inputmode: 'decimal', 'aria-label': `${label} (${unit === 'pt' ? 'PDF points' : 'multiplier'})`, 'aria-description': `Drag horizontally to adjust, including while focused. Click and use the keyboard to edit or select text. Range ${minimum} to ${maximum}. Up and Down adjust by ${step}.`, title: `${label} · drag to adjust, click to edit`, spellcheck: 'false' } });
       group.createSpan({ cls: 'pfs-spacing-unit', text: unit, attr: { 'aria-hidden': 'true' } });
+      const defaultValue = index ? 1.2 : 0;
+      const reset = group.createEl('button', { cls: 'pfs-spacing-reset', attr: { 'aria-label': `Reset ${label.toLowerCase()} to ${defaultValue} ${unit}`, title: `Reset to ${defaultValue} ${unit}` } });
+      setIcon(reset, 'rotate-ccw');
       values.push(input); input.value = String(index ? line : letter);
-      scrub.disabled = input.disabled = !!options.disabled || (index === 1 && !!options.lineLocked);
-      if (index === 1 && options.lineLocked) scrub.title = input.title = 'Ruled answers follow their printed line pitch. Resize the box to use ordinary line spacing.';
-      const apply = (value: number) => { if (index) line = value; else letter = value; display(); options.change(letter, line); };
+      const update = () => {
+        const locked = index === 1 && !!options.lineLocked;
+        scrub.disabled = input.disabled = reset.disabled = !!options.disabled || locked;
+        const warning = 'Ruled answers follow their printed line pitch. Resize the box to use ordinary line spacing.';
+        scrub.title = locked ? warning : `${label} · drag left or right`;
+        input.title = locked ? warning : `${label} · drag to adjust, click to edit`;
+        reset.title = locked ? warning : `Reset to ${defaultValue} ${unit}`;
+      };
+      updateDisabled.push(update); update();
+      const apply = (value: number) => { if (index) line = value; else letter = value; display(); input.setAttribute('aria-invalid', 'false'); options.change(letter, line); };
+      this.registerDomEvent(reset, 'pointerdown', event => { if (event.button === 0) event.preventDefault(); });
+      this.registerDomEvent(reset, 'click', () => { this.cancelScrub(); apply(defaultValue); });
       const commit = () => {
         const value = parseSpacing(input.value);
         const valid = value !== undefined && value >= minimum && value <= maximum;
@@ -137,41 +164,49 @@ export class ToolPopover extends Component {
           apply(Math.max(minimum, Math.min(maximum, Math.round((value + (event.key === 'ArrowUp' ? step : -step)) * 100) / 100)));
         }
       });
-      let drag: { id: number; x: number; start: number; letter: number; line: number; active: boolean } | undefined;
+      let drag: { target: HTMLElement; id: number; x: number; start: number; letter: number; line: number; raw: string; invalid: string | null; active: boolean } | undefined;
       let suppressClick = false;
       const finish = (cancel: boolean) => {
         const previous = drag; drag = undefined; this.abortScrub = undefined;
         if (!previous) return;
-        if (scrub.hasPointerCapture(previous.id)) scrub.releasePointerCapture(previous.id);
+        if (previous.target.hasPointerCapture(previous.id)) previous.target.releasePointerCapture(previous.id);
         if (previous.active) {
           suppressClick = true;
-          if (cancel) { letter = previous.letter; line = previous.line; display(); }
+          if (cancel) {
+            letter = previous.letter; line = previous.line; display(); input.value = previous.raw;
+            if (previous.invalid === null) input.removeAttribute('aria-invalid'); else input.setAttribute('aria-invalid', previous.invalid);
+          } else input.setAttribute('aria-invalid', 'false');
           options.finish(cancel);
         }
         group.classList.remove('is-scrubbing');
       };
-      this.registerDomEvent(scrub, 'pointerdown', event => {
-        if (event.button !== 0 || scrub.disabled) return;
-        event.preventDefault(); this.cancelScrub(); suppressClick = false;
-        drag = { id: event.pointerId, x: event.clientX, start: index ? line : letter, letter, line, active: false };
-        this.abortScrub = () => finish(true); scrub.setPointerCapture(event.pointerId);
-      });
-      this.registerDomEvent(scrub, 'pointermove', event => {
-        if (!drag || drag.id !== event.pointerId) return;
-        const distance = event.clientX - drag.x;
-        if (!drag.active) {
-          if (Math.abs(distance) < 4) return;
-          if (!options.begin()) { finish(true); return; }
-          drag.active = true; group.classList.add('is-scrubbing');
-        }
-        const value = Math.max(minimum, Math.min(maximum, Math.round((drag.start + distance * precision) * 100) / 100));
-        if (index) line = value; else letter = value; display();
-        if (!options.preview(letter, line)) finish(true);
-      });
-      this.registerDomEvent(scrub, 'pointerup', event => { if (drag?.id === event.pointerId) { const click = !drag.active; finish(false); if (click) { input.focus({ preventScroll: true }); input.select(); } } });
-      this.registerDomEvent(scrub, 'click', () => { if (suppressClick) { suppressClick = false; return; } input.focus({ preventScroll: true }); input.select(); });
-      this.registerDomEvent(scrub, 'pointercancel', () => finish(true));
-      this.registerDomEvent(scrub, 'lostpointercapture', () => { if (drag) finish(true); });
+      for (const target of [scrub, input]) {
+        this.registerDomEvent(target, 'pointerdown', event => {
+          // Pointer drags scrub even a focused value; keyboard editing and selection remain native.
+          if (event.button !== 0 || target.disabled) return;
+          event.preventDefault(); this.cancelScrub(); suppressClick = false;
+          const typed = parseSpacing(input.value);
+          drag = { target, id: event.pointerId, x: event.clientX, start: typed !== undefined && typed >= minimum && typed <= maximum ? typed : index ? line : letter,
+            letter, line, raw: input.value, invalid: input.getAttribute('aria-invalid'), active: false };
+          this.abortScrub = () => finish(true); target.setPointerCapture(event.pointerId);
+        });
+        this.registerDomEvent(target, 'pointermove', event => {
+          if (!drag || drag.id !== event.pointerId) return;
+          const distance = event.clientX - drag.x;
+          if (!drag.active) {
+            if (Math.abs(distance) < 4) return;
+            if (!options.begin()) { finish(true); return; }
+            drag.active = true; group.classList.add('is-scrubbing');
+          }
+          const value = Math.max(minimum, Math.min(maximum, Math.round((drag.start + distance * precision) * 100) / 100));
+          if (index) line = value; else letter = value; display();
+          if (!options.preview(letter, line)) finish(true);
+        });
+        this.registerDomEvent(target, 'pointerup', event => { if (drag?.id === event.pointerId) { const click = !drag.active; finish(false); if (click) { input.focus({ preventScroll: true }); input.select(); } } });
+        this.registerDomEvent(target, 'click', event => { if (suppressClick) { suppressClick = false; event.preventDefault(); return; } if (target === scrub) { input.focus({ preventScroll: true }); input.select(); } });
+        this.registerDomEvent(target, 'pointercancel', event => { if (drag?.id === event.pointerId) finish(true); });
+        this.registerDomEvent(target, 'lostpointercapture', () => { if (drag?.target === target) finish(true); });
+      }
       this.registerDomEvent(win, 'blur', () => finish(true));
       this.register(() => finish(true));
     }

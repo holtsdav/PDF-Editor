@@ -14,7 +14,7 @@ import type { VaultSessions } from '../src/pdf/vault-sessions.ts';
 import type { App } from 'obsidian';
 import { authoredForms, legacyBlank, prefixBlank, prefixValue, uuidCollision } from './fixtures/authored-forms.ts';
 import { orphanForms } from './fixtures/orphan-forms.ts';
-import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
+import { getDocument, OPS } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { rotatedHandle } from '../src/pdf/box-geometry.ts';
 import { bindSurfaceInput } from '../src/ui/surface-input.ts';
 
@@ -184,6 +184,127 @@ test('spacing cancels on Escape, capture loss, blur, disposal and replacement; d
     const scrub = f.doc.querySelector<HTMLButtonElement>('[aria-label="Letter spacing: drag horizontally to adjust"]')!;
     f.pointer(scrub, 'pointerdown', 100); f.pointer(scrub, 'pointermove', 102); f.pointer(scrub, 'pointerup', 102);
     assert.equal(f.doc.activeElement?.getAttribute('aria-label'), 'Letter spacing (PDF points)');
+  } finally { f.dispose(); }
+});
+
+test('unfocused spacing values scrub with captured pointers, retain the PDF caret and commit one history action', async () => {
+  for (const [label, distance, expected] of [['Letter spacing (PDF points)', 60, 1.2], ['Line spacing (multiplier)', 100, 1.7]] as const) {
+    const f = await fixture(); try {
+      const field = f.session.add(1, [80, 400, 340, 620], 14, true); f.session.setValue(field.name, 'Unicode café\nSecond line'); await f.session.save();
+      const answer = f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!;
+      answer.focus(); answer.setSelectionRange(2, 8); f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
+      const value = f.doc.querySelector<HTMLInputElement>(`[aria-label="${label}"]`)!;
+      f.pointer(value, 'pointerdown', 100); assert(value.hasPointerCapture(1)); f.pointer(value, 'pointermove', 100 + distance);
+      assert.equal(f.doc.activeElement, answer); assert.equal(answer.selectionStart, 2); assert.equal(answer.selectionEnd, 8);
+      assert.equal(field.letterSpacing, undefined); assert.equal(field.lineSpacing, undefined);
+      f.pointer(value, 'pointerup', 100 + distance); assert.equal(value.hasPointerCapture(1), false);
+      const property = label.startsWith('Letter') ? 'letterSpacing' : 'lineSpacing';
+      assert.equal(field[property], expected);
+      f.session.undoStroke(); assert.equal(f.session.snapshot.fields.find(item => item.name === field.name)![property], undefined);
+      f.session.redoStroke(); assert.equal(f.session.snapshot.fields.find(item => item.name === field.name)![property], expected);
+      await f.session.saveWhenIdle(); assert.equal((await readTextPdf(f.bytes())).fields.find(item => item.name === field.name)![property], expected);
+    } finally { f.dispose(); }
+  }
+});
+
+test('value clicks enter editing and interrupted focused-value scrubs restore spacing and release capture', async () => {
+  for (const interruption of ['Escape', 'pointercancel', 'lostpointercapture', 'blur', 'dispose', 'reload']) {
+    const f = await fixture(); try {
+      const field = f.session.add(1, [80, 400, 340, 620], 14, true); f.session.setValue(field.name, 'Kept'); await f.session.save();
+      const answer = f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!;
+      answer.focus(); f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
+      const value = f.doc.querySelector<HTMLInputElement>('[aria-label="Line spacing (multiplier)"]')!;
+      f.pointer(value, 'pointerdown', 100); f.pointer(value, 'pointermove', 102); f.pointer(value, 'pointerup', 102);
+      assert.equal(f.doc.activeElement, value); assert.equal(f.session.dirty, false);
+      value.setSelectionRange(0, 2);
+      assert.equal(f.pointer(value, 'pointerdown', 100).defaultPrevented, true);
+      f.pointer(value, 'pointermove', 200); assert.equal(value.hasPointerCapture(1), true); assert.equal(f.doc.activeElement, value);
+      if (interruption === 'Escape') value.dispatchEvent(new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      else if (interruption === 'blur') f.doc.defaultView!.dispatchEvent(new f.doc.defaultView!.Event('blur'));
+      else if (interruption === 'dispose') f.doc.querySelector<HTMLButtonElement>('[aria-label="Close tool settings"]')!.click();
+      else if (interruption === 'reload') await f.session.reload();
+      else f.pointer(value, interruption);
+      assert.equal(value.hasPointerCapture(1), false, interruption);
+      assert.equal(f.session.snapshot.fields.find(item => item.name === field.name)!.lineSpacing, undefined, interruption);
+      assert.equal(f.session.dirty, false, interruption); await f.session.saveWhenIdle();
+    } finally { f.dispose(); }
+  }
+});
+
+test('a focused spacing value remains focused after a scrub and accepts keyboard decimal edits and selection', async () => {
+  const f = await fixture(1, true); try {
+    const field = f.session.add(1, [80, 400, 340, 620], 14, true); f.session.setValue(field.name, 'Original answer'); await f.session.save();
+    f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!.focus(); f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
+    const value = f.doc.querySelector<HTMLInputElement>('[aria-label="Letter spacing (PDF points)"]')!; value.focus(); value.setSelectionRange(0, value.value.length);
+    f.pointer(value, 'pointerdown', 100); f.pointer(value, 'pointermove', 160); f.pointer(value, 'pointerup', 160);
+    assert.equal(f.doc.activeElement, value); assert.equal(field.letterSpacing, 1.2); assert.equal(field.value, 'Original answer');
+    const selectKey = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'ArrowLeft', shiftKey: true, bubbles: true, cancelable: true });
+    value.dispatchEvent(selectKey); assert.equal(selectKey.defaultPrevented, false);
+    f.clipboard.text = 'Unchanged clipboard';
+    for (const key of ['c', 'v', 'd']) {
+      const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key, metaKey: true, bubbles: true, cancelable: true }); value.dispatchEvent(event);
+      assert.equal(f.scopes.at(-1)!.handlers.find(item => item.key === key)!.func(event), undefined);
+      assert.equal(event.defaultPrevented, false);
+    }
+    assert.equal(f.clipboard.text, 'Unchanged clipboard'); assert.equal(f.session.snapshot.fields.length, 1);
+    value.value = '1,35'; value.dispatchEvent(new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    assert.equal(field.letterSpacing, 1.35); assert.equal(f.doc.activeElement, value); assert.equal(field.value, 'Original answer');
+    value.dispatchEvent(new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true })); assert.equal(field.letterSpacing, 1.45);
+    value.value = '2,00'; f.pointer(value, 'pointerdown', 100); f.pointer(value, 'pointermove', 150); f.pointer(value, 'pointerup', 150);
+    assert.equal(field.letterSpacing, 3); assert.equal(f.doc.activeElement, value);
+    f.session.undoStroke(); assert.equal(f.session.snapshot.fields.find(item => item.name === field.name)!.letterSpacing, 1.45); assert.equal(value.value, '1.45');
+    value.value = '2,00'; f.pointer(value, 'pointerdown', 100); f.pointer(value, 'pointermove', 150); f.pointer(value, 'pointercancel');
+    assert.equal(value.value, '2,00'); assert.equal(f.session.snapshot.fields.find(item => item.name === field.name)!.letterSpacing, 1.45);
+  } finally { f.dispose(); }
+});
+
+test('spacing resets restore defaults independently, clear validation errors and each undo once', async () => {
+  const f = await fixture(); try {
+    const field = f.session.add(1, [80, 400, 340, 620], 14, true); f.session.setValue(field.name, 'Two lines\nUnicode café');
+    f.session.formatField(field.name, { letterSpacing: 2, lineSpacing: 1.75 }); await f.session.save();
+    const answer = f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!;
+    answer.focus(); answer.setSelectionRange(2, 8); f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
+    const value = f.doc.querySelector<HTMLInputElement>('[aria-label="Letter spacing (PDF points)"]')!;
+    value.value = 'Infinity'; value.dispatchEvent(new f.doc.defaultView!.Event('change')); assert.equal(value.getAttribute('aria-invalid'), 'true');
+    const reset = f.doc.querySelector<HTMLButtonElement>('[aria-label="Reset letter spacing to 0 pt"]')!;
+    f.pointer(reset, 'pointerdown'); reset.click();
+    assert.equal(field.letterSpacing, 0); assert.equal(field.lineSpacing, 1.75); assert.equal(value.getAttribute('aria-invalid'), 'false');
+    assert.equal(f.doc.activeElement, answer); assert.equal(answer.selectionStart, 2); assert.equal(answer.selectionEnd, 8);
+    f.session.undoStroke(); assert.equal(f.session.snapshot.fields.find(item => item.name === field.name)!.letterSpacing, 2); assert.equal(value.value, '2');
+    f.session.redoStroke();
+    f.doc.querySelector<HTMLButtonElement>('[aria-label="Reset line spacing to 1.2 ×"]')!.click();
+    assert.equal(f.session.snapshot.fields.find(item => item.name === field.name)!.lineSpacing, 1.2);
+    f.session.undoStroke(); assert.equal(f.session.snapshot.fields.find(item => item.name === field.name)!.lineSpacing, 1.75);
+    assert.equal(f.session.snapshot.fields.find(item => item.name === field.name)!.letterSpacing, 0);
+    f.session.redoStroke(); await f.session.saveWhenIdle(); const reopened = (await readTextPdf(f.bytes())).fields.find(item => item.name === field.name)!;
+    assert.equal(reopened.letterSpacing, 0); assert.equal(reopened.lineSpacing, 1.2); assert.equal(reopened.value, 'Two lines\nUnicode café');
+    const task = getDocument({ data: f.bytes().slice(), standardFontDataUrl: new URL('../node_modules/pdfjs-dist/standard_fonts/', import.meta.url).pathname });
+    try {
+      const page = await (await task.promise).getPage(1), operators = await page.getOperatorList();
+      const matrices = operators.fnArray.flatMap((op, index) => op === OPS.setTextMatrix ? [operators.argsArray[index]![0] as number[]] : []);
+      const baselines = [...new Set(matrices.map(matrix => matrix[5]!))].sort((a, b) => b - a);
+      assert.equal(baselines.length, 2); assert(Math.abs(baselines[0]! - baselines[1]! - 14 * 1.2) < 0.01);
+      assert.equal((await page.getAnnotations()).find(item => item.fieldName === field.name)!.fieldValue, 'Two lines\nUnicode café');
+    } finally { await task.destroy(); }
+  } finally { f.dispose(); }
+});
+
+test('reset controls preserve authored forms and follow ruled-pitch locks across resize history', async () => {
+  const authored = await fixture(2, false, 0, await authoredForms());
+  try {
+    const input = authored.doc.querySelector<HTMLInputElement>('.is-form-field [data-pdf-field]')!, before = JSON.stringify(authored.session.snapshot.fields);
+    input.focus(); authored.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
+    for (const reset of authored.doc.querySelectorAll<HTMLButtonElement>('.pfs-spacing-reset')) { assert.equal(reset.disabled, true); reset.click(); }
+    assert.equal(JSON.stringify(authored.session.snapshot.fields), before); assert.equal(authored.session.dirty, false);
+  } finally { authored.dispose(); }
+  const f = await fixture(); try {
+    const added = f.session.add(1, [80, 400, 340, 466.8], 14, true, 0, { spacing: 24, rows: 3 }); f.session.setValue(added.name, 'Ruled answer'); await f.session.save(); await f.session.reload();
+    const field = f.session.snapshot.fields.find(item => item.name === added.name)!;
+    f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!.focus(); f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
+    const reset = f.doc.querySelector<HTMLButtonElement>('[aria-label="Reset line spacing to 1.2 ×"]')!;
+    assert.equal(reset.disabled, true); reset.click(); assert.deepEqual(field.ruled, { spacing: 24, rows: 3 });
+    f.session.updateBox(field.name, [80, 400, 340, 520]); assert.equal(reset.disabled, false);
+    f.session.undoStroke(); assert.equal(reset.disabled, true); assert.deepEqual(f.session.snapshot.fields.find(item => item.name === field.name)!.ruled, { spacing: 24, rows: 3 });
   } finally { f.dispose(); }
 });
 

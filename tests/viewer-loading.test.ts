@@ -31,6 +31,18 @@ const { findNativePdfs, watchNativePdfs } = await import(new URL('native-pdf.mjs
 const { PdfSurface } = await import(new URL('pdf-surface.mjs', output).href);
 const css = await readFile(new URL('../styles.css', import.meta.url), 'utf8');
 
+test('replacement PDF text explicitly permits selection outside the host native PDF container', () => {
+  const f = fixture(); f.attach();
+  const style = f.doc.createElement('style'); style.textContent = `body { user-select: none; } .pdf-container .textLayer { user-select: text; } ${css}`; f.doc.head.append(style);
+  const layer = f.doc.createElement('div'); layer.className = 'pfs-text-layer textLayer'; layer.textContent = 'Anonymous printed PDF text'; f.element.append(layer);
+  try {
+    assert.equal(layer.closest('.pdf-container'), null);
+    assert.equal(f.dom.window.getComputedStyle(f.doc.body).userSelect, 'none');
+    assert.equal(f.dom.window.getComputedStyle(layer).userSelect, 'text');
+    assert.equal(f.dom.window.getComputedStyle(layer).getPropertyValue('-webkit-user-select'), 'text');
+  } finally { f.dom.window.close(); }
+});
+
 test('gesture zoom anchors the actual PDF point through quarter turns, app scale and rapid reversals, and updates the label', async () => {
   const pdf = await PDFDocument.create(); pdf.addPage([600, 800]);
   const task = getDocument({ data: await pdf.save() });
