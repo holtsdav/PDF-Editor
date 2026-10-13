@@ -52,12 +52,17 @@ const font = new Uint8Array(await readFile(new URL('../assets/fonts/NotoSans-Reg
 
 interface MockScope { handlers: { key: string; modifiers: string[]; func(event: KeyboardEvent): unknown }[] }
 /** Mount the real editor on an anonymous session, mocking only host APIs, clipboard and page layout. */
-async function fixture(pageCount = 1, withKeymap = false, rotation = 0, seed?: Uint8Array, shared?: TextSession, visible?: number[], hostFirst = false) {
+async function fixture(pageCount = 1, withKeymap = false, rotation = 0, seed?: Uint8Array, shared?: TextSession, visible?: number[], hostFirst = false,
+  initialFocus: { windowFocused?: boolean; pdfFocused?: boolean } = {}) {
   const pdf = await PDFDocument.create(); for (let i = 0; i < pageCount; i++) pdf.addPage([600, 800]).setRotation(degrees(rotation)); let bytes = await pdf.save();
   if (seed) bytes = seed.slice(); let writes = 0;
   const session = shared ?? await TextSession.open({ read: async () => bytes, write: async value => { bytes = value; writes++; }, backup: async () => 'original.pdf' }, font);
   const dom = new JSDOM(`<body><div id="editor"><div id="tools"></div>${Array.from({ length: pageCount }, (_, i) => `<div id="${i ? 'page' + (i + 1) : 'page'}"></div>`).join('')}</div><button id="outside">Outside</button></body>`, { pretendToBeVisual: true });
   const doc = dom.window.document;
+  let windowFocused = initialFocus.windowFocused ?? true;
+  Object.defineProperty(doc, 'hasFocus', { value: () => windowFocused });
+  dom.window.addEventListener('focus', () => { windowFocused = true; });
+  dom.window.addEventListener('blur', () => { windowFocused = false; });
   Object.assign(dom.window.Node.prototype, { instanceOf(this: Node, type: typeof Node) { return this instanceof type; } });
   let clipboardText = '';
   Object.defineProperty(dom.window.navigator, 'clipboard', { configurable: true, value: {
@@ -101,6 +106,10 @@ async function fixture(pageCount = 1, withKeymap = false, rotation = 0, seed?: U
     if (handler) { if (handler.func(event) === false) { event.preventDefault(); event.stopPropagation(); } }
     else { noteUndos++; event.preventDefault(); event.stopImmediatePropagation(); }
   }, true);
+  if (initialFocus.pdfFocused) {
+    const page = native.pages()[0]!.div;
+    page.tabIndex = 0; page.focus();
+  }
   const editor = new TextEditor(app as unknown as App, native, sessions);
   await pause(0);
   const pointer = (target: Element, name: string, x = 0, y = 0, shiftKey = false) => {
@@ -1562,6 +1571,22 @@ test('host-first preview shortcuts undo unselected drawings once, retain redo af
         assert.equal(annotations.filter(annotation => annotation.subtype === 'Ink').length, 1, 'PDF.js independently sees the single redone drawing');
       } finally { await task.destroy(); }
     } finally { f.dispose(); }
+  }
+});
+
+test('an editor constructed after window handoff waits for owning-window focus before pushing its scope', async () => {
+  for (const windowFocused of [false, true]) {
+    const f = await fixture(1, true, 0, undefined, undefined, undefined, true, { windowFocused, pdfFocused: true });
+    try {
+      assert.equal(f.doc.activeElement, f.native.pages()[0]!.div, 'an inactive window can retain its PDF focus target during loading');
+      assert.equal(f.doc.hasFocus(), windowFocused);
+      assert.equal(f.scopes.length, windowFocused ? 1 : 0, 'session synchronization must respect actual initial window focus');
+      f.editor.refresh(); assert.equal(f.scopes.length, windowFocused ? 1 : 0);
+      for (let i = 0; i < 2; i++) f.doc.defaultView!.dispatchEvent(new f.doc.defaultView!.Event('focus'));
+      assert.equal(f.scopes.length, 1, 'returning to the owner pushes one scope');
+      f.doc.defaultView!.dispatchEvent(new f.doc.defaultView!.Event('blur'));
+      f.editor.refresh(); assert.equal(f.scopes.length, 0, 'handoff releases the scope even after later synchronization');
+    } finally { f.dispose(); assert.equal(f.scopes.length, 0); }
   }
 });
 

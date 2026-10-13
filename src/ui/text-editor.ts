@@ -92,7 +92,7 @@ export class TextEditor extends Component {
   private selection?: ObjectSelection;
   private objectScope?: Scope;
   private objectScopeActive = false;
-  private windowFocused = true;
+  private windowFocused = false;
   private openingPopover = false;
   private activeBox?: string;
   private answerLines: AnswerLine[] = [];
@@ -106,6 +106,7 @@ export class TextEditor extends Component {
     if (state) { this.letterSpacing = state.letterSpacing; this.lineSpacing = state.lineSpacing; this.textAlignment = state.textAlignment; this.textFamily = state.textFamily; this.textColor = state.textColor; this.tool = state.tool; this.fontSize = state.fontSize; this.markerWidth = state.markerWidth; this.penWidth = state.penWidth; this.markerColor = state.markerColor; this.penColor = state.penColor;
       this.selected = state.selected; this.selectedStroke = state.selectedStroke; this.focused = state.focused; }
     const doc = native.element.ownerDocument;
+    this.windowFocused = doc.hasFocus();
     this.registerDomEvent(doc.defaultView!, 'blur', () => { this.windowFocused = false; this.cancelInteractions(); this.syncObjectScope(); });
     this.registerDomEvent(doc.defaultView!, 'focus', () => { this.windowFocused = true; this.syncObjectScope(); });
     if (app.keymap) {
