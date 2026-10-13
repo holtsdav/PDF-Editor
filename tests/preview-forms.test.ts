@@ -140,3 +140,32 @@ test('ordinary compressed PDFs and incremental classic indexes retain the existi
     assert.equal((await loadPdfDocument(bytes)).getPageCount(), 1); assert.equal((await readTextPdf(bytes)).pages.length, 1);
   }
 });
+
+test('missing classic trailer Size retains repair loading, while explicit invalid sizes reject before writing', async () => {
+  const pdf = await PDFDocument.create(), page = pdf.addPage([600, 800]); pdf.addPage([600, 800]);
+  const field = pdf.getForm().createTextField('Repairable form'); field.setText('Original answer');
+  field.addToPage(page, { x: 30, y: 540, width: 180, height: 30 });
+  const bytes = await pdf.save({ useObjectStreams: false });
+  const tail = new TextDecoder('latin1').decode(bytes.subarray(Math.max(0, bytes.length - 2048)));
+  const offset = Number(/startxref\s+(\d+)\s+%%EOF/.exec(tail)![1]);
+  const section = new TextDecoder('latin1').decode(bytes.subarray(offset)); assert(/\/Size \d+/.test(section));
+  /** Change only the ASCII trailer, preserving binary object bytes and their indexed offsets. */
+  const withSize = (value?: string): Uint8Array => {
+    const suffix = new TextEncoder().encode(section.replace(/\/Size \d+/, value === undefined ? '' : '/Size ' + value));
+    const result = new Uint8Array(offset + suffix.length); result.set(bytes.subarray(0, offset)); result.set(suffix, offset); return result;
+  };
+  const missing = withSize(); assert.equal((await PDFDocument.load(missing)).getPageCount(), 2);
+  const file = memory(missing), session = await TextSession.open(file.store, font);
+  assert.equal(session.snapshot.pages.length, 2); assert.equal(session.snapshot.fields[0]!.value, 'Original answer');
+  await session.saveWhenIdle(); assert.equal(file.writes(), 0); assert.deepEqual(file.bytes(), missing);
+  session.setValue('Repairable form', 'Updated answer'); await session.save(); assert.deepEqual(file.backups[0], missing);
+  const task = getDocument({ data: file.bytes().slice(), standardFontDataUrl });
+  try {
+    const saved = await task.promise; assert.equal(saved.numPages, 2);
+    assert((await (await saved.getPage(1)).getAnnotations()).some(item => item.fieldName === 'Repairable form' && item.fieldValue === 'Updated answer'));
+  } finally { await task.destroy(); }
+  for (const size of ['null', '0', '-1', '1.5', '1000001', '1', '(invalid)']) {
+    const invalid = memory(withSize(size)); await assert.rejects(TextSession.open(invalid.store, font));
+    assert.equal(invalid.writes(), 0); assert.deepEqual(invalid.backups, []);
+  }
+});

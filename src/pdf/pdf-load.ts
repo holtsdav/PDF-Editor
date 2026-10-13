@@ -13,6 +13,7 @@ export async function loadPdfDocument(bytes: Uint8Array): Promise<PDFDocument> {
     || decoder.decode(bytes.subarray(offset, offset + 4)) !== 'xref') return PDFDocument.load(bytes, { updateMetadata: false });
   const section = decoder.decode(bytes.subarray(offset));
   let cursor = 4;
+  /** Read a whitespace-delimited index token, ignoring PDF comments. */
   const token = (): string => {
     for (;;) {
       while (cursor < section.length && /[\s\0]/.test(section[cursor]!)) cursor++;
@@ -22,6 +23,7 @@ export async function loadPdfDocument(bytes: Uint8Array): Promise<PDFDocument> {
     const start = cursor; while (cursor < section.length && !/[\s\0]/.test(section[cursor]!)) cursor++;
     return section.slice(start, cursor);
   };
+  /** Reject index numbers that cannot be represented exactly as nonnegative integers. */
   const integer = (value: string): number => {
     const number = Number(value);
     if (!/^\d+$/.test(value) || !Number.isSafeInteger(number)) throw new Error('Invalid PDF object index.');
@@ -44,8 +46,11 @@ export async function loadPdfDocument(bytes: Uint8Array): Promise<PDFDocument> {
   if (!(trailer instanceof PDFDict)) throw new Error('Invalid PDF trailer.');
   // Incremental and hybrid indexes retain the existing library path. A sparse
   // standalone table may omit unused numbers left by appearance cleanup.
-  const size = trailer.lookupMaybe(PDFName.of('Size'), PDFNumber)?.asNumber();
-  if (trailer.has(PDFName.of('Prev')) || trailer.has(PDFName.of('XRefStm'))) return PDFDocument.load(bytes, { updateMetadata: false });
+  // A missing Size cannot establish this index's scope; preserve the existing
+  // repair behavior rather than rejecting an otherwise readable document.
+  const sizeObject = trailer.get(PDFName.of('Size'), true);
+  if (trailer.has(PDFName.of('Prev')) || trailer.has(PDFName.of('XRefStm')) || sizeObject === undefined) return PDFDocument.load(bytes, { updateMetadata: false });
+  const size = sizeObject instanceof PDFNumber ? sizeObject.asNumber() : undefined;
   if (size === undefined || !Number.isSafeInteger(size) || size < 1 || size > 1_000_000 || [...entries.keys()].some(index => index >= size)) throw new Error('Invalid PDF object index size.');
   if (trailer.has(PDFName.of('Encrypt')) && trailer.get(PDFName.of('Encrypt')) !== PDFNull) throw new Error('Encrypted PDFs are read only in this version.');
   const header = /%PDF-(\d+)\.(\d+)/.exec(decoder.decode(bytes.subarray(0, 1024)));
@@ -53,6 +58,7 @@ export async function loadPdfDocument(bytes: Uint8Array): Promise<PDFDocument> {
   for (const [ref] of context.enumerateIndirectObjects()) context.delete(ref);
   context.header = PDFHeader.forVersion(Number(header[1]), Number(header[2]));
   const active = [...entries].filter(([, entry]) => entry.active).sort((a, b) => a[1].offset - b[1].offset);
+  /** Parse the indexed header and body without expanding object-stream contents. */
   const parse = (number: number, entry: { offset: number; generation: number }) => {
     const head = /^(\d+)\s+(\d+)\s+obj\b/.exec(decoder.decode(bytes.subarray(entry.offset, entry.offset + 128)));
     if (!head || Number(head[1]) !== number || Number(head[2]) !== entry.generation) throw new Error('PDF object index does not match the referenced object.');
