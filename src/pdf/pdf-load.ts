@@ -1,16 +1,30 @@
-import { PDFDocument, PDFObjectParser, PDFHeader, PDFDict, PDFName, PDFNumber, PDFRef, PDFStream, PDFNull } from 'pdf-lib';
+import { PDFDocument, PDFObjectParser, PDFHeader, PDFDict, PDFName, PDFNumber, PDFRef, PDFStream, PDFNull, PDFContext } from 'pdf-lib';
 import type { SaveOptions } from 'pdf-lib';
 
 const classicSerialization = new WeakSet<PDFDocument>();
 const decoder = new TextDecoder('latin1');
 
+/** Recognize a cross-reference stream only at the footer's exact byte offset. */
+function xrefStreamAt(bytes: Uint8Array, offset: number): boolean {
+  const header = /^(\d+)[\s\0]+(\d+)[\s\0]+obj\b/.exec(decoder.decode(bytes.subarray(offset, offset + 128)));
+  if (!header || !Number.isSafeInteger(Number(header[1])) || Number(header[1]) < 1 || Number(header[2]) > 65535) return false;
+  try {
+    const object = PDFObjectParser.forBytes(bytes.subarray(offset + header[0].length), PDFContext.create()).parseObject();
+    return object instanceof PDFStream && object.dict.get(PDFName.of('Type')) === PDFName.of('XRef');
+  } catch { return false; }
+}
+
 /** Honor self-contained classic object indexes instead of expanding obsolete object streams left by other editors. */
 export async function loadPdfDocument(bytes: Uint8Array): Promise<PDFDocument> {
   const tail = decoder.decode(bytes.subarray(Math.max(0, bytes.length - 2048)));
-  const footer = /startxref\s+(\d+)\s+%%EOF[\s\0]*$/.exec(tail);
-  const offset = footer ? Number(footer[1]) : -1;
-  if (!Number.isSafeInteger(offset) || offset < 0 || offset >= bytes.length
-    || decoder.decode(bytes.subarray(offset, offset + 4)) !== 'xref') return PDFDocument.load(bytes, { updateMetadata: false });
+  const footer = /startxref[\s\0]+([^\s\0]+)[\s\0]+%%EOF[\s\0]*$/.exec(tail);
+  if (!footer) return PDFDocument.load(bytes, { updateMetadata: false });
+  const offset = Number(footer[1]);
+  if (!/^\+?\d+$/.test(footer[1]!) || !Number.isSafeInteger(offset) || offset < 0 || offset >= bytes.length) throw new Error('Invalid PDF cross-reference offset.');
+  if (!/^xref[\s\0]/.test(decoder.decode(bytes.subarray(offset, offset + 5)))) {
+    if (!xrefStreamAt(bytes, offset)) throw new Error('Invalid PDF cross-reference offset.');
+    return PDFDocument.load(bytes, { updateMetadata: false });
+  }
   const section = decoder.decode(bytes.subarray(offset));
   let cursor = 4;
   /** Read a whitespace-delimited index token, ignoring PDF comments. */
