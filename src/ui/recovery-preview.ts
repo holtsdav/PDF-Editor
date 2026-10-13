@@ -22,9 +22,9 @@ export class RecoveryPreview extends Modal {
     this.task = (raw as Library).getDocument({ data: bytes.slice(), isEvalSupported: false, ownerDocument: this.contentEl.ownerDocument });
     const pdf = await this.task.promise; if (this.closed) return;
     this.contentEl.empty(); const toolbar = this.contentEl.createDiv({ cls: 'pdf-form-studio-toolbar' });
-    const previous = toolbar.createEl('button', { cls: 'clickable-icon' }); setIcon(previous, 'chevron-left'); setTooltip(previous, 'Previous page');
+    const previous = toolbar.createEl('button', { cls: 'clickable-icon' }); setIcon(previous, 'chevron-left'); setTooltip(previous, 'Previous page', { classes: ['pfs-overlay-tooltip'] });
     const counter = toolbar.createSpan();
-    const next = toolbar.createEl('button', { cls: 'clickable-icon' }); setIcon(next, 'chevron-right'); setTooltip(next, 'Next page');
+    const next = toolbar.createEl('button', { cls: 'clickable-icon' }); setIcon(next, 'chevron-right'); setTooltip(next, 'Next page', { classes: ['pfs-overlay-tooltip'] });
     const canvas = this.contentEl.createEl('canvas', { cls: 'pdf-form-studio-recovery-canvas' });
     let number = 1;
     const paint = async (): Promise<void> => {

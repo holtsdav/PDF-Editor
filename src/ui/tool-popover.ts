@@ -1,4 +1,4 @@
-import { Component, setIcon } from 'obsidian';
+import { Component, setIcon, setTooltip } from 'obsidian';
 import { cssColor, parseColor, fontFaces } from '../pdf/text-format';
 import type { FontFamily, PdfColor } from '../pdf/text-format';
 
@@ -42,7 +42,7 @@ export class ToolPopover extends Component {
     const palette = el.createDiv({ cls: 'pfs-color-grid', attr: { role: 'group', 'aria-label': 'Color' } });
     const updateColors = () => { for (const button of palette.querySelectorAll('button')) button.setAttribute('aria-pressed', String(button.dataset.color === cssColor(color))); };
     for (const [name, hex] of colors) {
-      const b = palette.createEl('button', { cls: 'pfs-swatch', attr: { 'aria-label': name, title: name } }); b.dataset.color = hex;
+      const b = palette.createEl('button', { cls: 'pfs-swatch', attr: { 'aria-label': name } }); b.dataset.color = hex;
       b.disabled = !!options.text?.disabled;
       b.style.setProperty('--swatch', hex); const check = b.createSpan({ cls: 'pfs-swatch-check' }); setIcon(check, 'check');
       this.registerDomEvent(b, 'click', () => { color = parseColor(hex); options.changeColor(color); updateColors(); updatePreview(); });
@@ -77,7 +77,7 @@ export class ToolPopover extends Component {
       el.createDiv({ cls: 'pfs-property-label', text: 'Alignment' });
       const alignment = el.createDiv({ cls: 'pfs-alignment', attr: { role: 'group', 'aria-label': 'Text alignment' } });
       for (const value of ['left', 'center', 'right'] as const) {
-        const b = alignment.createEl('button', { attr: { 'aria-label': `Align ${value}`, title: `Align ${value}`, 'aria-pressed': String(text.alignment === value) } });
+        const b = alignment.createEl('button', { attr: { 'aria-label': `Align ${value}`, 'aria-pressed': String(text.alignment === value) } });
         setIcon(b, `align-${value}`); b.disabled = !!text.disabled;
         this.registerDomEvent(b, 'click', () => { text.align(value); for (const item of alignment.querySelectorAll('button')) item.setAttribute('aria-pressed', String(item === b)); });
       }
@@ -89,6 +89,11 @@ export class ToolPopover extends Component {
       row.createSpan({ cls: 'pfs-switch-track', attr: { 'aria-hidden': 'true' } });
       let value = toggle.value;
       this.registerDomEvent(row, 'click', () => { value = !value; toggle.change(value); row.setAttribute('aria-checked', String(value)); });
+    }
+    // Visible labels and ordinary controls need accessible names, not hover help.
+    // Keep concise help only on the unfamiliar spacing and reset symbols.
+    for (const control of [el, ...el.querySelectorAll<HTMLElement>('[aria-label]')]) if (!control.matches('.pfs-spacing-scrub, .pfs-spacing-reset')) {
+      setTooltip(control, control.getAttribute('aria-label')!, { classes: ['pfs-overlay-tooltip'] });
     }
     doc.body.append(el);
     const position = () => { const rect = anchor.getBoundingClientRect(); const view = doc.defaultView!;
@@ -131,21 +136,21 @@ export class ToolPopover extends Component {
       [1, 'Line spacing', 'between-horizontal-start', '×', 0.8, 3, 0.05, 0.005]
     ] as const) {
       const group = row.createDiv({ cls: 'pfs-spacing-control' });
-      const scrub = group.createEl('button', { cls: 'pfs-spacing-scrub', attr: { 'aria-label': `${label}: drag horizontally to adjust`, title: `${label} · drag left or right` } });
+      const scrub = group.createEl('button', { cls: 'pfs-spacing-scrub', attr: { 'aria-label': label, 'aria-description': 'Drag left or right to adjust.' } });
       setIcon(scrub, icon);
-      const input = group.createEl('input', { cls: 'pfs-spacing-value', attr: { type: 'text', inputmode: 'decimal', 'aria-label': `${label} (${unit === 'pt' ? 'PDF points' : 'multiplier'})`, 'aria-description': `Drag horizontally to adjust, including while focused. Click and use the keyboard to edit or select text. Range ${minimum} to ${maximum}. Up and Down adjust by ${step}.`, title: `${label} · drag to adjust, click to edit`, spellcheck: 'false' } });
+      const input = group.createEl('input', { cls: 'pfs-spacing-value', attr: { type: 'text', inputmode: 'decimal', 'aria-label': `${label} (${unit === 'pt' ? 'PDF points' : 'multiplier'})`, 'aria-description': `Drag horizontally to adjust, including while focused. Click and use the keyboard to edit or select text. Range ${minimum} to ${maximum}. Up and Down adjust by ${step}.`, spellcheck: 'false' } });
       group.createSpan({ cls: 'pfs-spacing-unit', text: unit, attr: { 'aria-hidden': 'true' } });
       const defaultValue = index ? 1.2 : 0;
-      const reset = group.createEl('button', { cls: 'pfs-spacing-reset', attr: { 'aria-label': `Reset ${label.toLowerCase()} to ${defaultValue} ${unit}`, title: `Reset to ${defaultValue} ${unit}` } });
+      const reset = group.createEl('button', { cls: 'pfs-spacing-reset', attr: { 'aria-label': `Reset ${label.toLowerCase()} to ${defaultValue} ${unit}` } });
       setIcon(reset, 'rotate-ccw');
       values.push(input); input.value = String(index ? line : letter);
       const update = () => {
         const locked = index === 1 && !!options.lineLocked;
         scrub.disabled = input.disabled = reset.disabled = !!options.disabled || locked;
-        const warning = 'Ruled answers follow their printed line pitch. Resize the box to use ordinary line spacing.';
-        scrub.title = locked ? warning : `${label} · drag left or right`;
-        input.title = locked ? warning : `${label} · drag to adjust, click to edit`;
-        reset.title = locked ? warning : `Reset to ${defaultValue} ${unit}`;
+        const warning = 'Printed line spacing. Resize the box to change it.';
+        for (const control of [scrub, input, reset]) {
+          if (locked) control.title = warning; else control.removeAttribute('title');
+        }
       };
       updateDisabled.push(update); update();
       const apply = (value: number) => { if (index) line = value; else letter = value; display(); input.setAttribute('aria-invalid', 'false'); options.change(letter, line); };

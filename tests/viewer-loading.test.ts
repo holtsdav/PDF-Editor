@@ -15,7 +15,7 @@ const host = `
   }
   export class TFile { extension = 'pdf'; path = 'anonymous.pdf'; name = 'anonymous.pdf'; basename = 'anonymous'; }
   export const loadPdfJs = async () => ({});
-  export const setIcon = () => {}; export const setTooltip = () => {};
+  export const setIcon = () => {}; export const setTooltip = (el, text, options = {}) => { el.setAttribute('aria-label', text); el.setAttribute('data-tooltip-classes', (options.classes ?? []).join(' ')); };
 `;
 const output = new URL('../tmp/ui-tests/loading/', import.meta.url); await mkdir(output, { recursive: true });
 // Shared host module keeps instanceof TFile consistent across both entrypoints.
@@ -41,6 +41,30 @@ test('replacement PDF text explicitly permits selection outside the host native 
     assert.equal(f.dom.window.getComputedStyle(layer).userSelect, 'text');
     assert.equal(f.dom.window.getComputedStyle(layer).getPropertyValue('-webkit-user-select'), 'text');
   } finally { f.dom.window.close(); }
+});
+
+test('loaded PDF page shells retain accessible page names without page hover labels', async () => {
+  const f = fixture(); const pdf = await PDFDocument.create(); pdf.addPage(); pdf.addPage(); const bytes = await pdf.save();
+  const surface = Object.assign(Object.create(PdfSurface.prototype), {
+    root: f.doc.createElement('div'), stack: f.doc.createElement('div'), generation: 0, searchGeneration: 0,
+    session: { renderEpoch: 0, renderBytes: async () => bytes.slice() }, library: { getDocument },
+    loadingTasks: new Set(), entries: [], pendingRenders: new Map(), paintedEntries: new Set(),
+    count: f.doc.createElement('span'), pageInput: f.doc.createElement('input'), message: f.doc.createElement('div'),
+    cancelLineScan() {}, clearSuggestions() {}, layout() {}
+  });
+  try {
+    await surface.loadDocument(); assert.equal(surface.entries.length, 2);
+    for (const [index, entry] of surface.entries.entries()) {
+      const page = entry.native.div as HTMLElement;
+      assert.equal(page.hasAttribute('aria-label'), false); assert.equal(page.hasAttribute('title'), false);
+      const label = page.querySelector<HTMLElement>(`[id="${page.getAttribute('aria-labelledby')}"]`)!;
+      assert.equal(label.textContent, `Page ${index + 1}`); assert.equal(label.hidden, true);
+      assert.equal(page.getAttribute('data-tooltip-classes'), 'pfs-overlay-tooltip');
+    }
+    const style = f.doc.createElement('style'); style.textContent = css; f.doc.head.append(style);
+    const tooltip = f.doc.createElement('div'); tooltip.className = 'tooltip pfs-overlay-tooltip'; tooltip.textContent = 'Page 2'; f.doc.body.append(tooltip);
+    assert.equal(f.dom.window.getComputedStyle(tooltip).display, 'none');
+  } finally { await surface.task?.destroy(); f.dom.window.close(); }
 });
 
 test('gesture zoom anchors the actual PDF point through quarter turns, app scale and rapid reversals, and updates the label', async () => {
