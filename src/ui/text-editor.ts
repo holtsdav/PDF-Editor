@@ -425,6 +425,8 @@ export class TextEditor extends Component {
     if (field) return [{ kind: 'text', id: field }];
     if (target.instanceOf(this.native.element.ownerDocument.defaultView!.HTMLElement) && target.classList.contains('pdf-form-studio-shortcut-proxy')) return this.selectedObjects();
     if (this.isTextTarget(target)) {
+      // Settings inputs keep native keyboard editing/copy, even while their PDF object scope is active.
+      if (target instanceof this.native.element.ownerDocument.defaultView!.Element && this.ownsControl(target)) return [];
       // Live Preview can keep its note editor as the keyboard target even
       // while the PDF selection owns the active Obsidian shortcut scope.
       return !this.native.element.contains(target) && this.objectShortcutActive() ? this.selectedObjects() : [];
@@ -689,14 +691,17 @@ export class TextEditor extends Component {
     const field = this.session?.snapshot.fields.find(field => field.name === this.selected);
     if (!field && this.tool !== 'text') return;
     const session = this.session!, epoch = session.renderEpoch;
+    /** History can replace model objects; resolve the captured identity within this session and epoch. */
+    const currentField = () => field ? session.snapshot.fields.find(item => item.name === field.name) : undefined;
     let signature: string | undefined;
     const valid = () => this.session === session && session.renderEpoch === epoch && !session.replacing && session.status !== 'conflict'
-      && (field ? session.snapshot.fields.includes(field) && (!signature || JSON.stringify(field) === signature) : !this.selected && this.tool === 'text');
+      && (field ? !!currentField() && (!signature || JSON.stringify(currentField()) === signature) : !this.selected && this.tool === 'text');
     const formatTarget = (format: Partial<TextFormat>) => { if (valid()) this.formatSelected(format, field?.name); };
     let release: (() => void) | undefined;
     const changeSpacing = (letterSpacing: number, lineSpacing: number) => {
+      if (!valid()) return;
       this.letterSpacing = letterSpacing; this.lineSpacing = lineSpacing; this.rememberPreferences();
-      formatTarget({ letterSpacing, ...(field?.ruled ? {} : { lineSpacing }) }); this.updateStatus();
+      formatTarget({ letterSpacing, ...(currentField()?.ruled ? {} : { lineSpacing }) }); this.updateStatus();
     };
     this.openingPopover = true;
     try { this.popover = this.addChild(new ToolPopover(this.propertiesButton, {
@@ -707,13 +712,19 @@ export class TextEditor extends Component {
         align: alignment => { this.textAlignment = alignment; this.rememberPreferences(); formatTarget({ alignment }); },
         spacing: { letter: field ? field.letterSpacing ?? 0 : this.letterSpacing, line: field ? field.lineSpacing ?? 1.2 : this.lineSpacing,
           disabled: field ? !field.owned || field.readOnly : false, lineLocked: !!field?.ruled,
+          read: () => {
+            const latest = currentField();
+            return { letter: field ? latest?.letterSpacing ?? 0 : this.letterSpacing, line: field ? latest?.lineSpacing ?? 1.2 : this.lineSpacing,
+              disabled: field ? !latest?.owned || latest.readOnly : false, lineLocked: !!latest?.ruled };
+          },
           change: changeSpacing,
           begin: () => {
             if (!valid()) return false;
             if (field) this.selected = field.name;
-            signature = field ? JSON.stringify(field) : undefined;
+            signature = field ? JSON.stringify(currentField()) : undefined;
             release = session.beginInteraction();
-            for (const entry of this.layers.values()) for (const control of entry.controls.values()) if (this.editing === field?.name && control.input.dataset.pdfField === field?.name) {
+            const editingSpacing = this.native.element.ownerDocument.activeElement?.matches('.pfs-spacing-value');
+            for (const entry of this.layers.values()) for (const control of entry.controls.values()) if (!editingSpacing && this.editing === field?.name && control.input.dataset.pdfField === field?.name) {
               const start = control.input.selectionStart, end = control.input.selectionEnd;
               control.input.focus({ preventScroll: true }); if (start !== null && end !== null) control.input.setSelectionRange(start, end);
             }
@@ -964,6 +975,7 @@ export class TextEditor extends Component {
       }
     }
     this.selection?.update(pages);
+    this.popover?.refreshSpacing();
   }
 
   private positionField(entry: PageLayer, control: FieldControl, field: TextField, rect: Rect, rotation: number, widget?: TextWidget): void {
