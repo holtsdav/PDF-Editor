@@ -11,23 +11,25 @@ const built = await build({ stdin: { contents: `export { observeNativePdfImports
 await mkdir(new URL('../tmp/native-import/', import.meta.url), { recursive: true });
 const url = new URL('../tmp/native-import/host.mjs', import.meta.url); await writeFile(url, built.outputFiles[0]!.text);
 const module = await import(url.href) as { observeNativePdfImports: typeof import('../src/compat/native-import.ts')['observeNativePdfImports']; TFile: new (path: string) => TFile };
-function fixture(options: { prepare?: () => Promise<string | null>; beforeSave?: () => Promise<void> } = {}) {
+function fixture(options: { prepare?: () => Promise<string | null>; beforeSave?: () => Promise<void>; managerLocation?: 'legacy' | 'component' | 'both' | 'ambiguous' | 'foreign' } = {}) {
   let listener: (event: DragEvent, editor: Editor, info: MarkdownView) => void = () => {}, text = '', active = true, saved = 0, handled = 0;
   const cleanups: string[] = [], file = new module.TFile('Attachments/Imported.pdf'), note = new module.TFile('Note.md');
   const editor = { getValue: () => text } as Editor;
   const manager = { info: undefined as unknown, insertAttachmentEmbed: (file: TFile) => { text += '![[' + file.path + ']]'; handled++; },
-    async insertFiles(items: { filepath: string; extension?: string; data: Promise<ArrayBuffer> }[]) { for (const item of items) { const bytes = await item.data; const result = await host.saveAttachment('Imported', 'pdf', bytes); manager.insertAttachmentEmbed(result); } }
+    async insertFiles(items: { filepath: string; extension?: string; data: Promise<ArrayBuffer | Uint8Array> }[]) { for (const item of items) { const bytes = await item.data; const result = await host.saveAttachment('Imported', 'pdf', bytes); manager.insertAttachmentEmbed(result); } }
   };
-  const info = { file: note, sourceMode: { clipboardManager: manager } } as unknown as MarkdownView; manager.info = info;
+  const location = options.managerLocation ?? 'legacy';
+  const info = { file: note, editor, sourceMode: location === 'component' || location === 'foreign' ? { cmEditor: editor } : { clipboardManager: manager } } as unknown as MarkdownView; manager.info = info;
+  if (location !== 'legacy') Object.assign(editor, { editorComponent: { clipboardManager: location === 'ambiguous' || location === 'foreign' ? { ...manager, info: location === 'foreign' ? {} : info } : manager } });
   const host = { workspace: { on: (_event: string, fn: typeof listener) => { listener = fn; return {}; }, offref: () => { listener = () => {}; } },
-    saveAttachment: async (_name: string, _extension: string, _bytes: ArrayBuffer) => { void _name; void _extension; void _bytes; saved++; await options.beforeSave?.(); return file; }
+    saveAttachment: async (_name: string, _extension: string, _bytes: ArrayBuffer | Uint8Array) => { void _name; void _extension; void _bytes; saved++; await options.beforeSave?.(); return file; }
   };
   const original = { save: host.saveAttachment, insert: manager.insertFiles, embed: manager.insertAttachmentEmbed };
   Object.assign(globalThis, { window: { setTimeout, clearTimeout } });
   const stop = module.observeNativePdfImports(host as unknown as App, { enabled: () => active, path: () => '/anonymous/source.pdf', prepare: options.prepare ?? (async path => path),
     imported: async (source, actual, bytes) => { assert.equal(actual, file); assert.deepEqual(bytes, new Uint8Array([37, 80, 68, 70])); cleanups.push(source); }, skipped: () => {}, failed: error => { throw error; } });
   const drop = (prevented = false) => listener({ defaultPrevented: prevented, dataTransfer: { files: [{ name: 'source.pdf', size: 4 }] } } as unknown as DragEvent, editor, info);
-  const insert = (bytes = new Uint8Array([37, 80, 68, 70])) => manager.insertFiles([{ filepath: '/anonymous/source.pdf', extension: 'pdf', data: Promise.resolve(bytes.buffer as ArrayBuffer) }]);
+  const insert = (bytes = new Uint8Array([37, 80, 68, 70]), byteView = false) => manager.insertFiles([{ filepath: '/anonymous/source.pdf', extension: 'pdf', data: Promise.resolve(byteView ? bytes : bytes.buffer as ArrayBuffer) }]);
   return { host, manager, original, cleanups, drop, insert, stop, editor, info, file, saved: () => saved, handled: () => handled, disable: () => { active = false; } };
 }
 const flush = () => new Promise<void>(resolve => setImmediate(resolve));
@@ -37,6 +39,36 @@ test('native cleanup observes the exact buffer, returned attachment and successf
     assert.equal(f.manager.insertFiles, f.original.insert); assert.equal(f.manager.insertAttachmentEmbed, f.original.embed);
   } finally { f.stop(); }
   assert.equal(f.host.saveAttachment, f.original.save);
+});
+test('current editor-component imports and matching legacy aliases observe one native attachment and restore handlers', async () => {
+  for (const managerLocation of ['component', 'both'] as const) {
+    const f = fixture({ managerLocation });
+    try {
+      f.drop(); await f.insert(); await flush();
+      assert.equal(f.saved(), 1); assert.equal(f.handled(), 1); assert.deepEqual(f.cleanups, ['/anonymous/source.pdf']);
+      assert.equal(f.manager.insertFiles, f.original.insert); assert.equal(f.manager.insertAttachmentEmbed, f.original.embed);
+    } finally { f.stop(); }
+    assert.equal(f.host.saveAttachment, f.original.save);
+  }
+});
+test('native Buffer and Uint8Array imports preserve exact slice boundaries and an independent byte snapshot', async () => {
+  for (const bytes of [Buffer.from([0, 37, 80, 68, 70, 255]).subarray(1, 5), new Uint8Array([0, 37, 80, 68, 70, 255]).subarray(1, 5)]) {
+    const f = fixture({ managerLocation: 'component', beforeSave: async () => { bytes.fill(0); } });
+    try {
+      f.drop(); await f.insert(bytes, true); await flush();
+      assert.equal(f.saved(), 1); assert.equal(f.handled(), 1); assert.deepEqual(f.cleanups, ['/anonymous/source.pdf']);
+    } finally { f.stop(); }
+  }
+});
+test('ambiguous or foreign editor-component managers keep sources without interrupting native import', async () => {
+  for (const managerLocation of ['ambiguous', 'foreign'] as const) {
+    const f = fixture({ managerLocation });
+    try {
+      f.drop(); await f.insert(); await flush();
+      assert.equal(f.saved(), 1); assert.equal(f.handled(), 1); assert.deepEqual(f.cleanups, []);
+      assert.equal(f.manager.insertFiles, f.original.insert); assert.equal(f.manager.insertAttachmentEmbed, f.original.embed);
+    } finally { f.stop(); }
+  }
 });
 test('cancelled and already-handled drops do not clean up and release temporary wrappers', async () => {
   const f = fixture(); try {
