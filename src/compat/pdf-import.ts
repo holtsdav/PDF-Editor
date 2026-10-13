@@ -22,11 +22,11 @@ export function watchPdfImportCleanup(app: App, enabled: () => boolean, recovery
       if (!root) return false;
       const rel = relative(root, canonical); return !rel || (!rel.startsWith(`..${sep}`) && !isAbsolute(rel));
     })) return null;
-    const before = await lstat(path);
-    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size > 100_000_000) return null;
-    const bytes = new Uint8Array(await readFile(path)), after = await lstat(path);
-    const identity = (s: typeof before) => `${s.dev}:${s.ino}:${s.size}:${s.mtimeMs}:${s.ctimeMs}:${s.nlink}`;
-    if (identity(before) !== identity(after) || bytes.length !== before.size || !active()) return null;
+    const before = await lstat(path, { bigint: true });
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n || before.size > 100_000_000n) return null;
+    const bytes = new Uint8Array(await readFile(path)), after = await lstat(path, { bigint: true });
+    const identity = (s: typeof before) => `${s.dev}:${s.ino}:${s.size}:${s.mtimeNs}:${s.ctimeNs}:${s.nlink}`;
+    if (identity(before) !== identity(after) || bytes.length !== Number(before.size) || !active()) return null;
     return { path: canonical, identity: identity(after), bytes };
   };
   const skipped = () => new Notice('PDF imported. Original cleanup was skipped because it could not be verified.');
@@ -36,8 +36,10 @@ export function watchPdfImportCleanup(app: App, enabled: () => boolean, recovery
       const value = await source(path);
       // An OS File's metadata must still identify the dropped version.
       if (!value || file.size !== value.bytes.length) return null;
-      const stat = await lstat(path);
-      if (Math.abs(file.lastModified - stat.mtimeMs) >= 1) return null;
+      if (!Number.isSafeInteger(file.lastModified)) return null;
+      const stat = await lstat(path, { bigint: true });
+      const delta = BigInt(file.lastModified) * 1_000_000n - stat.mtimeNs;
+      if (delta <= -1_000_000n || delta >= 1_000_000n) return null;
       return value;
     },
     imported: async (original, file, bytes, current) => {
