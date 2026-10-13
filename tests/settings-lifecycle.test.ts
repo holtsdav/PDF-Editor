@@ -90,7 +90,7 @@ test('all existing settings expose searchable names without reading storage duri
   try {
     const definitions = f.tab.getSettingDefinitions();
     const names = definitions.flatMap(item => 'items' in item ? item.items?.flatMap(child => 'name' in child ? [child.name] : []) ?? [] : 'name' in item ? [item.name] : []);
-    assert.deepEqual(names, ['PDF toolbar top offset', 'Floating PDF toolbar', 'Detect answer lines on PDF open', 'Automatic detection page limit', 'Wrap across consecutive answer lines', 'Keep one backup of each PDF you edit', 'Backup folder', 'Delete backups']);
+    assert.deepEqual(names, ['PDF toolbar top offset', 'Floating PDF toolbar', 'Move original PDF to Trash after import', 'Detect answer lines on PDF open', 'Automatic detection page limit', 'Wrap across consecutive answer lines', 'Keep one backup of each PDF you edit', 'Backup folder', 'Delete backups']);
     assert.equal(f.usageReads(), 0); assert.equal(f.writes.length, 0);
     assert.equal(Object.hasOwn(PdfSettingsTab.prototype, 'display'), false);
   } finally { f.dispose(); }
@@ -110,6 +110,18 @@ test('rendered settings read current preferences and save through the shared sto
     assert.equal(f.sessions.preferences.autoDetectLines, true); assert.equal(f.sessions.preferences.penWidth, 6);
     f.tab.update(); assert.equal(f.row('PDF toolbar top offset').slider!.value, 96);
     await flush(); assert.match(f.row('Backup folder').descEl.textContent!, /2.0 KiB used · 2 PDFs backed up/);
+  } finally { f.dispose(); }
+});
+
+test('original cleanup defaults off and persists through the shared settings store', async () => {
+  const f = fixture();
+  try {
+    f.tab.update(); assert.equal(f.row('Move original PDF to Trash after import').toggle!.value, false);
+    await f.row('Move original PDF to Trash after import').toggle!.change(true);
+    assert.equal(f.sessions.preferences.trashImportedOriginals, true);
+    f.tab.update(); assert.equal(f.row('Move original PDF to Trash after import').toggle!.value, true);
+    assert.equal(loadToolPreferences({ trashImportedOriginals: true }).trashImportedOriginals, true);
+    for (const malformed of [undefined, null, 'true', 1]) assert.equal(loadToolPreferences({ trashImportedOriginals: malformed }).trashImportedOriginals, false);
   } finally { f.dispose(); }
 });
 

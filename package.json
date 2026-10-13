@@ -1,6 +1,6 @@
 {
   "name": "pdf-editor",
-  "version": "0.7.15",
+  "version": "0.8.0",
   "private": true,
   "description": "Integrated PDF editing beta for Obsidian with mixed-object selection, automatic saving and recovery.",
   "type": "module",
