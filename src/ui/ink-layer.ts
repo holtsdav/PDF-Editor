@@ -40,6 +40,9 @@ export class InkLayer extends Component {
   private shortcutProxy: HTMLTextAreaElement;
   private shortcutRelease?: () => void;
 
+  /** An active stroke must keep its page mounted even while scrolling moves the viewport away. */
+  get interacting(): boolean { return !!this.gesture; }
+
   constructor(page: NativePage, layer: HTMLElement, session: TextSession, options: InkOptions) {
     super(); this.page = page; this.layer = layer; this.session = session; this.options = options;
     const doc = layer.ownerDocument;

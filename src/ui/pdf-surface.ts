@@ -15,7 +15,7 @@ import { bindSurfaceInput } from './surface-input';
 import type { Rect } from '../pdf/text-engine';
 import type { TextField } from '../pdf/text-engine';
 
-interface PageEntry { native: NativePage; page: PDFPageProxy; canvas: HTMLCanvasElement; text: HTMLElement; links: HTMLElement; version: number; painted: number; queued?: number; rendering?: RenderTask; textTask?: TextLayer; suggestions?: HTMLElement; candidates?: Rect[] }
+interface PageEntry { native: NativePage; page: PDFPageProxy; canvas: HTMLCanvasElement; text: HTMLElement; links: HTMLElement; version: number; painted: number; queued?: number; released?: boolean; rendering?: RenderTask; textTask?: TextLayer; suggestions?: HTMLElement; candidates?: Rect[] }
 interface LineScan { generation: number; targets: PageEntry[]; task?: RenderTask }
 type Library = typeof import('pdfjs-dist');
 const FLOAT_EXIT_MS = 110;
@@ -56,6 +56,10 @@ export class PdfSurface extends Component {
   private rotation = 0;
   private frame?: number;
   private renderQueue = Promise.resolve();
+  private pendingRenders = new Map<PageEntry, number>();
+  private drainingRenders = false;
+  private editableKey = '';
+  private retainedSelection = false;
   private paintedEntries = new Set<PageEntry>();
   private activeRender?: PageEntry;
   private currentPage = 1;
@@ -140,7 +144,11 @@ export class PdfSurface extends Component {
     // Hide native chrome synchronously, before session/PDF.js loading yields.
     native.element.classList.add('pfs-integrated');
     this.registerDomEvent(this.scroller, 'scroll', () => this.requestVisible(), { passive: true });
-    this.registerDomEvent(doc, 'scroll', () => this.queueFloatingToolbar(), true);
+    this.registerDomEvent(doc, 'selectionchange', () => { if (this.retainedSelection || this.selectedTextRange()) this.requestVisible(); });
+    this.registerDomEvent(doc, 'scroll', event => {
+      // Internal PDF scrolling cannot move the document controls. Only their ancestors can.
+      if (event.target instanceof doc.defaultView!.Node && event.target.contains(this.root)) this.queueFloatingToolbar();
+    }, true);
     this.registerDomEvent(doc.defaultView!, 'resize', () => this.queueFloatingToolbar());
     this.registerDomEvent(doc.defaultView!, 'keydown', event => {
       const target = event.target;
@@ -187,7 +195,8 @@ export class PdfSurface extends Component {
     this.session = session; this.library = raw as Library;
     await this.loadDocument(); if (this.closed) return;
     const surface: EditorSurface = { identity: this.native.identity, element: this.root, file: this.file,
-      pages: () => this.entries.map(entry => entry.native), toolbarHost: () => this.tools,
+      pages: () => this.entries.map(entry => entry.native), editablePages: () => this.viewportEntries().map(entry => entry.native),
+      revealPage: number => this.go(number), toolbarHost: () => this.tools,
       answerLineButton: () => this.lineButton };
     this.editor = this.addChild(new TextEditor(this.app, surface, this.sessions, this.state));
     this.register(session.subscribeRemovedField(field => this.dismissRemovedAnswer(field)));
@@ -199,6 +208,7 @@ export class PdfSurface extends Component {
       else await this.detectLines();
     }
   }
+  /** Replace page shells only after loading succeeds, then release resources from the previous document. */
   private async loadDocument(): Promise<void> {
     this.cancelLineScan(); this.clearSuggestions();
     const generation = ++this.generation; this.epoch = this.session!.renderEpoch;
@@ -225,7 +235,8 @@ export class PdfSurface extends Component {
           if (this.closed || generation !== this.generation) return;
         }
       }
-      for (const entry of this.entries) { entry.rendering?.cancel(); entry.textTask?.cancel(); }
+      this.pendingRenders.clear(); this.editableKey = '';
+      for (const entry of this.entries) this.releasePage(entry);
       const oldTask = this.task; this.task = task;
       this.pdf = pdf; this.entries = entries; this.paintedEntries.clear(); this.stack.replaceChildren(fragment);
       if (oldTask) void oldTask.destroy().catch(() => {});
@@ -272,7 +283,10 @@ export class PdfSurface extends Component {
     } else {
       this.stack.style.removeProperty('min-width'); this.stack.style.removeProperty('padding-top'); this.stack.style.removeProperty('padding-bottom');
     }
-    if (changed) this.editor?.refresh();
+    if (changed) {
+      if (this.selectedTextRange()) this.root.ownerDocument.getSelection()?.removeAllRanges();
+      this.editor?.refresh();
+    }
     if (old && (changed || removedPanSpace)) this.scroller.scrollTop = old.native.div.offsetTop + fraction * old.native.viewport.height;
     this.zoomButton.textContent = this.scale === 'width' ? 'Fit width' : `${Math.round(this.scale * 100)}%`;
     this.refreshSuggestions(); this.requestVisible();
@@ -383,86 +397,134 @@ export class PdfSurface extends Component {
     if (this.frame !== undefined || this.closed) return;
     this.frame = this.root.ownerDocument.defaultView!.requestAnimationFrame(() => { this.frame = undefined; this.paintVisible(); });
   }
+  /** Refresh the viewport queue and counter, retaining offscreen resources only for printed-text selection. */
   private paintVisible(): void {
     const width = this.scroller.clientWidth, height = this.scroller.clientHeight;
     if (!width || !height) return;
     const top = this.scroller.scrollTop, bottom = top + height;
+    /** Return whether the page lies entirely outside the viewport and its 600-pixel prefetch margin. */
     const outside = (entry: PageEntry): boolean => entry.native.div.offsetTop + entry.native.div.offsetHeight < top - 600
       || entry.native.div.offsetTop > bottom + 600;
-    if (this.activeRender && outside(this.activeRender)) this.activeRender.rendering?.cancel();
-    for (const entry of this.paintedEntries) {
-      if (!outside(entry) || Math.abs(entry.native.div.offsetTop - top) <= height * 3) continue;
-      // Invalidate work awaiting text or annotations before clearing its bitmap.
-      entry.version++;
-      if (entry !== this.activeRender) entry.rendering?.cancel();
-      entry.textTask?.cancel(); entry.textTask = undefined;
-      entry.canvas.width = 0; entry.canvas.height = 0; entry.painted = -1;
-      entry.text.replaceChildren(); entry.links.replaceChildren(); this.paintedEntries.delete(entry);
+    const selection = this.selectedTextRange(); this.retainedSelection = false;
+    /** Empty shells must not retain a bitmap merely because the selection crosses their page. */
+    const selected = (entry: PageEntry): boolean => !!selection && entry.text.hasChildNodes() && selection.intersectsNode(entry.text);
+    if (this.activeRender && outside(this.activeRender) && !selected(this.activeRender)) this.releasePage(this.activeRender);
+    for (const entry of this.paintedEntries) if (outside(entry)) {
+      if (selected(entry)) this.retainedSelection = true; else this.releasePage(entry);
     }
-    // Page shells stay in document order, so only pages near the viewport need
-    // measurement or rendering on each scroll frame.
-    let low = 0, high = this.entries.length;
-    while (low < high) {
-      const mid = (low + high) >>> 1, div = this.entries[mid]!.native.div;
-      if (div.offsetTop + div.offsetHeight < top - 600) low = mid + 1; else high = mid;
-    }
+    for (const [entry, version] of this.pendingRenders) if (entry.queued === version) entry.queued = undefined;
+    this.pendingRenders.clear();
+    const nearby = this.viewportEntries();
     const previousPage = this.currentPage;
     let visibleHeight = 0;
-    for (let index = low; index < this.entries.length; index++) {
-      const entry = this.entries[index]!, div = entry.native.div;
-      if (div.offsetTop > bottom + 600) break;
+    const priority: { entry: PageEntry; visible: number; distance: number }[] = [];
+    for (const entry of nearby) {
+      const div = entry.native.div;
       const visible = Math.max(0, Math.min(div.offsetTop + div.offsetHeight, bottom) - Math.max(div.offsetTop, top));
       if (visible > visibleHeight || (visible > 0 && visible === visibleHeight && entry.native.number === this.currentPage)) { visibleHeight = visible; this.currentPage = entry.native.number; }
+      priority.push({ entry, visible, distance: Math.abs(div.offsetTop + div.offsetHeight / 2 - (top + bottom) / 2) });
+    }
+    // Replace stale destinations, and always paint a visible page before the prefetch margin.
+    for (const { entry } of priority.sort((a, b) => b.visible - a.visible || a.distance - b.distance)) {
       if (entry.painted === entry.version || entry.queued === entry.version) continue;
       const version = entry.version; entry.queued = version;
-      this.renderQueue = this.renderQueue.catch(() => {}).then(async () => {
-        try {
-          if (this.closed || version !== entry.version || !entry.native.div.isConnected || !this.nearViewport(entry)) return;
-          await this.paint(entry, version);
-        } catch (error) {
-          if (!this.closed && version === entry.version && !(error instanceof Error && error.name === 'RenderingCancelledException')) { entry.painted = -1; this.fail(error); }
-        } finally { if (entry.queued === version) entry.queued = undefined; }
-      });
+      this.pendingRenders.set(entry, version);
     }
+    this.drainRenders();
+    const editableKey = nearby.map(entry => entry.native.number).join(',');
+    if (editableKey !== this.editableKey) { this.editableKey = editableKey; this.editor?.refresh(); }
     if (this.pageInput.ownerDocument.activeElement !== this.pageInput) this.pageInput.value = String(this.currentPage);
     this.previous.disabled = this.currentPage === 1; this.next.disabled = this.currentPage === this.entries.length;
     if (this.currentPage !== previousPage) this.updateLineButton();
   }
+  /** Keep native copying across PDF pages intact, without retaining pages for note or input selections. */
+  private selectedTextRange(): Range | undefined {
+    const selection = this.root.ownerDocument.getSelection();
+    if (!selection || selection.isCollapsed || !selection.rangeCount) return;
+    /** Another viewer or a note owns its own selection and must not be cleared during this viewer's layout. */
+    const inText = (node: Node | null) => node && this.root.contains(node)
+      && (node.nodeType === 1 ? node as Element : node.parentElement)?.closest('.pfs-text-layer');
+    if (inText(selection.anchorNode) || inText(selection.focusNode)) return selection.getRangeAt(0);
+    return undefined;
+  }
+  /** Locate only page shells intersecting the viewport and its fixed prefetch margin. */
+  private viewportEntries(): PageEntry[] {
+    if (!this.scroller.clientWidth || !this.scroller.clientHeight) return [];
+    const top = this.scroller.scrollTop - 600, bottom = this.scroller.scrollTop + this.scroller.clientHeight + 600;
+    let low = 0, high = this.entries.length;
+    while (low < high) { const middle = (low + high) >>> 1, div = this.entries[middle]!.native.div; if (div.offsetTop + div.offsetHeight < top) low = middle + 1; else high = middle; }
+    const nearby: PageEntry[] = [];
+    for (let index = low; index < this.entries.length && this.entries[index]!.native.div.offsetTop <= bottom; index++) nearby.push(this.entries[index]!);
+    return nearby;
+  }
+  /** Drain a replaceable viewport queue; rapid scrolling never accumulates a chain of stale page jobs. */
+  private drainRenders(): void {
+    if (this.drainingRenders || !this.pendingRenders.size || this.closed) return;
+    this.drainingRenders = true;
+    this.renderQueue = this.renderQueue.catch(() => {}).then(async () => {
+      while (!this.closed && this.pendingRenders.size) {
+        const [entry, version] = this.pendingRenders.entries().next().value!; this.pendingRenders.delete(entry);
+        try {
+          if (version !== entry.version || !entry.native.div.isConnected || !this.nearViewport(entry)) continue;
+          await this.paint(entry, version);
+        } catch (error) {
+          if (!this.closed && version === entry.version && !(error instanceof Error && error.name === 'RenderingCancelledException')) { entry.painted = -1; this.fail(error); }
+        } finally { if (entry.queued === version) entry.queued = undefined; }
+      }
+    }).finally(() => { this.drainingRenders = false; if (this.pendingRenders.size && !this.closed) this.requestVisible(); });
+  }
+  /** Cancel stale work and release raster, text and page resources without removing document geometry. */
+  private releasePage(entry: PageEntry): void {
+    if (entry.released) return;
+    entry.released = true; entry.version++;
+    entry.rendering?.cancel(); entry.textTask?.cancel(); entry.textTask = undefined;
+    entry.canvas.width = entry.canvas.height = 0; entry.painted = -1;
+    entry.text.replaceChildren(); entry.links.replaceChildren(); this.paintedEntries.delete(entry);
+    entry.page.cleanup();
+  }
+  /** Apply the same fixed prefetch margin when admitting work and checking asynchronous render results. */
   private nearViewport(entry: PageEntry): boolean {
     const top = this.scroller.scrollTop, div = entry.native.div;
     return this.scroller.clientWidth > 0 && this.scroller.clientHeight > 0
       && div.offsetTop + div.offsetHeight >= top - 600 && div.offsetTop <= top + this.scroller.clientHeight + 600;
   }
+  /** Swap a completed raster once, then render cancellable text and links without a second full-size bitmap copy. */
   private async paint(entry: PageEntry, version: number): Promise<void> {
     const doc = this.root.ownerDocument, viewport = entry.page.getViewport({ scale: entry.native.viewport.scale, rotation: entry.native.viewport.rotation });
     // Cap raster memory; geometry and PDF output retain full precision.
     const ratio = Math.min(doc.defaultView!.devicePixelRatio, 2, Math.sqrt(10_000_000 / (viewport.width * viewport.height)));
-    const canvas = doc.createElement('canvas'); canvas.width = Math.ceil(viewport.width * ratio); canvas.height = Math.ceil(viewport.height * ratio);
-    const task = entry.rendering = entry.page.render({ canvasContext: canvas.getContext('2d')!, viewport, annotationMode: 1, transform: [ratio, 0, 0, ratio, 0, 0] });
+    const canvas = doc.createElement('canvas'); canvas.className = 'pfs-page-canvas'; canvas.setAttribute('aria-hidden', 'true');
+    canvas.width = Math.ceil(viewport.width * ratio); canvas.height = Math.ceil(viewport.height * ratio);
+    let committed = false; entry.released = false;
     this.activeRender = entry;
-    try { await task.promise; } finally { if (entry.rendering === task) entry.rendering = undefined; if (this.activeRender === entry) this.activeRender = undefined; }
-    if (this.closed || version !== entry.version || !entry.native.div.isConnected || !this.nearViewport(entry)) return;
-    entry.canvas.width = canvas.width; entry.canvas.height = canvas.height; entry.canvas.getContext('2d')!.drawImage(canvas, 0, 0);
-    this.paintedEntries.add(entry);
-    const content = await entry.page.getTextContent();
-    if (this.closed || version !== entry.version || !this.nearViewport(entry)) return;
-    entry.text.replaceChildren(); entry.textTask = new this.library!.TextLayer({ container: entry.text, viewport, textContentSource: content });
-    await entry.textTask.render();
-    if (this.closed || version !== entry.version || !this.nearViewport(entry)) return;
-    this.highlight(); entry.links.replaceChildren();
-    const annotations = await entry.page.getAnnotations();
-    if (this.closed || version !== entry.version || !this.nearViewport(entry)) return;
-    for (const annotation of annotations as { subtype: string; rect: number[]; url?: string; dest?: string | unknown[] }[]) {
-      if (annotation.subtype !== 'Link') continue;
-      let p: Rect;
-      try { p = pdfRectangle(viewport.convertToViewportRectangle(annotation.rect)); }
-      catch { continue; } // A damaged link must not prevent the rest of the page from rendering.
-      const link = entry.links.createEl('a', { cls: 'pfs-pdf-link', attr: { 'aria-label': annotation.url ?? 'Go to linked page', tabindex: '0' } });
-      Object.assign(link.style, { left: `${Math.min(p[0], p[2])}px`, top: `${Math.min(p[1], p[3])}px`, width: `${Math.abs(p[2] - p[0])}px`, height: `${Math.abs(p[3] - p[1])}px` });
-      if (annotation.url && /^(https?:|mailto:)/i.test(annotation.url)) { link.href = annotation.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; }
-      else if (annotation.dest) { link.href = '#'; link.onclick = event => { event.preventDefault(); void this.destination(annotation.dest!).catch(error => this.fail(error)); }; }
+    try {
+      const task = entry.rendering = entry.page.render({ canvasContext: canvas.getContext('2d')!, viewport, annotationMode: 1, transform: [ratio, 0, 0, ratio, 0, 0] });
+      try { await task.promise; } finally { if (entry.rendering === task) entry.rendering = undefined; }
+      if (this.closed || version !== entry.version || !entry.native.div.isConnected || !this.nearViewport(entry)) return;
+      entry.canvas.replaceWith(canvas); entry.canvas.width = entry.canvas.height = 0; entry.canvas = canvas; committed = true;
+      this.paintedEntries.add(entry);
+      entry.text.replaceChildren(); entry.textTask = new this.library!.TextLayer({ container: entry.text, viewport, textContentSource: entry.page.streamTextContent() });
+      await entry.textTask.render();
+      if (this.closed || version !== entry.version || (!this.nearViewport(entry) && !this.selectedTextRange()?.intersectsNode(entry.text))) return;
+      this.highlight(entry); entry.links.replaceChildren();
+      const annotations = await entry.page.getAnnotations();
+      if (this.closed || version !== entry.version || (!this.nearViewport(entry) && !this.selectedTextRange()?.intersectsNode(entry.text))) return;
+      for (const annotation of annotations as { subtype: string; rect: number[]; url?: string; dest?: string | unknown[] }[]) {
+        if (annotation.subtype !== 'Link') continue;
+        let p: Rect;
+        try { p = pdfRectangle(viewport.convertToViewportRectangle(annotation.rect)); }
+        catch { continue; } // A damaged link must not prevent the rest of the page from rendering.
+        const link = entry.links.createEl('a', { cls: 'pfs-pdf-link', attr: { 'aria-label': annotation.url ?? 'Go to linked page', tabindex: '0' } });
+        Object.assign(link.style, { left: `${Math.min(p[0], p[2])}px`, top: `${Math.min(p[1], p[3])}px`, width: `${Math.abs(p[2] - p[0])}px`, height: `${Math.abs(p[3] - p[1])}px` });
+        if (annotation.url && /^(https?:|mailto:)/i.test(annotation.url)) { link.href = annotation.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; }
+        else if (annotation.dest) { link.href = '#'; link.onclick = event => { event.preventDefault(); void this.destination(annotation.dest!).catch(error => this.fail(error)); }; }
+      }
+      entry.painted = version;
+    } finally {
+      if (!committed) canvas.width = canvas.height = 0;
+      if (this.activeRender === entry) this.activeRender = undefined;
+      if (!this.closed && !this.nearViewport(entry)) entry.page.cleanup();
     }
-    entry.painted = version;
   }
   private clearSuggestions(targets: PageEntry[] = this.entries): void {
     for (const entry of targets) { entry.suggestions?.remove(); entry.suggestions = undefined; entry.candidates = undefined; this.scannedEntries.delete(entry); }
@@ -613,7 +675,9 @@ export class PdfSurface extends Component {
     this.matchesFound = matches; this.searchStatus.textContent = matches.length ? `${matches.length} matching page${matches.length === 1 ? '' : 's'}` : 'No matches'; this.nextMatch(1);
   }
   private nextMatch(delta: number): void { if (!this.matchesFound.length) return; this.matchIndex = (this.matchIndex + delta + this.matchesFound.length) % this.matchesFound.length; this.go(this.matchesFound[this.matchIndex]!); }
-  private highlight(): void { const query = this.search.value.trim().toLocaleLowerCase(); for (const entry of this.entries) for (const span of entry.text.querySelectorAll('span')) span.classList.toggle('pfs-search-hit', !!query && (span.textContent ?? '').toLocaleLowerCase().includes(query)); }
+  /** Refresh search styling on rendered text without querying every empty page shell. */
+  private highlight(only?: PageEntry): void { const query = this.search.value.trim().toLocaleLowerCase(); for (const entry of only ? [only] : this.paintedEntries) for (const span of entry.text.querySelectorAll('span')) span.classList.toggle('pfs-search-hit', !!query && (span.textContent ?? '').toLocaleLowerCase().includes(query)); }
+  /** Cancel pending work and release retained page resources before restoring the native host. */
   onunload(): void {
     this.cancelLineScan(); this.clearSuggestions();
     this.closed = true; this.generation++; this.searchGeneration++;
@@ -622,11 +686,12 @@ export class PdfSurface extends Component {
     if (this.floatingExitTimer !== undefined) this.root.ownerDocument.defaultView!.clearTimeout(this.floatingExitTimer);
     this.floatingHost?.remove(); this.floatingHost = undefined;
     if (this.editor) this.removeChild(this.editor);
-    for (const entry of this.entries) { entry.version++; entry.rendering?.cancel(); entry.textTask?.cancel(); }
+    for (const entry of this.entries) this.releasePage(entry);
     if (this.task) void this.task.destroy().catch(() => {});
     for (const task of this.loadingTasks) void task.destroy().catch(() => {});
     this.loadingTasks.clear();
     this.paintedEntries.clear(); this.activeRender = undefined;
+    this.pendingRenders.clear();
     this.root.remove(); this.native.element.classList.remove('pfs-integrated');
     this.native.element.style.removeProperty('--pfs-embed-height');
   }

@@ -182,7 +182,8 @@ test('a page scrolled away during text loading renders text and valid links on r
       canvas: doc.createElement('canvas'), text, links, page: {
         getViewport: () => viewport,
         render: () => ({ promise: Promise.resolve(), cancel() {} }),
-        async getTextContent() { reads++; if (reads === 1) { textStarted(); await deferred; } if (reads === 3) { evictionTextStarted(); await evictedText; } return {}; },
+        cleanup() {},
+        streamTextContent() { reads++; if (reads === 1) { textStarted(); return deferred; } if (reads === 3) { evictionTextStarted(); return evictedText; } return Promise.resolve(); },
         async getAnnotations() { return [
           { subtype: 'Link', rect: [1, NaN, 3, 4], url: 'https://invalid.example' },
           { subtype: 'Link', rect: [1, 2, 3, 4], url: 'https://example.com' },
@@ -190,9 +191,9 @@ test('a page scrolled away during text loading renders text and valid links on r
         ]; }
       } };
     const surface = Object.assign(Object.create(PdfSurface.prototype), { root: doc.querySelector('#root'), scroller, entries: [entry],
-      paintedEntries: new Set(), closed: false, currentPage: 1, renderQueue: Promise.resolve(),
+      paintedEntries: new Set(), pendingRenders: new Map(), closed: false, currentPage: 1, renderQueue: Promise.resolve(),
       pageInput: doc.createElement('input'), previous: doc.createElement('button'), next: doc.createElement('button'),
-      library: { TextLayer: class { private readonly options: { container: HTMLElement }; constructor(options: { container: HTMLElement }) { this.options = options; } async render() { this.options.container.textContent = 'Page text'; } cancel() {} } },
+      library: { TextLayer: class { private readonly options: { container: HTMLElement; textContentSource: Promise<void> }; constructor(options: { container: HTMLElement; textContentSource: Promise<void> }) { this.options = options; } async render() { await this.options.textContentSource; this.options.container.textContent = 'Page text'; } cancel() {} } },
       highlight() {}, updateLineButton() {}, fail(error: unknown) { throw error; } }) as { paintVisible(): void; renderQueue: Promise<void> };
     surface.paintVisible();
     await started;

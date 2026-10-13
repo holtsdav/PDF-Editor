@@ -55,6 +55,8 @@ export class ObjectSelection extends Component {
     this.register(() => { this.cancel(); this.clear(); for (const entry of this.pages.values()) entry.dispose(); this.pages.clear(); });
   }
   get active(): boolean { return !!this.gesture || this.objects.length > 0; }
+  /** Keep the page that owns pointer capture mounted through the complete marquee or move gesture. */
+  get gesturePage(): number | undefined { return this.gesture?.entry.page.number; }
   private withinEditor(target: Element): boolean { return this.root.contains(target) || !!this.options.floatingToolbar()?.contains(target); }
   has(kind: PdfObject['kind'], id: string): boolean { return this.objects.some(object => object.kind === kind && object.id === id); }
   clear(): void { if (this.objects.length) this.set([]); }
@@ -79,12 +81,21 @@ export class ObjectSelection extends Component {
       .map(stroke => ({ object: { kind: 'ink' as const, id: stroke.id }, rect: stroke.rect }));
     return [...text, ...ink];
   }
-  private model(): string { return JSON.stringify(this.session.snapshot.pages.map((_, i) => this.items(i + 1).filter(item => this.has(item.object.kind, item.object.id)))); }
+  /** Track selected geometry once instead of rescanning every document page on each pointer move. */
+  private model(): string {
+    return JSON.stringify([
+      ...this.session.snapshot.fields.filter(field => field.owned && !field.readOnly && field.widgets.length === 1 && this.has('text', field.name))
+        .map(field => ({ kind: 'text', id: field.name, page: field.widgets[0]!.page, rect: field.widgets[0]!.rect })),
+      ...this.session.snapshot.strokes.filter(stroke => !stroke.readOnly && !stroke.hidden && this.has('ink', stroke.id))
+        .map(stroke => ({ kind: 'ink', id: stroke.id, page: stroke.page, rect: stroke.rect }))
+    ]);
+  }
   private signature(entry: PageSelection): string { const v = entry.page.viewport; return [v.width, v.height, v.rotation, this.session.renderEpoch].join(':'); }
   private point(entry: PageSelection, event: PointerEvent): Point {
     const b = entry.page.div.getBoundingClientRect(), v = entry.page.viewport;
     return [Math.max(0, Math.min(v.width, (event.clientX - b.left) * v.width / b.width)), Math.max(0, Math.min(v.height, (event.clientY - b.top) * v.height / b.height))];
   }
+  /** Reconcile mounted selection overlays while retaining valid selected identities across page virtualization. */
   update(pages: NativePage[]): void {
     const alive = new Set(pages.map(page => page.div));
     for (const [div, entry] of this.pages) if (!alive.has(div)) { if (this.gesture?.entry === entry) this.cancel(); entry.dispose(); this.pages.delete(div); }
@@ -93,7 +104,10 @@ export class ObjectSelection extends Component {
       if (!entry) { entry = this.bind(page); this.pages.set(page.div, entry); } else entry.page = page;
     }
     if (this.gesture && (!this.options.enabled() || !this.session.canEditObjects || this.gesture.signature !== this.signature(this.gesture.entry) || this.gesture.model !== this.model())) this.cancel();
-    const ids = new Set(this.session.snapshot.pages.flatMap((_, i) => this.items(i + 1).map(item => key(item.object))));
+    const ids = new Set([
+      ...this.session.snapshot.fields.filter(field => field.owned && !field.readOnly && field.widgets.length === 1).map(field => `text:${field.name}`),
+      ...this.session.snapshot.strokes.filter(stroke => !stroke.readOnly && !stroke.hidden).map(stroke => `ink:${stroke.id}`)
+    ]);
     const next = this.objects.filter(object => ids.has(key(object)));
     if (next.length !== this.objects.length) this.set(next);
     this.paint();
