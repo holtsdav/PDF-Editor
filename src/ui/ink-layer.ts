@@ -226,7 +226,10 @@ export class InkLayer extends Component {
   private assisted(g: Gesture): Point[] {
     return g.snapped?.points ?? (g.straight ? [g.points[0]!, g.points.at(-1)!] : smoothInk(g.points, !!g.smooth));
   }
-  private textBands(g: Gesture): TextBand[] { return g.textWords ? snapTextBands(g.points, g.textWords) : []; }
+  private textBands(g: Gesture): TextBand[] {
+    // Fit the text while honoring the captured brush thickness as a minimum in both preview and save.
+    return g.textWords ? snapTextBands(g.points, g.textWords).map(band => ({ ...band, width: Math.max(band.width, g.width) })) : [];
+  }
   private scheduleHold(): void {
     if (this.holdTimer !== undefined || !this.gesture?.hold || this.gesture.snapped) return;
     this.holdTimer = this.layer.ownerDocument.defaultView!.setTimeout(() => {

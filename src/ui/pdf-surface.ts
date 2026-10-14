@@ -232,7 +232,7 @@ export class PdfSurface extends Component {
         const text = div.createDiv({ cls: 'textLayer pfs-text-layer' });
         const links = div.createDiv({ cls: 'pfs-links' });
         const viewport = page.getViewport({ scale: 1 });
-        const entry: PageEntry = { native: { div, viewport, number, annotationElements: () => [] }, page, canvas, text, links, version: 0, painted: -1 };
+        const entry: PageEntry = { native: { div, viewport, number, annotationElements: () => [] }, page, canvas, text, links, version: 0, painted: -1, released: true };
         // Measure only when a snapped marker gesture starts, never during ordinary scrolling.
         entry.native.getTextWords = () => this.closed || entry.released || entry.textReady !== entry.version ? []
           : entry.textWords ??= measureTextWords(entry.text, entry.native);
@@ -483,9 +483,10 @@ export class PdfSurface extends Component {
   }
   /** Cancel stale work and release raster, text and page resources without removing document geometry. */
   private releasePage(entry: PageEntry): void {
-    if (entry.released) return;
+    if (entry.released && !entry.rendering && !entry.textTask) return;
     entry.released = true; entry.version++; entry.textReady = undefined; entry.textWords = undefined;
-    entry.rendering?.cancel(); entry.textTask?.cancel(); entry.textTask = undefined;
+    const rendering = entry.rendering; entry.rendering = undefined; rendering?.cancel();
+    entry.textTask?.cancel(); entry.textTask = undefined;
     entry.canvas.width = entry.canvas.height = 0; entry.painted = -1;
     entry.text.replaceChildren(); entry.links.replaceChildren(); this.paintedEntries.delete(entry);
     entry.page.cleanup();
@@ -503,13 +504,13 @@ export class PdfSurface extends Component {
     const ratio = Math.min(doc.defaultView!.devicePixelRatio, 2, Math.sqrt(10_000_000 / (viewport.width * viewport.height)));
     const canvas = doc.createElement('canvas'); canvas.className = 'pfs-page-canvas'; canvas.setAttribute('aria-hidden', 'true');
     canvas.width = Math.ceil(viewport.width * ratio); canvas.height = Math.ceil(viewport.height * ratio);
-    let committed = false; entry.released = false;
+    let committed = false;
     this.activeRender = entry;
     try {
       const task = entry.rendering = entry.page.render({ canvasContext: canvas.getContext('2d')!, viewport, annotationMode: 1, transform: [ratio, 0, 0, ratio, 0, 0] });
       try { await task.promise; } finally { if (entry.rendering === task) entry.rendering = undefined; }
       if (this.closed || version !== entry.version || !entry.native.div.isConnected || !this.nearViewport(entry)) return;
-      entry.canvas.replaceWith(canvas); entry.canvas.width = entry.canvas.height = 0; entry.canvas = canvas; committed = true;
+      entry.canvas.replaceWith(canvas); entry.canvas.width = entry.canvas.height = 0; entry.canvas = canvas; committed = true; entry.released = false;
       this.paintedEntries.add(entry);
       entry.textReady = undefined; entry.textWords = undefined; entry.text.replaceChildren(); entry.textTask = new this.library!.TextLayer({ container: entry.text, viewport, textContentSource: entry.page.streamTextContent() });
       await entry.textTask.render();

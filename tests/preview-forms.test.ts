@@ -211,3 +211,29 @@ test('recognized invalid startxref offsets reject before editing while a missing
     assert((await (await saved.getPage(1)).getAnnotations()).some(item => item.fieldName === 'Index form' && item.fieldValue === 'Updated answer'));
   } finally { await task.destroy(); }
 });
+
+test('classic object headers accept PDF whitespace including NUL without shifting indexed offsets', async () => {
+  const pdf = await PDFDocument.create(), page = pdf.addPage([600, 800]); page.drawText('Anonymous whitespace fixture');
+  const field = pdf.getForm().createTextField('Whitespace form'); field.setText('Original'); field.addToPage(page, { x: 50, y: 500, width: 200, height: 24 });
+  const seed = await pdf.save({ useObjectStreams: false }), source = new TextDecoder('latin1').decode(seed);
+  const headers = [...source.matchAll(/^(\d+) (\d+) obj\b/gm)]; assert(headers.length > 0);
+  for (const whitespace of [0, 9, 10, 12, 13, 32]) {
+    const bytes = seed.slice();
+    for (const header of headers) {
+      bytes[header.index! + header[1]!.length] = whitespace;
+      bytes[header.index! + header[1]!.length + 1 + header[2]!.length] = whitespace;
+    }
+    assert.equal((await PDFDocument.load(bytes)).getPageCount(), 1, 'the existing parser accepts the fixture');
+    const file = memory(bytes), session = await TextSession.open(file.store, font);
+    assert.equal(session.snapshot.fields[0]!.value, 'Original'); assert.equal(file.writes(), 0); assert.deepEqual(file.bytes(), bytes);
+    session.setValue('Whitespace form', 'Saved after whitespace load'); await session.save(); assert.deepEqual(file.backups[0], bytes);
+    const task = getDocument({ data: file.bytes().slice(), standardFontDataUrl });
+    try {
+      const reopened = await (await task.promise).getPage(1), annotations = await reopened.getAnnotations();
+      assert(annotations.some(a => a.subtype === 'Widget' && a.fieldValue === 'Saved after whitespace load' && a.hasAppearance));
+      assert((await reopened.getTextContent()).items.some(item => 'str' in item && item.str === 'Anonymous whitespace fixture'));
+    } finally { await task.destroy(); }
+  }
+  const invalid = seed.slice(), header = headers[0]!; invalid[header.index! + header[1]!.length] = 1;
+  await assert.rejects(loadPdfDocument(invalid), /object index does not match/);
+});

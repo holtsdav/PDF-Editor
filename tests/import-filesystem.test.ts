@@ -23,7 +23,7 @@ const parent = new URL('../tmp/import-filesystem/', import.meta.url); await mkdi
 const url = new URL('host.mjs', parent); await writeFile(url, built.outputFiles[0]!.text);
 const host = await import(url.href) as { watchPdfImportCleanup: typeof import('../src/compat/pdf-import.ts')['watchPdfImportCleanup']; TFile: new (path: string) => { path: string; extension: string }; FileSystemAdapter: new (root: string) => unknown };
 const pause = () => new Promise<void>(resolve => setImmediate(resolve));
-async function fixture(kind: 'normal' | 'vault' | 'symlink' | 'hardlink' | 'recovery' | 'changed' | 'note-change' | 'large-identity') {
+async function fixture(kind: 'normal' | 'vault' | 'symlink' | 'hardlink' | 'recovery' | 'changed' | 'note-change' | 'large-identity' | 'metadata-race') {
   const root = await realpath(await mkdtemp(join(parent.pathname, 'case-'))), vault = join(root, 'vault'), external = join(root, 'external'), trash = join(root, 'trash');
   await Promise.all([mkdir(vault), mkdir(external), mkdir(trash)]);
   const source = join(kind === 'vault' ? vault : external, 'source.pdf'); await writeFile(source, '%PDF-anonymous fixture');
@@ -35,7 +35,7 @@ async function fixture(kind: 'normal' | 'vault' | 'symlink' | 'hardlink' | 'reco
     await symlink(external, join(vault, '.obsidian/plugins/pdf-editor/recovery'), 'dir');
   }
   const metadata = await stat(dropped), bytes = await readFile(dropped), data = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-  let listener: (...args: unknown[]) => void = () => {}, moved = 0, text = '', replaced = false;
+  let listener: (...args: unknown[]) => void = () => {}, moved = 0, text = '', replaced = false, sourceStats = 0;
   const notices: string[] = [];
   const file = new host.TFile('imported.pdf'), note = new host.TFile('note.md');
   const manager = { info: undefined as unknown, insertAttachmentEmbed(file: { path: string }) { void file; text += '![[imported.pdf]]'; }, async insertFiles(items: { data: Promise<ArrayBuffer> }[]) {
@@ -55,6 +55,12 @@ async function fixture(kind: 'normal' | 'vault' | 'symlink' | 'hardlink' | 'reco
   };
   Object.assign(globalThis, { window: { setTimeout, clearTimeout }, fixtureNotice: (message: string) => notices.push(message),
     fixtureStat: (path: string, options: { bigint?: boolean } | undefined, stats: object) => {
+      if (kind === 'metadata-race' && path === source) {
+        sourceStats++;
+        // The verified read has a newer timestamp than the dropped OS File.
+        // A redundant third stat returns the old timestamp, hiding that mismatch.
+        if (sourceStats !== 3) (stats as { mtimeNs: bigint }).mtimeNs += 2_000_000n;
+      }
       if (kind === 'large-identity' && path === source) {
         const inode = 9_007_199_254_740_992n + (replaced ? 1n : 0n);
         // These distinct identifiers collapse to the same Number. Keep real bytes and timestamps identical.
@@ -68,11 +74,12 @@ async function fixture(kind: 'normal' | 'vault' | 'symlink' | 'hardlink' | 'reco
     listener({ defaultPrevented: false, dataTransfer: { files: [{ name: 'source.pdf', path: dropped, size: bytes.length, lastModified: Math.floor(metadata.mtimeMs) }] } }, { getValue: () => text }, info);
     // Exact native descriptor promise and exact returned TFile, backed by real filesystem reads.
     await (manager.insertFiles as unknown as (items: object[]) => Promise<void>)([{ filepath: dropped, extension: 'pdf', data: Promise.resolve(data) }]);
-    for (let i = 0; i < 60 && !moved && !notices.length && (kind === 'normal' || kind === 'large-identity'); i++) await new Promise(resolve => setTimeout(resolve, 5));
+    for (let i = 0; i < 60 && !moved && !notices.length && (kind === 'normal' || kind === 'large-identity' || kind === 'metadata-race'); i++) await new Promise(resolve => setTimeout(resolve, 5));
     for (let i = 0; i < 20; i++) await pause();
     assert.deepEqual(await readFile(join(vault, file.path)), bytes);
     if (kind === 'normal') { assert.equal(moved, 1); assert.deepEqual(await readFile(join(trash, 'source.pdf')), bytes); }
     else { assert.equal(moved, 0); assert((await stat(source)).isFile()); }
+    if (kind === 'metadata-race') assert.equal(sourceStats, 2, 'metadata validation uses the exact verified read, without another stat');
   } finally { stop(); }
 }
 test('verified native cleanup moves a regular external fixture only after the actual vault bytes match', () => fixture('normal'));
@@ -82,3 +89,5 @@ test('vault, recovery, symbolic and hard-linked sources survive the actual files
 test('an external change during native attachment creation keeps the real source file', () => fixture('changed'));
 test('a note change during attachment readback prevents the actual source from being moved', () => fixture('note-change'));
 test('large device and inode identities remain distinct when identical bytes replace the dropped source', () => fixture('large-identity'));
+
+test('OS File timestamps are checked against the verified source snapshot, without a later inconsistent stat', () => fixture('metadata-race'));

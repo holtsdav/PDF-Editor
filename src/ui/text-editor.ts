@@ -768,7 +768,7 @@ export class TextEditor extends Component {
       changeColor: color => { if (kind === 'marker') this.markerColor = color; else this.penColor = color; this.rememberPreferences(); this.updateStatus(); },
       widths: { values: kind === 'marker' ? [8, 14, 22, 30] : [1, 2, 4, 6], value: kind === 'marker' ? this.markerWidth : this.penWidth,
         change: value => { if (kind === 'marker') this.markerWidth = value; else this.penWidth = value; this.rememberPreferences(); this.updateStatus(); } }, close: () => this.closePopover(),
-      toggles: kind === 'marker' ? [{ label: 'Snap to text', description: 'Highlight crossed words on separate lines. Falls back to freehand when text geometry is unavailable.', value: this.snapToText, change: value => { this.snapToText = value; this.rememberPreferences(); } },
+      toggles: kind === 'marker' ? [{ label: 'Snap to text', description: 'Fit crossed words and lines, using at least the selected thickness. Falls back to freehand when text geometry is unavailable.', value: this.snapToText, change: value => { this.snapToText = value; this.rememberPreferences(); } },
         { label: 'Hold for straight line', description: 'Pause at the end before lifting.', value: this.holdHighlighter, change: value => { this.holdHighlighter = value; this.rememberPreferences(); } }]
         : [{ label: 'Smooth ink', description: 'Reduce wobble while keeping your handwriting.', value: this.smoothPen, change: value => { this.smoothPen = value; this.rememberPreferences(); } },
           { label: 'Draw & hold shapes', description: 'Lines, rectangles, triangles, circles, ellipses and arrows. Keep holding and drag to resize.', value: this.holdShapes, change: value => { this.holdShapes = value; this.rememberPreferences(); } }]

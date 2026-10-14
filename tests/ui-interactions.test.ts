@@ -1726,3 +1726,36 @@ test('resize interruptions preserve redo and release autosave without partial ge
     }
   } finally { f.dispose(); }
 });
+
+test('snapped marker preview and saved PDF use the selected thickness as a minimum', async () => {
+  for (const width of [8, 22]) {
+    const f = await fixture();
+    try {
+      const pages = f.native.pages(); pages[0]!.getTextWords = () => [
+        { start: [50, 600], end: [150, 600], height: 18, order: 0 }, { start: [50, 570], end: [150, 570], height: 18, order: 1 }
+      ]; f.native.pages = () => pages; f.editor.refresh(); f.tool('Highlighter');
+      f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
+      f.doc.querySelector<HTMLButtonElement>(`[aria-label="${width} point line"]`)!.click();
+      f.doc.querySelector<HTMLButtonElement>('[aria-label="Snap to text"]')!.click();
+      f.doc.querySelector<HTMLButtonElement>('[aria-label="Close tool settings"]')!.click();
+      const layer = f.doc.querySelector<HTMLElement>('.pdf-form-studio-layer')!;
+      f.pointer(layer, 'pointerdown', 60, 200); f.pointer(layer, 'pointermove', 140, 200); f.pointer(layer, 'pointermove', 140, 230);
+      await pause(30);
+      const previews = [...f.doc.querySelectorAll<SVGPathElement>('.pdf-form-studio-stroke-preview')].filter(path => path.hasAttribute('d'));
+      assert.equal(previews.length, 2); assert(previews.every(path => Number(path.getAttribute('stroke-width')) === Math.max(18, width)));
+      f.pointer(layer, 'pointerup', 60, 230); await f.session.saveWhenIdle();
+      const snapshot = await readTextPdf(f.bytes()); assert.equal(snapshot.strokes.length, 2);
+      assert(snapshot.strokes.every(stroke => stroke.width === Math.max(18, width)));
+      const task = getDocument({ data: f.bytes().slice() });
+      try {
+        const page = await (await task.promise).getPage(1), annotations = await page.getAnnotations();
+        const ink = annotations.filter(annotation => annotation.subtype === 'Ink'); assert.equal(ink.length, 2);
+        assert(ink.every(annotation => annotation.hasAppearance && annotation.borderStyle.width === Math.max(18, width)));
+      } finally { await task.destroy(); }
+      f.session.undoStroke(); assert.equal(f.session.snapshot.strokes.length, 0);
+      f.session.redoStroke(); assert.equal(f.session.snapshot.strokes.length, 2);
+      f.pointer(layer, 'pointerdown', 20, 500); f.pointer(layer, 'pointerup', 100, 500);
+      assert.equal(f.session.snapshot.strokes[2]!.width, width, 'freehand fallback keeps the chosen thickness');
+    } finally { f.dispose(); }
+  }
+});
