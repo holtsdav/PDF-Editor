@@ -1662,3 +1662,67 @@ test('history shortcuts consume empty stacks and repeats, preserve text undo, an
     f.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); assert.equal(key(f.doc.activeElement!).defaultPrevented, false);
   } finally { f.dispose(); }
 });
+
+test('selected ink resize previews cancel cleanly and a completed gesture is one undoable saved edit', async () => {
+  const f = await fixture();
+  try {
+    const stroke = f.session.addStroke(1, 'scribble', [[100, 500], [160, 550], [200, 500]], 2); await f.session.save();
+    const before = structuredClone(stroke), group = f.doc.querySelector<SVGGElement>('[data-pdf-stroke]')!;
+    const layer = f.doc.querySelector<HTMLElement>('.pdf-form-studio-layer')!;
+    f.pointer(group, 'pointerdown', 150, 300); f.pointer(layer, 'pointerup', 150, 300);
+    const handle = group.querySelector<SVGRectElement>('[data-ink-resize="se"]')!; assert(handle.classList.contains('is-selected'));
+    f.pointer(handle, 'pointerdown', 201, 301); f.pointer(layer, 'pointermove', 250, 330);
+    assert.deepEqual(f.session.snapshot.strokes[0]!.points, before.points, 'preview never changes the document');
+    f.pointer(layer, 'pointercancel'); assert.deepEqual(f.session.snapshot.strokes[0]!.points, before.points);
+    f.pointer(handle, 'pointerdown', 201, 301); f.pointer(layer, 'pointermove', 250, 330); f.pointer(layer, 'pointerup', 250, 330);
+    assert.notDeepEqual(f.session.snapshot.strokes[0]!.points, before.points);
+    assert.equal(f.session.snapshot.strokes[0]!.width, before.width); assert.equal(f.session.snapshot.strokes[0]!.id, before.id);
+    f.session.undoStroke(); assert.deepEqual(f.session.snapshot.strokes[0]!.points, before.points);
+    f.session.redoStroke(); await f.session.save(); assert.equal((await readTextPdf(f.bytes())).strokes[0]!.id, before.id);
+  } finally { f.dispose(); }
+});
+
+test('snap-to-text creates separate editable marks per row with one shared history entry and freehand fallback', async () => {
+  const f = await fixture();
+  try {
+    let measurements = 0;
+    const pages = f.native.pages(); pages[0]!.getTextWords = () => { measurements++; return [
+      { start: [50, 600], end: [150, 600], height: 14, order: 0 }, { start: [50, 575], end: [150, 575], height: 14, order: 1 }
+    ]; }; f.native.pages = () => pages; f.editor.refresh();
+    f.tool('Highlighter');
+    f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
+    f.doc.querySelector<HTMLButtonElement>('[aria-label="Snap to text"]')!.click();
+    f.doc.querySelector<HTMLButtonElement>('[aria-label="Close tool settings"]')!.click();
+    const layer = f.doc.querySelector<HTMLElement>('.pdf-form-studio-layer')!;
+    f.pointer(layer, 'pointerdown', 60, 200); f.pointer(layer, 'pointermove', 140, 200); f.pointer(layer, 'pointermove', 140, 225); f.pointer(layer, 'pointerup', 60, 225);
+    assert.equal(measurements, 1, 'geometry is captured once for a complete gesture');
+    assert.equal(f.session.snapshot.strokes.length, 2); assert(f.session.snapshot.strokes.every(stroke => stroke.points.length === 2));
+    f.session.undoStroke(); assert.equal(f.session.snapshot.strokes.length, 0); f.session.redoStroke(); assert.equal(f.session.snapshot.strokes.length, 2);
+    f.pointer(layer, 'pointerdown', 20, 500); f.pointer(layer, 'pointerup', 100, 500); assert.equal(f.session.snapshot.strokes.length, 3);
+    assert.deepEqual(f.session.snapshot.strokes[2]!.points, [[20, 300], [100, 300]]);
+  } finally { f.dispose(); }
+});
+
+
+test('resize interruptions preserve redo and release autosave without partial geometry', async () => {
+  const f = await fixture();
+  try {
+    const stroke = f.session.addStroke(1, 'scribble', [[100, 500], [200, 550]], 2); await f.session.save();
+    f.session.moveStroke(stroke.id, [10, 0]); f.session.undoStroke(); assert(f.session.canRedoStroke);
+    const points = structuredClone(f.session.snapshot.strokes[0]!.points);
+    const layer = f.doc.querySelector<HTMLElement>('.pdf-form-studio-layer')!;
+    const select = () => { const group = f.doc.querySelector<SVGGElement>('[data-pdf-stroke]')!; f.pointer(group, 'pointerdown', 150, 275); f.pointer(layer, 'pointerup', 150, 275); return group.querySelector<SVGRectElement>('[data-ink-resize="se"]')!; };
+    for (const cancel of ['escape', 'blur', 'capture', 'focus', 'tool', 'viewport']) {
+      const handle = select(); f.pointer(handle, 'pointerdown', 202, 302); f.pointer(layer, 'pointermove', 250, 330);
+      if (cancel === 'escape') layer.dispatchEvent(new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      if (cancel === 'blur') f.doc.defaultView!.dispatchEvent(new f.doc.defaultView!.Event('blur'));
+      if (cancel === 'capture') { layer.releasePointerCapture(1); layer.dispatchEvent(new f.doc.defaultView!.Event('lostpointercapture')); }
+      if (cancel === 'focus') f.doc.querySelector<HTMLButtonElement>('#outside')!.focus();
+      if (cancel === 'tool') f.tool('Add text box');
+      if (cancel === 'viewport') { f.viewports[0]!.width += 1; f.pointer(layer, 'pointerup', 250, 330); f.viewports[0]!.width -= 1; }
+      assert.deepEqual(f.session.snapshot.strokes[0]!.points, points, cancel); assert(f.session.canRedoStroke, cancel);
+      f.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); f.doc.defaultView!.dispatchEvent(new f.doc.defaultView!.Event('focus'));
+      await f.session.saveWhenIdle(); f.tool('Select');
+    }
+  } finally { f.dispose(); }
+});

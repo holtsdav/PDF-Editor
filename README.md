@@ -18,6 +18,12 @@ Apple Preview can rewrite a PDF while retaining obsolete compressed objects. For
 ### Draw and highlight
 <img src="assets/demos/ink-and-shapes.gif" alt="Draw, highlight and hold for shapes" width="480">
 
+In Select mode, selected editable drawings, held shapes and marker strokes have eight resize handles. Drag a handle to resize the PDF-space points while keeping the opposite anchor, color, opacity, line width and annotation identity. Hold Shift at a corner for proportional resizing. Focus a handle and use arrow keys for small adjustments. Each completed resize is one undo operation; Escape, pointer cancellation, focus loss, tool changes and document replacement cancel an unfinished preview.
+
+Highlighter options include **Snap to text**, off by default. It follows the rendered PDF.js word geometry crossed by a gesture and keeps separate lines and distant columns as separate editable marker strokes. A whole gesture shares one undo operation. Scanned pages, unavailable or skewed text geometry, pages above 5,000 measured words and complex gestures fall back to freehand; no OCR is performed. Text geometry is measured on demand and discarded when a page is rerendered or released. Straight-line assistance remains available.
+
+The 0.8.2 drawing candidate was checked on 2026-10-14 in an isolated Obsidian 1.14.4 vault on macOS 27.0.1. A PDF tab showed the eight handles; a completed resize, toolbar undo/redo and autosave were observed. PDF.js independently read the resized saved points and appearance, unchanged line width and untouched second stroke. The final focus-loss and stale-pointer-up cancellation adjustments have automated regression coverage; fresh native checks after those adjustments remain unavailable. A native Cmd+Z trial produced no observable undo, and window targeting then stopped responding. Snap-to-text gestures, Reading view, Live Preview and pop-out interactions remain unverified for this candidate. Earlier surface checks below predate it. Automated tests cover PDF.js geometry at all quarter turns and 35–300% zoom, multiline grouping, fallback, cancellation, preserved redo, autosave release, shared history, saved annotations and reopen.
+
 ### Edit inside your notes
 <img src="assets/demos/embeds-and-popouts.gif" alt="Edit PDFs in notes and pop-out windows" width="480">
 
@@ -58,3 +64,28 @@ Cleanup uses isolated desktop compatibility hooks for the native import pipeline
 The setting's default and saved toggle states were checked in an isolated Obsidian 1.14.4 vault on macOS 27.0.1. On 2026-10-13, a real OS File selected through the native file chooser and a constructed drop event reproduced the skipped-cleanup notice through Obsidian's actual import handler. The compatibility fix then retained native attachment and embed creation and moved the disposable original to system Trash; the attachment and Trash copy had identical bytes and independently opened with PDF.js. After a full app reload, the imported PDF opened in Live Preview, Reading view, a PDF tab and a PDF pop-out. These were opening checks, not a new gesture or shortcut audit. Automated Finder-to-note dragging did not reach the note, so physical Downloads drops and imports into pop-out notes remain unverified. No personal Downloads files were used.
 
 [MIT license](LICENSE) · [Third-party credits and licenses](THIRD_PARTY_NOTICES.txt)
+
+## Changelog
+
+### 0.8.2
+
+Changes since 0.7.15, including PRs #22 through #28 and the remaining drawing features:
+
+- **Text alignment:** Left, Center and Right, saved in the PDF and included in undo/redo.
+- **Letter spacing:** PDF-point control for added text boxes, defaulting to 0 pt.
+- **Line spacing:** Multiplier control for added text boxes, defaulting to 1.2×.
+- **Compact spacing controls:** Side-by-side controls with draggable icons and number fields, keyboard editing, decimal commas and quick reset buttons.
+- **Smaller text boxes:** Minimum width based on one character at the actual font and size.
+- **Zoom gestures:** Pinch and Cmd/Ctrl+wheel handlers that keep the pointer's PDF position stable.
+- **Embedded scrolling:** Scroll handoff between the PDF and enclosing note at the PDF's boundaries.
+- **Large-PDF performance:** Nearby-page rendering and editing layers, cancellation of stale work and release of distant resources.
+- **Page-counter positioning:** Viewer controls stay in their toolbar during internal scrolling.
+- **Printed-text selection:** Restored selection and copying of PDF text.
+- **Undo/redo ownership:** Preview shortcut routing and window-focus fixes using the shared history.
+- **Simplified tooltips:** Short tool names, fewer routine tooltips and no page-hover tooltips.
+- **Apple Preview compatibility:** Load rewritten PDFs while preserving current pages, forms and foreign annotation appearances.
+- **Drawing resize controls:** Resize editable pen drawings, held shapes and marker strokes, with proportional corner resizing and undo/redo.
+- **Snap to text:** Optional highlighter snapping to crossed words and separate lines, with freehand fallback when geometry is unavailable.
+- **Original-file cleanup:** Optional system Trash cleanup after a verified native PDF import, off by default. Current and legacy import handlers and native Buffer payloads are recognized.
+
+Desktop beta. Physical pinch, stylus input, fast native momentum scrolling and Finder-to-note drops remain unverified. Existing printed text and foreign Preview text annotations do not become editable text boxes. Use one writer per PDF and wait for Saved before switching apps or devices.

@@ -301,3 +301,11 @@
   border: 0;
   resize: none;
 }
+
+.pfs-ink-resize { display: none; fill: var(--background-primary); stroke: var(--interactive-accent); stroke-width: 1.5; pointer-events: all; }
+.pfs-ink-resize.is-selected { display: block; }
+.pfs-ink-resize:focus { outline: none; stroke-width: 3; }
+.pfs-ink-resize[data-ink-resize="n"], .pfs-ink-resize[data-ink-resize="s"] { cursor: ns-resize; }
+.pfs-ink-resize[data-ink-resize="e"], .pfs-ink-resize[data-ink-resize="w"] { cursor: ew-resize; }
+.pfs-ink-resize[data-ink-resize="ne"], .pfs-ink-resize[data-ink-resize="sw"] { cursor: nesw-resize; }
+.pfs-ink-resize[data-ink-resize="nw"], .pfs-ink-resize[data-ink-resize="se"] { cursor: nwse-resize; }

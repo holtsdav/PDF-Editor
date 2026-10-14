@@ -307,6 +307,19 @@ export class TextSession {
     this.snapshot.strokes[index] = next; this.changes.strokes.set(id, next); this.changed();
   }
 
+  /** Commit geometry once; the UI keeps interrupted resize previews out of the document. */
+  resizeStroke(id: string, points: Point[], owner: object = this): void {
+    this.assertAvailable();
+    if (this.conflicted) throw new Error('Reload the PDF before resizing marks.');
+    const index = this.snapshot.strokes.findIndex(stroke => stroke.id === id), stroke = this.snapshot.strokes[index];
+    if (!stroke || stroke.readOnly || stroke.hidden) throw new Error('This mark cannot be resized.');
+    const bounds = this.snapshot.pages[stroke.page - 1]!;
+    const next = { ...stroke, points: points.map<Point>(point => [...point]), rect: strokeBounds(points, stroke.width, bounds) };
+    validateStroke(next, bounds);
+    if (JSON.stringify(stroke.points) === JSON.stringify(next.points)) return;
+    this.rememberInk(owner); this.snapshot.strokes[index] = next; this.changes.strokes.set(id, next); this.changed();
+  }
+
   get canEditObjects(): boolean { return !this.conflicted && !this.replacing && !this.inkAction; }
 
   private objectItems(objects: PdfObject[]): { object: PdfObject; page: number; rect: Rect }[] {

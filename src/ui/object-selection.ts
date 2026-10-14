@@ -120,6 +120,7 @@ export class ObjectSelection extends Component {
     const down = (event: PointerEvent) => {
       if (!this.options.enabled() || event.button !== 0 || !this.session.canEditObjects) return;
       const target = event.target as Element;
+      if (target.closest('[data-ink-resize]')) return;
       if (target.closest('a, button, .pfs-text-layer span, .textLayer span, .annotationLayer, .pfs-answer-suggestions') || target.closest('.is-editing')) { this.clear(); return; }
       if (!event.shiftKey && target.closest('.is-answer-field') && !target.closest('[data-resize], [data-edge]')) { this.clear(); return; }
       const field = target.closest('.pdf-form-studio-box')?.querySelector<HTMLElement>('[data-pdf-field]')?.dataset.pdfField;
