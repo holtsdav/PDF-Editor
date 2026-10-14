@@ -74,7 +74,7 @@ export async function loadPdfDocument(bytes: Uint8Array): Promise<PDFDocument> {
   const active = [...entries].filter(([, entry]) => entry.active).sort((a, b) => a[1].offset - b[1].offset);
   /** Parse the indexed header and body without expanding object-stream contents. */
   const parse = (number: number, entry: { offset: number; generation: number }) => {
-    const head = /^(\d+)\s+(\d+)\s+obj\b/.exec(decoder.decode(bytes.subarray(entry.offset, entry.offset + 128)));
+    const head = /^(\d+)[\s\0]+(\d+)[\s\0]+obj\b/.exec(decoder.decode(bytes.subarray(entry.offset, entry.offset + 128)));
     if (!head || Number(head[1]) !== number || Number(head[2]) !== entry.generation) throw new Error('PDF object index does not match the referenced object.');
     const object = PDFObjectParser.forBytes(bytes.subarray(entry.offset + head[0].length), context).parseObject();
     context.assign(PDFRef.of(number, entry.generation), object); return object;

@@ -5,6 +5,8 @@ import type { NativePage, NativePdf, EditorSurface } from '../compat/native-pdf'
 import type { TextSession } from '../pdf/text-session';
 import type { VaultSessions } from '../pdf/vault-sessions';
 import { TextEditor } from './text-editor';
+import { measureTextWords } from './text-geometry';
+import type { TextWord } from '../pdf/marker-text';
 import { renamedPdfPath } from '../pdf/file-name';
 import { decorativeFooterRules, excludeDecorativeFooters } from '../compat/pdf-artifacts';
 import { detectAnswerLines } from '../pdf/answer-lines';
@@ -15,7 +17,7 @@ import { bindSurfaceInput } from './surface-input';
 import type { Rect } from '../pdf/text-engine';
 import type { TextField } from '../pdf/text-engine';
 
-interface PageEntry { native: NativePage; page: PDFPageProxy; canvas: HTMLCanvasElement; text: HTMLElement; links: HTMLElement; version: number; painted: number; queued?: number; released?: boolean; rendering?: RenderTask; textTask?: TextLayer; suggestions?: HTMLElement; candidates?: Rect[] }
+interface PageEntry { native: NativePage; page: PDFPageProxy; canvas: HTMLCanvasElement; text: HTMLElement; links: HTMLElement; version: number; painted: number; textReady?: number; textWords?: TextWord[]; queued?: number; released?: boolean; rendering?: RenderTask; textTask?: TextLayer; suggestions?: HTMLElement; candidates?: Rect[] }
 interface LineScan { generation: number; targets: PageEntry[]; task?: RenderTask }
 type Library = typeof import('pdfjs-dist');
 const FLOAT_EXIT_MS = 110;
@@ -230,7 +232,11 @@ export class PdfSurface extends Component {
         const text = div.createDiv({ cls: 'textLayer pfs-text-layer' });
         const links = div.createDiv({ cls: 'pfs-links' });
         const viewport = page.getViewport({ scale: 1 });
-        entries.push({ native: { div, viewport, number, annotationElements: () => [] }, page, canvas, text, links, version: 0, painted: -1 }); fragment.append(div);
+        const entry: PageEntry = { native: { div, viewport, number, annotationElements: () => [] }, page, canvas, text, links, version: 0, painted: -1, released: true };
+        // Measure only when a snapped marker gesture starts, never during ordinary scrolling.
+        entry.native.getTextWords = () => this.closed || entry.released || entry.textReady !== entry.version ? []
+          : entry.textWords ??= measureTextWords(entry.text, entry.native);
+        entries.push(entry); fragment.append(div);
         if (number % 16 === 0 && number < pdf.numPages) {
           this.message.textContent = `Preparing PDF pages ${number} of ${pdf.numPages}…`;
           await new Promise<void>(resolve => this.root.ownerDocument.defaultView!.setTimeout(resolve, 0));
@@ -271,7 +277,7 @@ export class PdfSurface extends Component {
       const scale = this.scale === 'width' ? Math.min(2, width / base.width) : this.scale;
       const viewport = entry.page.getViewport({ scale, rotation: base.rotation });
       if (entry.version && entry.native.viewport.width === viewport.width && entry.native.viewport.rotation === viewport.rotation) continue;
-      changed = true; entry.version++; entry.rendering?.cancel(); entry.textTask?.cancel(); entry.native.viewport = viewport;
+      changed = true; entry.version++; entry.textReady = undefined; entry.textWords = undefined; entry.rendering?.cancel(); entry.textTask?.cancel(); entry.native.viewport = viewport;
       Object.assign(entry.native.div.style, { width: `${viewport.width}px`, height: `${viewport.height}px` });
       entry.native.div.style.setProperty('--scale-factor', String(scale));
       entry.native.div.style.setProperty('--total-scale-factor', String(scale));
@@ -477,9 +483,10 @@ export class PdfSurface extends Component {
   }
   /** Cancel stale work and release raster, text and page resources without removing document geometry. */
   private releasePage(entry: PageEntry): void {
-    if (entry.released) return;
-    entry.released = true; entry.version++;
-    entry.rendering?.cancel(); entry.textTask?.cancel(); entry.textTask = undefined;
+    if (entry.released && !entry.rendering && !entry.textTask) return;
+    entry.released = true; entry.version++; entry.textReady = undefined; entry.textWords = undefined;
+    const rendering = entry.rendering; entry.rendering = undefined; rendering?.cancel();
+    entry.textTask?.cancel(); entry.textTask = undefined;
     entry.canvas.width = entry.canvas.height = 0; entry.painted = -1;
     entry.text.replaceChildren(); entry.links.replaceChildren(); this.paintedEntries.delete(entry);
     entry.page.cleanup();
@@ -497,17 +504,18 @@ export class PdfSurface extends Component {
     const ratio = Math.min(doc.defaultView!.devicePixelRatio, 2, Math.sqrt(10_000_000 / (viewport.width * viewport.height)));
     const canvas = doc.createElement('canvas'); canvas.className = 'pfs-page-canvas'; canvas.setAttribute('aria-hidden', 'true');
     canvas.width = Math.ceil(viewport.width * ratio); canvas.height = Math.ceil(viewport.height * ratio);
-    let committed = false; entry.released = false;
+    let committed = false;
     this.activeRender = entry;
     try {
       const task = entry.rendering = entry.page.render({ canvasContext: canvas.getContext('2d')!, viewport, annotationMode: 1, transform: [ratio, 0, 0, ratio, 0, 0] });
       try { await task.promise; } finally { if (entry.rendering === task) entry.rendering = undefined; }
       if (this.closed || version !== entry.version || !entry.native.div.isConnected || !this.nearViewport(entry)) return;
-      entry.canvas.replaceWith(canvas); entry.canvas.width = entry.canvas.height = 0; entry.canvas = canvas; committed = true;
+      entry.canvas.replaceWith(canvas); entry.canvas.width = entry.canvas.height = 0; entry.canvas = canvas; committed = true; entry.released = false;
       this.paintedEntries.add(entry);
-      entry.text.replaceChildren(); entry.textTask = new this.library!.TextLayer({ container: entry.text, viewport, textContentSource: entry.page.streamTextContent() });
+      entry.textReady = undefined; entry.textWords = undefined; entry.text.replaceChildren(); entry.textTask = new this.library!.TextLayer({ container: entry.text, viewport, textContentSource: entry.page.streamTextContent() });
       await entry.textTask.render();
       if (this.closed || version !== entry.version || (!this.nearViewport(entry) && !this.selectedTextRange()?.intersectsNode(entry.text))) return;
+      entry.textReady = version;
       this.highlight(entry); entry.links.replaceChildren();
       const annotations = await entry.page.getAnnotations();
       if (this.closed || version !== entry.version || (!this.nearViewport(entry) && !this.selectedTextRange()?.intersectsNode(entry.text))) return;

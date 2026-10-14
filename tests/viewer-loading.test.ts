@@ -368,3 +368,38 @@ test('unloading a viewer releases every retained bitmap and page resource', () =
     assert.equal(f.element.querySelector('.pfs-surface'), null);
   } finally { f.dom.window.close(); }
 });
+
+test('released pages remain released after failed or stale renders and still cancel active rerenders', async () => {
+  for (const outcome of ['failure', 'stale', 'cancel', 'success', 'live-failure']) {
+    const f = fixture(), scroller = f.doc.createElement('div'), div = f.doc.createElement('div'); f.doc.body.append(div);
+    Object.defineProperties(scroller, { clientWidth: { value: 500 }, clientHeight: { value: 700 } });
+    Object.defineProperties(div, { offsetTop: { value: 0 }, offsetHeight: { value: 700 } });
+    const canvases: HTMLCanvasElement[] = []; f.dom.window.HTMLCanvasElement.prototype.getContext = function(this: HTMLCanvasElement) { canvases.push(this); return {}; } as unknown as typeof f.dom.window.HTMLCanvasElement.prototype.getContext;
+    let resolve!: () => void, reject!: (error: Error) => void, cancelled = 0, cleaned = 0;
+    const promise = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
+    const canvas = f.doc.createElement('canvas'), text = f.doc.createElement('div'), links = f.doc.createElement('div'); div.append(canvas, text, links);
+    const live = outcome === 'live-failure'; canvas.width = canvas.height = live ? 20 : 0;
+    const entry = { native: { div, number: 1, viewport: { scale: 1, rotation: 0 } }, canvas, text, links, version: 1, painted: live ? 0 : -1, released: !live,
+      page: { getViewport: () => ({ width: 500, height: 700 }), cleanup: () => { cleaned++; return true; },
+        render: () => ({ promise, cancel: () => { cancelled++; const error = new Error('Cancelled'); error.name = 'RenderingCancelledException'; reject(error); } }),
+        streamTextContent: () => ({}), getAnnotations: async () => [] } };
+    const surface = Object.assign(Object.create(PdfSurface.prototype), { root: f.doc.createElement('div'), scroller, entries: [entry], search: f.doc.createElement('input'), closed: false,
+      paintedEntries: new Set(live ? [entry] : []), library: { TextLayer: class { async render() {} cancel() {} } } });
+    try {
+      const painting = surface.paint(entry, 1);
+      if (outcome.endsWith('failure')) { reject(new Error('Raster failed')); await assert.rejects(painting, /Raster failed/); }
+      else if (outcome === 'cancel') {
+        surface.releasePage(entry); surface.releasePage(entry);
+        await assert.rejects(painting, /Cancelled/); assert.equal(cancelled, 1); assert.equal(cleaned, 1, 'release stays idempotent during cancellation');
+      } else { if (outcome === 'stale') entry.version++; resolve(); await painting; }
+      assert.equal(entry.released, outcome !== 'success' && !live, outcome);
+      assert.equal(surface.activeRender, undefined);
+      if (outcome === 'success') { assert(entry.canvas.width > 0); assert(surface.paintedEntries.has(entry)); }
+      else {
+        assert.equal(canvases[0]!.width, 0, 'an uncommitted raster is disposed');
+        assert.equal(entry.canvas, canvas, 'failed painting does not replace the page bitmap');
+        assert.equal(canvas.width, live ? 20 : 0, 'existing committed resources are retained');
+      }
+    } finally { f.dom.window.close(); }
+  }
+});

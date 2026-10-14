@@ -74,6 +74,7 @@ export class TextEditor extends Component {
   private smoothPen = true;
   private holdShapes = false;
   private holdHighlighter = true;
+  private snapToText = false;
   private loadError = '';
   private loaded = true;
   private fontSize = 14;
@@ -356,7 +357,7 @@ export class TextEditor extends Component {
     this.closePopover(); this.selection?.cancel(); this.selection?.clear();
     const retain = tool === 'select' || tool === 'text' ? this.activeBox : undefined;
     this.endTextEditing(retain);
-    for (const entry of this.layers.values()) { entry.cancelPlacement?.(); entry.ink.finishPending(); for (const control of entry.controls.values()) control.cancel?.(); }
+    for (const entry of this.layers.values()) { entry.cancelPlacement?.(); entry.ink.cancel(); for (const control of entry.controls.values()) control.cancel?.(); }
     this.releaseFocus(); this.focused = undefined;
     const active = this.native.element.ownerDocument.activeElement;
     if (active instanceof this.native.element.ownerDocument.defaultView!.HTMLElement && [...this.layers.values()].some(entry => entry.layer.contains(active))) active.blur();
@@ -694,7 +695,7 @@ export class TextEditor extends Component {
     } catch (error) { this.showError(error); }
   }
   private rememberPreferences(): void {
-    void this.sessions.updatePreferences({ ...this.sessions.preferences, letterSpacing: this.letterSpacing, lineSpacing: this.lineSpacing, textAlignment: this.textAlignment, fontSize: this.fontSize, textFamily: this.textFamily, textColor: this.textColor, penColor: this.penColor, markerColor: this.markerColor, penWidth: this.penWidth, markerWidth: this.markerWidth, smoothPen: this.smoothPen, holdShapes: this.holdShapes, holdHighlighter: this.holdHighlighter }).catch(error => this.showError(error));
+    void this.sessions.updatePreferences({ ...this.sessions.preferences, letterSpacing: this.letterSpacing, lineSpacing: this.lineSpacing, textAlignment: this.textAlignment, fontSize: this.fontSize, textFamily: this.textFamily, textColor: this.textColor, penColor: this.penColor, markerColor: this.markerColor, penWidth: this.penWidth, markerWidth: this.markerWidth, smoothPen: this.smoothPen, holdShapes: this.holdShapes, holdHighlighter: this.holdHighlighter, snapToText: this.snapToText }).catch(error => this.showError(error));
   }
   private closePopover(): void { if (this.popover) { this.removeChild(this.popover); this.popover = undefined; } this.propertiesButton.setAttribute('aria-expanded', 'false'); }
   private openProperties(): void {
@@ -767,7 +768,8 @@ export class TextEditor extends Component {
       changeColor: color => { if (kind === 'marker') this.markerColor = color; else this.penColor = color; this.rememberPreferences(); this.updateStatus(); },
       widths: { values: kind === 'marker' ? [8, 14, 22, 30] : [1, 2, 4, 6], value: kind === 'marker' ? this.markerWidth : this.penWidth,
         change: value => { if (kind === 'marker') this.markerWidth = value; else this.penWidth = value; this.rememberPreferences(); this.updateStatus(); } }, close: () => this.closePopover(),
-      toggles: kind === 'marker' ? [{ label: 'Hold for straight line', description: 'Pause at the end before lifting.', value: this.holdHighlighter, change: value => { this.holdHighlighter = value; this.rememberPreferences(); } }]
+      toggles: kind === 'marker' ? [{ label: 'Snap to text', description: 'Fit crossed words and lines, using at least the selected thickness. Falls back to freehand when text geometry is unavailable.', value: this.snapToText, change: value => { this.snapToText = value; this.rememberPreferences(); } },
+        { label: 'Hold for straight line', description: 'Pause at the end before lifting.', value: this.holdHighlighter, change: value => { this.holdHighlighter = value; this.rememberPreferences(); } }]
         : [{ label: 'Smooth ink', description: 'Reduce wobble while keeping your handwriting.', value: this.smoothPen, change: value => { this.smoothPen = value; this.rememberPreferences(); } },
           { label: 'Draw & hold shapes', description: 'Lines, rectangles, triangles, circles, ellipses and arrows. Keep holding and drag to resize.', value: this.holdShapes, change: value => { this.holdShapes = value; this.rememberPreferences(); } }]
     })); } finally { this.openingPopover = false; }
@@ -931,7 +933,7 @@ export class TextEditor extends Component {
         page.div.append(layer);
         const ink = this.addChild(new InkLayer(page, layer, this.session, {
           tool: () => this.tool, width: kind => kind === 'marker' ? this.markerWidth : this.penWidth, color: kind => kind === 'marker' ? this.markerColor : this.penColor, selected: () => this.selectedStroke,
-          smooth: () => this.smoothPen, shapes: () => this.holdShapes, straightHold: () => this.holdHighlighter,
+          smooth: () => this.smoothPen, shapes: () => this.holdShapes, straightHold: () => this.holdHighlighter, snapText: () => this.snapToText,
           select: id => { if (id) this.clearBrowserSelection(); this.selection?.clear(); this.selectedStroke = id; this.selected = undefined; this.focused = undefined; this.updateStatus(); this.refresh(); },
           start: () => {
             this.focused = undefined; this.selected = undefined; this.selectedStroke = undefined;
@@ -1321,7 +1323,7 @@ export class TextEditor extends Component {
   onunload(): void {
     this.closePopover(); this.selection?.cancel(); this.selection?.clear();
     this.endTextEditing();
-    for (const entry of this.layers.values()) entry.ink.finishPending();
+    for (const entry of this.layers.values()) entry.ink.cancel();
     this.loaded = false;
     this.releaseFocus();
     if (this.timer !== undefined) this.native.element.ownerDocument.defaultView!.clearTimeout(this.timer);

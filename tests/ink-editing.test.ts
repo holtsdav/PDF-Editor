@@ -116,3 +116,45 @@ test('stroke simplification preserves endpoints, corners and short tap paths', (
   assert.deepEqual(simplifyStroke([[0, 0], [1, 0], [1, 2], [2, 2]], 0.1), [[0, 0], [1, 0], [1, 2], [2, 2]]);
   assert.deepEqual(simplifyStroke([[5, 5]]), [[5, 5]]);
 });
+
+test('resized ink and snapped rows retain IDs, appearances and forms after undo, save and reopen', async () => {
+  const file = await fixture(true), session = await TextSession.open(file.store, font);
+  const { resizeInkPoints } = await import('../src/pdf/ink-geometry.ts');
+  const { snapTextBands } = await import('../src/pdf/marker-text.ts');
+  const pen = session.addStroke(1, 'scribble', [[100, 300], [150, 340], [200, 300]], 3, [0.2, 0.4, 0.6]);
+  await session.save(); const before = structuredClone(pen), owner = {};
+  const release = session.beginInteraction(); assert(session.beginInkAction(owner));
+  const target = [before.rect[0], before.rect[1], before.rect[2] + 80, before.rect[3] + 60] as [number, number, number, number];
+  session.resizeStroke(pen.id, resizeInkPoints(pen.points, pen.rect, target), owner);
+  const saving = session.saveWhenIdle(); await setImmediate(); assert.equal(file.writes(), 1);
+  session.finishInkAction(false, owner); release(); await saving;
+  const resized = structuredClone(session.snapshot.strokes[0]!);
+  assert.equal(resized.width, before.width); assert.deepEqual(resized.color, before.color); assert.equal(resized.opacity, before.opacity);
+  session.undoStroke(); assert.deepEqual(session.snapshot.strokes[0]!.points, before.points);
+  session.redoStroke(); assert.deepEqual(session.snapshot.strokes[0]!.points, resized.points);
+  assert(session.beginInkAction(owner));
+  const bands = snapTextBands([[55, 650], [180, 650], [180, 620], [55, 620]], [
+    { start: [50, 650], end: [200, 650], height: 14, order: 0 }, { start: [50, 620], end: [200, 620], height: 14, order: 1 }
+  ]);
+  const ids = bands.map(band => session.addStroke(1, 'marker', band.points, band.width, [1, 0.84, 0], owner).id);
+  session.finishInkAction(false, owner); session.undoStroke(); assert.equal(session.snapshot.strokes.length, 1);
+  session.redoStroke(); await session.save();
+  const reopened = await TextSession.open(file.store, font);
+  assert.deepEqual(reopened.snapshot.strokes.map(s => s.id), [pen.id, ...ids]);
+  assert.deepEqual(reopened.snapshot.strokes[0]!.points, resized.points); assert.equal(reopened.canUndoStroke, false);
+  assert.throws(() => reopened.resizeStroke(pen.id, [[NaN, 10]]), /Invalid/);
+  assert.throws(() => reopened.resizeStroke(pen.id, [[10000, 10]]), /Invalid/); assert.equal(reopened.dirty, false);
+  const task = getDocument({ data: file.bytes().slice(), standardFontDataUrl });
+  try {
+    const page = await (await task.promise).getPage(1), annotations = await page.getAnnotations();
+    for (const stroke of reopened.snapshot.strokes) {
+      const annotation = annotations.find(a => a.id === stroke.annotationId)!;
+      assert(annotation?.hasAppearance); assert.deepEqual([...annotation.inkLists[0]], stroke.points.flat());
+      assert.equal(annotation.borderStyle.width, stroke.width); assert.equal(annotation.opacity, stroke.opacity);
+    }
+    assert(annotations.some(a => a.subtype === 'Widget' && a.fieldValue === 'Original'));
+    assert(annotations.some(a => a.subtype === 'Highlight'));
+    const operators = await page.getOperatorList({ annotationMode: AnnotationMode.ENABLE });
+    assert(operators.fnArray.some((op, i) => op === OPS.constructPath && operators.argsArray[i][0] === OPS.stroke));
+  } finally { await task.destroy(); }
+});

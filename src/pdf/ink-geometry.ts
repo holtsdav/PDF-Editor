@@ -1,4 +1,31 @@
 import type { Point } from './ink-engine.ts';
+import type { Rect } from './text-engine.ts';
+import { transformBox } from './box-geometry.ts';
+import type { ResizeHandle } from './box-geometry.ts';
+
+/** Shift-corner resizing retains the aspect ratio and the opposite anchor, even at page edges. */
+export function resizeInkFrame(rect: Rect, bounds: Rect, delta: Point, handle: ResizeHandle, minimum: number, proportional = false): Rect {
+  const next = transformBox(rect, bounds, delta, handle, [minimum, minimum]);
+  if (!proportional || handle.length !== 2) return next;
+  const left = handle.includes('w'), top = handle.includes('n');
+  const x = left ? rect[2] : rect[0], y = top ? rect[3] : rect[1], width = rect[2] - rect[0], height = rect[3] - rect[1];
+  const sx = (next[2] - next[0]) / width, sy = (next[3] - next[1]) / height;
+  const requested = Math.abs(sx - 1) >= Math.abs(sy - 1) ? sx : sy;
+  const maximum = Math.min((left ? x - bounds[0] : bounds[2] - x) / width, (top ? y - bounds[1] : bounds[3] - y) / height);
+  const scale = Math.min(maximum, Math.max(Math.min(maximum, Math.max(minimum / width, minimum / height)), requested));
+  return [left ? x - width * scale : x, top ? y - height * scale : y, left ? x : x + width * scale, top ? y : y + height * scale];
+}
+
+/** Scale centerline geometry; fixed-width caps retain their space inside the selected frame. */
+export function resizeInkPoints(points: Point[], from: Rect, to: Rect): Point[] {
+  const xs = points.map(point => point[0]), ys = points.map(point => point[1]);
+  const min: Point = [Math.min(...xs), Math.min(...ys)], max: Point = [Math.max(...xs), Math.max(...ys)];
+  return points.map(point => point.map((value, axis) => {
+    const low = to[axis]! + min[axis]! - from[axis]!, high = to[axis + 2]! - (from[axis + 2]! - max[axis]!);
+    const span = max[axis]! - min[axis]!;
+    return span > 0.001 ? low + (value - min[axis]!) / span * Math.max(0, high - low) : (low + high) / 2;
+  }) as Point);
+}
 
 /** Iterative Ramer–Douglas–Peucker keeps endpoints and corners without a recursive stack. */
 export function simplifyStroke(points: Point[], tolerance = 0.3): Point[] {

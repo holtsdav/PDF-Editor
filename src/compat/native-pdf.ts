@@ -1,3 +1,4 @@
+import type { TextWord } from '../pdf/marker-text';
 import { App, TFile } from 'obsidian';
 import type { Rect } from '../pdf/text-engine';
 
@@ -9,7 +10,7 @@ export interface PageViewport {
   convertToPdfPoint(x: number, y: number): number[];
   convertToViewportRectangle(rect: number[]): number[];
 }
-export interface NativePage { div: HTMLElement; viewport: PageViewport; number: number; annotationElements(id: string): HTMLElement[] }
+export interface NativePage { div: HTMLElement; viewport: PageViewport; number: number; getTextWords?(): TextWord[]; annotationElements(id: string): HTMLElement[] }
 export interface NativePdf {
   identity: object;
   element: HTMLElement;
