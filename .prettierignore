@@ -1,0 +1,10 @@
+node_modules/
+tmp/
+output/
+dist/
+coverage/
+main.js
+main.js.map
+assets/
+LICENSE
+THIRD_PARTY_NOTICES.txt

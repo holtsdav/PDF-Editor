@@ -8,8 +8,12 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    files: ['src/**/*.ts', 'tests/**/*.ts'],
-    languageOptions: { globals: { ...globals.browser, ...globals.node } }
+    files: ['src/**/*.ts', 'tests/**/*.ts', 'scripts/**/*.mjs', '*.mjs'],
+    languageOptions: { globals: { ...globals.browser, ...globals.node } },
+    rules: {
+      curly: ['error', 'all'],
+      'one-var': ['error', 'never'],
+    },
   },
   {
     files: ['src/**/*.ts'],
@@ -17,7 +21,7 @@ export default tseslint.config(
     rules: {
       'obsidianmd/commands/no-plugin-id-in-command-id': 'error',
       'obsidianmd/commands/no-plugin-name-in-command-name': 'error',
-      'obsidianmd/no-static-styles-assignment': 'error'
-    }
-  }
+      'obsidianmd/no-static-styles-assignment': 'error',
+    },
+  },
 );

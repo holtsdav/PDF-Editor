@@ -1,30 +1,52 @@
 import assert from 'node:assert/strict';
 import { readFile, stat } from 'node:fs/promises';
 
-const readJson = async path => JSON.parse(await readFile(path, 'utf8'));
+const readJson = async (path) => JSON.parse(await readFile(path, 'utf8'));
 const [manifest, pkg, versions] = await Promise.all([
-  readJson('manifest.json'), readJson('package.json'), readJson('versions.json')
+  readJson('manifest.json'),
+  readJson('package.json'),
+  readJson('versions.json'),
 ]);
 assert.match(manifest.id, /^[a-z]+(?:-[a-z]+)*$/);
-assert.equal(manifest.id, 'pdf-editor', 'The installed identity must match the published plugin ID.');
+assert.equal(
+  manifest.id,
+  'pdf-editor',
+  'The installed identity must match the published plugin ID.',
+);
 assert(!manifest.id.includes('obsidian') && !manifest.id.endsWith('plugin'));
 assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
 assert.match(manifest.minAppVersion, /^\d+\.\d+\.\d+$/);
 assert.equal(pkg.version, manifest.version, 'Package and manifest versions must agree.');
-assert.equal(versions[manifest.version], manifest.minAppVersion, 'Compatibility mapping must agree.');
+assert.equal(
+  versions[manifest.version],
+  manifest.minAppVersion,
+  'Compatibility mapping must agree.',
+);
 assert.equal(typeof manifest.isDesktopOnly, 'boolean');
 assert.equal(typeof manifest.author, 'string');
 assert(manifest.author.length > 0 && manifest.name.length > 0);
 assert(!/obsidian/i.test(manifest.description), 'Manifest description must not mention Obsidian.');
 assert(manifest.description.length <= 250 && manifest.description.endsWith('.'));
 const tag = process.env.GITHUB_REF_TYPE === 'tag' ? process.env.GITHUB_REF_NAME : undefined;
-if (tag) assert.equal(tag, manifest.version, 'Release tag must equal manifest version, with no v prefix.');
+if (tag) {
+  assert.equal(tag, manifest.version, 'Release tag must equal manifest version, with no v prefix.');
+}
 for (const file of ['main.js', 'styles.css', 'README.md', 'LICENSE']) {
   assert((await stat(file)).size > 0, `${file} must exist and contain content.`);
 }
 const bundle = await readFile('main.js', 'utf8');
 assert(bundle.includes('module.exports'), 'Obsidian needs a CommonJS bundle.');
-const runtimeRequires = [...bundle.matchAll(/require\(["']([^"']+)["']\)/g)].map(match => match[1]);
-assert(runtimeRequires.filter(name => name.startsWith('node:')).every(name => ['node:fs/promises', 'node:path'].includes(name)), 'Only the external-file cleanup builtins may remain external Node APIs.');
-assert(!/require\(["'](?:fs["']|pdfjs-dist|pdf-lib)/.test(bundle), 'Runtime bundle must not depend on development-only PDF libraries.');
+const runtimeRequires = [...bundle.matchAll(/require\(["']([^"']+)["']\)/g)].map(
+  (match) => match[1],
+);
+assert(
+  runtimeRequires
+    .filter((name) => name.startsWith('node:'))
+    .every((name) => ['node:fs/promises', 'node:path'].includes(name)),
+  'Only the external-file cleanup builtins may remain external Node APIs.',
+);
+assert(
+  !/require\(["'](?:fs["']|pdfjs-dist|pdf-lib)/.test(bundle),
+  'Runtime bundle must not depend on development-only PDF libraries.',
+);
 console.log(`Validated ${manifest.name} ${manifest.version} (${manifest.id}).`);

@@ -8,9 +8,13 @@ export class InteractionGate {
     this.active++;
     let released = false;
     return () => {
-      if (released) return;
+      if (released) {
+        return;
+      }
       released = true;
-      if (--this.active === 0) this.wake();
+      if (--this.active === 0) {
+        this.wake();
+      }
     };
   }
 
@@ -18,15 +22,22 @@ export class InteractionGate {
     // Recheck after waking: moving directly between two inputs briefly blurs
     // the first before focus enters the second in the same browser event.
     while (this.active && generation === this.generation) {
-      await new Promise<void>(resolve => this.waiters.add(resolve));
+      await new Promise<void>((resolve) => this.waiters.add(resolve));
     }
   }
 
-  isIdle(generation: number): boolean { return !this.active || generation !== this.generation; }
+  isIdle(generation: number): boolean {
+    return !this.active || generation !== this.generation;
+  }
 
-  flush(): void { this.generation++; this.wake(); }
+  flush(): void {
+    this.generation++;
+    this.wake();
+  }
   private wake(): void {
-    for (const resolve of this.waiters) resolve();
+    for (const resolve of this.waiters) {
+      resolve();
+    }
     this.waiters.clear();
   }
 }

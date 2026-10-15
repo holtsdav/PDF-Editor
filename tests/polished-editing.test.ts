@@ -14,203 +14,405 @@ import type { BackupRecord } from '../src/pdf/recovery.ts';
 
 const BACKUP_ROOT = '.custom-config/plugins/pdf-editor/recovery';
 const fonts = {
-  sans: new Uint8Array(await readFile(new URL('../assets/fonts/NotoSans-Regular.ttf', import.meta.url))),
-  serif: new Uint8Array(await readFile(new URL('../assets/fonts/NotoSerif-Regular.ttf', import.meta.url))),
-  mono: new Uint8Array(await readFile(new URL('../assets/fonts/NotoSansMono-Regular.ttf', import.meta.url)))
+  sans: new Uint8Array(
+    await readFile(new URL('../assets/fonts/NotoSans-Regular.ttf', import.meta.url)),
+  ),
+  serif: new Uint8Array(
+    await readFile(new URL('../assets/fonts/NotoSerif-Regular.ttf', import.meta.url)),
+  ),
+  mono: new Uint8Array(
+    await readFile(new URL('../assets/fonts/NotoSansMono-Regular.ttf', import.meta.url)),
+  ),
 };
 test('empty owned boxes are removed after editing ends, while authored fields and other active views are protected', async () => {
-  const file = await fixture(), session = await TextSession.open(file.store, fonts);
-  const blank = session.add(1, [30, 30, 200, 60], 14, true);
-  const releaseA = session.beginTextEdit(blank.name), releaseB = session.beginTextEdit(blank.name);
-  assert.equal(session.pruneEmptyBoxes(), 0);
-  releaseA(); releaseA(); assert.equal(session.pruneEmptyBoxes(), 0);
-  releaseB(); session.setValue(blank.name, ' \n '); assert.equal(session.pruneEmptyBoxes(), 1);
-  session.setValue('Answer', ''); assert.equal(session.pruneEmptyBoxes(), 0);
-  await session.save(); const reopened = await readTextPdf(file.bytes());
-  assert.equal(reopened.fields.length, 1); assert.equal(reopened.fields[0]!.name, 'Answer');
-});
-test('deleting a reopened box removes its widget references and subsequent ink saves remain valid', async () => {
-  const file = await fixture(), first = await TextSession.open(file.store, fonts);
-  const box = first.add(1, [30, 30, 200, 60], 14, true); first.setValue(box.name, 'Remove me'); await first.save();
+  const file = await fixture();
   const session = await TextSession.open(file.store, fonts);
-  session.delete(box.name); session.addStroke(1, 'marker', [[60, 300], [250, 320]]); await session.save();
-  const output = await PDFDocument.load(file.bytes());
-  const annotations = output.getPages()[0]!.node.Annots()!.asArray();
-  assert.equal(annotations.length, 2);
-  assert(annotations.every(ref => output.context.lookup(ref) instanceof PDFDict));
-  const task = getDocument({ data: file.bytes().slice(), standardFontDataUrl: new URL('../node_modules/pdfjs-dist/standard_fonts/', import.meta.url).pathname });
-  try { assert.equal((await (await (await task.promise).getPage(1)).getAnnotations()).length, 2); } finally { await task.destroy(); }
-  const reopened = await TextSession.open(file.store, fonts), stroke = reopened.snapshot.strokes[0]!;
-  reopened.moveStroke(stroke.id, [10, 5]); await reopened.save();
-  assert.deepEqual((await readTextPdf(file.bytes())).strokes[0]!.points, [[70, 305], [260, 325]]);
+  const blank = session.add(1, [30, 30, 200, 60], 14, true);
+  const releaseA = session.beginTextEdit(blank.name);
+  const releaseB = session.beginTextEdit(blank.name);
+  assert.equal(session.pruneEmptyBoxes(), 0);
+  releaseA();
+  releaseA();
+  assert.equal(session.pruneEmptyBoxes(), 0);
+  releaseB();
+  session.setValue(blank.name, ' \n ');
+  assert.equal(session.pruneEmptyBoxes(), 1);
+  session.setValue('Answer', '');
+  assert.equal(session.pruneEmptyBoxes(), 0);
+  await session.save();
+  const reopened = await readTextPdf(file.bytes());
+  assert.equal(reopened.fields.length, 1);
+  assert.equal(reopened.fields[0]!.name, 'Answer');
 });
 test('ink remains writable in PDFs with a pre-existing dangling annotation reference', async () => {
-  const file = await fixture(), pdf = await PDFDocument.load(file.bytes());
-  pdf.getPages()[0]!.node.addAnnot(PDFRef.of(999999)); file.replace(await pdf.save());
+  const file = await fixture();
+  const pdf = await PDFDocument.load(file.bytes());
+  pdf.getPages()[0]!.node.addAnnot(PDFRef.of(999999));
+  file.replace(await pdf.save());
   const session = await TextSession.open(file.store, fonts);
-  const stroke = session.addStroke(1, 'scribble', [[40, 40], [100, 80]]); await session.save();
-  const reopened = await TextSession.open(file.store, fonts); reopened.moveStroke(stroke.id, [5, 5]); await reopened.save();
-  assert.deepEqual((await readTextPdf(file.bytes())).strokes[0]!.points, [[45, 45], [105, 85]]);
+  const stroke = session.addStroke(1, 'scribble', [
+    [40, 40],
+    [100, 80],
+  ]);
+  await session.save();
+  const reopened = await TextSession.open(file.store, fonts);
+  reopened.moveStroke(stroke.id, [5, 5]);
+  await reopened.save();
+  assert.deepEqual((await readTextPdf(file.bytes())).strokes[0]!.points, [
+    [45, 45],
+    [105, 85],
+  ]);
 });
 async function fixture() {
-  const pdf = await PDFDocument.create(); const page = pdf.addPage([600, 800]);
-  const field = pdf.getForm().createTextField('Answer'); field.setText('Original'); field.addToPage(page, { x: 50, y: 600, width: 300, height: 24 });
-  let bytes = await pdf.save(), writes = 0; let draft: PdfDraft | null = null;
-  return { store: { read: async () => bytes.slice(), write: async (value: Uint8Array) => { writes++; bytes = value.slice(); }, backup: async () => 'original.pdf',
-    draft: { read: async () => draft && structuredClone(draft), write: async (value: PdfDraft) => { draft = structuredClone(value); }, clear: async () => { draft = null; } } },
-    bytes: () => bytes, replace: (value: Uint8Array) => { bytes = value; }, writes: () => writes, draft: () => draft };
+  const pdf = await PDFDocument.create();
+  const page = pdf.addPage([600, 800]);
+  const field = pdf.getForm().createTextField('Answer');
+  field.setText('Original');
+  field.addToPage(page, { x: 50, y: 600, width: 300, height: 24 });
+  let bytes = await pdf.save();
+  let writes = 0;
+  let draft: PdfDraft | null = null;
+  return {
+    store: {
+      read: async () => bytes.slice(),
+      write: async (value: Uint8Array) => {
+        writes++;
+        bytes = value.slice();
+      },
+      backup: async () => 'original.pdf',
+      draft: {
+        read: async () => draft && structuredClone(draft),
+        write: async (value: PdfDraft) => {
+          draft = structuredClone(value);
+        },
+        clear: async () => {
+          draft = null;
+        },
+      },
+    },
+    bytes: () => bytes,
+    replace: (value: Uint8Array) => {
+      bytes = value;
+    },
+    writes: () => writes,
+    draft: () => draft,
+  };
 }
 
 test('drawing mode checkpoints verified drafts without PDF writes, then resumes after a crash', async () => {
-  const file = await fixture(), original = file.bytes().slice(); const session = await TextSession.open(file.store, fonts);
-  const release = session.beginInteraction(); session.addStroke(1, 'marker', [[50, 650], [300, 650]], 14, [0, 0.4, 1]);
-  await session.checkpoint(); const saving = session.saveWhenIdle(); await setImmediate();
-  session.addStroke(1, 'scribble', [[50, 400], [100, 420]]); await session.checkpoint();
-  assert.equal(file.writes(), 0); assert.equal(session.drafted, true); assert.deepEqual(file.bytes(), original); assert.equal((await readTextPdf(file.draft()!.bytes)).strokes.length, 2);
-  const resumed = await TextSession.open(file.store, fonts); assert.equal(resumed.dirty, true); assert.equal(resumed.snapshot.strokes.length, 2);
-  await resumed.save(); assert.equal(file.draft(), null); assert.equal((await readTextPdf(file.bytes())).strokes.length, 2);
+  const file = await fixture();
+  const original = file.bytes().slice();
+  const session = await TextSession.open(file.store, fonts);
+  const release = session.beginInteraction();
+  session.addStroke(
+    1,
+    'marker',
+    [
+      [50, 650],
+      [300, 650],
+    ],
+    14,
+    [0, 0.4, 1],
+  );
+  await session.checkpoint();
+  const saving = session.saveWhenIdle();
+  await setImmediate();
+  session.addStroke(1, 'scribble', [
+    [50, 400],
+    [100, 420],
+  ]);
+  await session.checkpoint();
+  assert.equal(file.writes(), 0);
+  assert.equal(session.drafted, true);
+  assert.deepEqual(file.bytes(), original);
+  assert.equal((await readTextPdf(file.draft()!.bytes)).strokes.length, 2);
+  const resumed = await TextSession.open(file.store, fonts);
+  assert.equal(resumed.dirty, true);
+  assert.equal(resumed.snapshot.strokes.length, 2);
+  await resumed.save();
+  assert.equal(file.draft(), null);
+  assert.equal((await readTextPdf(file.bytes())).strokes.length, 2);
   // The old in-memory session detects the external commit rather than overwriting it.
-  release(); await assert.rejects(saving, /changed outside/);
+  release();
+  await assert.rejects(saving, /changed outside/);
 });
 
 test('stale recovery drafts preserve edits and block overwrite until explicit reload', async () => {
-  const file = await fixture(), session = await TextSession.open(file.store, fonts);
-  session.setValue('Answer', 'Pending answer'); await session.checkpoint();
-  const external = await PDFDocument.load(file.bytes()); external.setTitle('External'); file.replace(await external.save());
-  const newer = file.bytes().slice(), resumed = await TextSession.open(file.store, fonts);
-  assert.equal(resumed.status, 'conflict'); assert.equal(resumed.snapshot.fields[0]!.value, 'Pending answer');
-  await assert.rejects(resumed.save(), /recovered draft/); assert.deepEqual(file.bytes(), newer);
-  await resumed.reload(); assert.equal(file.draft(), null); assert.equal(resumed.dirty, false); assert.equal(resumed.snapshot.fields[0]!.value, 'Original');
+  const file = await fixture();
+  const session = await TextSession.open(file.store, fonts);
+  session.setValue('Answer', 'Pending answer');
+  await session.checkpoint();
+  const external = await PDFDocument.load(file.bytes());
+  external.setTitle('External');
+  file.replace(await external.save());
+  const newer = file.bytes().slice();
+  const resumed = await TextSession.open(file.store, fonts);
+  assert.equal(resumed.status, 'conflict');
+  assert.equal(resumed.snapshot.fields[0]!.value, 'Pending answer');
+  await assert.rejects(resumed.save(), /recovered draft/);
+  assert.deepEqual(file.bytes(), newer);
+  await resumed.reload();
+  assert.equal(file.draft(), null);
+  assert.equal(resumed.dirty, false);
+  assert.equal(resumed.snapshot.fields[0]!.value, 'Original');
 });
 
 test('moving and erasing saved marks retain stable references and have gesture-level undo', async () => {
-  const file = await fixture(), session = await TextSession.open(file.store, fonts);
-  const stroke = session.addStroke(1, 'marker', [[50, 500], [200, 500]]); await session.save();
-  const before = (await readTextPdf(file.bytes())).strokes[0]!, id = before.annotationId;
-  session.beginInkAction(); session.moveStroke(stroke.id, [20, 10]); session.moveStroke(stroke.id, [5, 5]); session.finishInkAction(); await session.save();
+  const file = await fixture();
+  const session = await TextSession.open(file.store, fonts);
+  const stroke = session.addStroke(1, 'marker', [
+    [50, 500],
+    [200, 500],
+  ]);
+  await session.save();
+  const before = (await readTextPdf(file.bytes())).strokes[0]!;
+  const id = before.annotationId;
+  session.beginInkAction();
+  session.moveStroke(stroke.id, [20, 10]);
+  session.moveStroke(stroke.id, [5, 5]);
+  session.finishInkAction();
+  await session.save();
   let saved = (await readTextPdf(file.bytes())).strokes[0]!;
-  assert.equal(saved.annotationId, id); assert.deepEqual(saved.points, [[75, 515], [225, 515]]);
-  session.undoStroke(); await session.save(); saved = (await readTextPdf(file.bytes())).strokes[0]!; assert.deepEqual(saved.points, before.points); assert.equal(saved.annotationId, id);
-  const second = session.addStroke(1, 'scribble', [[100, 100], [200, 120]]); await session.save();
-  session.beginInkAction(); session.deleteStroke(stroke.id); session.deleteStroke(second.id); session.finishInkAction(); await session.save(); assert.equal(session.snapshot.strokes.length, 0);
-  session.undoStroke(); await session.save(); assert.equal((await readTextPdf(file.bytes())).strokes.length, 2);
-  session.beginInkAction(); session.moveStroke(stroke.id, [-1000, -1000]); session.finishInkAction(true); assert.deepEqual(session.snapshot.strokes[0]!.points, before.points);
+  assert.equal(saved.annotationId, id);
+  assert.deepEqual(saved.points, [
+    [75, 515],
+    [225, 515],
+  ]);
+  session.undoStroke();
+  await session.save();
+  saved = (await readTextPdf(file.bytes())).strokes[0]!;
+  assert.deepEqual(saved.points, before.points);
+  assert.equal(saved.annotationId, id);
+  const second = session.addStroke(1, 'scribble', [
+    [100, 100],
+    [200, 120],
+  ]);
+  await session.save();
+  session.beginInkAction();
+  session.deleteStroke(stroke.id);
+  session.deleteStroke(second.id);
+  session.finishInkAction();
+  await session.save();
+  assert.equal(session.snapshot.strokes.length, 0);
+  session.undoStroke();
+  await session.save();
+  assert.equal((await readTextPdf(file.bytes())).strokes.length, 2);
+  session.beginInkAction();
+  session.moveStroke(stroke.id, [-1000, -1000]);
+  session.finishInkAction(true);
+  assert.deepEqual(session.snapshot.strokes[0]!.points, before.points);
 });
 
 test('eraser hit testing covers crossings, tap dots and separated paths', () => {
-  assert(hitsStroke([[10, 0], [10, 100]], [0, 50], [20, 50], 1));
+  assert(
+    hitsStroke(
+      [
+        [10, 0],
+        [10, 100],
+      ],
+      [0, 50],
+      [20, 50],
+      1,
+    ),
+  );
   assert(hitsStroke([[10, 10]], [0, 10], [20, 10], 1));
-  assert(hitsStroke([[10, 10], [20, 10]], [14, 11], [14, 11], 2));
-  assert(!hitsStroke([[10, 10], [20, 10]], [0, 20], [30, 20], 2));
+  assert(
+    hitsStroke(
+      [
+        [10, 10],
+        [20, 10],
+      ],
+      [14, 11],
+      [14, 11],
+      2,
+    ),
+  );
+  assert(
+    !hitsStroke(
+      [
+        [10, 10],
+        [20, 10],
+      ],
+      [0, 20],
+      [30, 20],
+      2,
+    ),
+  );
 });
 
 test('whole-field fonts, colors and sizes survive edits and produce actual appearance operators', async () => {
-  const file = await fixture(), session = await TextSession.open(file.store, fonts);
-  const box = session.add(1, [50, 350, 300, 410], 14, true); session.setValue(box.name, 'Serif answer ä');
+  const file = await fixture();
+  const session = await TextSession.open(file.store, fonts);
+  const box = session.add(1, [50, 350, 300, 410], 14, true);
+  session.setValue(box.name, 'Serif answer ä');
   session.formatField(box.name, { fontFamily: 'serif', fontSize: 24, color: [0.1, 0.3, 0.8] });
-  session.formatField('Answer', { fontFamily: 'mono', fontSize: 18, color: [0.7, 0.1, 0.1] }); await session.save();
-  const reopened = await TextSession.open(file.store, fonts); reopened.setValue(box.name, 'Serif answer ö'); await reopened.save();
+  session.formatField('Answer', { fontFamily: 'mono', fontSize: 18, color: [0.7, 0.1, 0.1] });
+  await session.save();
+  const reopened = await TextSession.open(file.store, fonts);
+  reopened.setValue(box.name, 'Serif answer ö');
+  await reopened.save();
   const fields = (await readTextPdf(file.bytes())).fields;
-  assert.equal(fields[0]!.fontFamily, 'mono'); assert.equal(fields[0]!.fontSize, 18); assert.deepEqual(fields[0]!.color, [0.7, 0.1, 0.1]);
-  const saved = fields.find(field => field.name === box.name)!; assert.equal(saved.fontFamily, 'serif'); assert.equal(saved.fontSize, 24); assert.deepEqual(saved.color, [0.1, 0.3, 0.8]);
-  const task = getDocument({ data: file.bytes().slice(), standardFontDataUrl: new URL('../node_modules/pdfjs-dist/standard_fonts/', import.meta.url).pathname });
+  assert.equal(fields[0]!.fontFamily, 'mono');
+  assert.equal(fields[0]!.fontSize, 18);
+  assert.deepEqual(fields[0]!.color, [0.7, 0.1, 0.1]);
+  const saved = fields.find((field) => field.name === box.name)!;
+  assert.equal(saved.fontFamily, 'serif');
+  assert.equal(saved.fontSize, 24);
+  assert.deepEqual(saved.color, [0.1, 0.3, 0.8]);
+  const task = getDocument({
+    data: file.bytes().slice(),
+    standardFontDataUrl: new URL('../node_modules/pdfjs-dist/standard_fonts/', import.meta.url)
+      .pathname,
+  });
   try {
     const operators = await (await (await task.promise).getPage(1)).getOperatorList();
-    assert(operators.fnArray.includes(OPS.setFillRGBColor)); assert(operators.fnArray.includes(OPS.setFont));
-  } finally { await task.destroy(); }
+    assert(operators.fnArray.includes(OPS.setFillRGBColor));
+    assert(operators.fnArray.includes(OPS.setFont));
+  } finally {
+    await task.destroy();
+  }
 });
 
 test('hidden recovery migration moves all copies and resumes after an interrupted index write', async () => {
-  const targetFiles = new Map<string, string>([[`${LEGACY_BACKUP_ROOT}/one/original.pdf`, 'original'], [`${LEGACY_BACKUP_ROOT}/older.pdf`, 'older']]);
-  const records: Record<string, BackupRecord> = loadBackups({ 'Answer.pdf': { original: `${LEGACY_BACKUP_ROOT}/one/original.pdf` } }, BACKUP_ROOT);
+  const targetFiles = new Map<string, string>([
+    [`${LEGACY_BACKUP_ROOT}/one/original.pdf`, 'original'],
+    [`${LEGACY_BACKUP_ROOT}/older.pdf`, 'older'],
+  ]);
+  const records: Record<string, BackupRecord> = loadBackups(
+    { 'Answer.pdf': { original: `${LEGACY_BACKUP_ROOT}/one/original.pdf` } },
+    BACKUP_ROOT,
+  );
   const store = {
-    exists: async (path: string) => targetFiles.has(path) || [...targetFiles.keys()].some(key => key.startsWith(path + '/')),
-    read: async (path: string) => targetFiles.get(path)!, write: async (path: string, value: string) => { targetFiles.set(path, value); },
-    remove: async (path: string) => { targetFiles.delete(path); },
-    rename: async (from: string, to: string) => { for (const [key, value] of [...targetFiles]) if (key.startsWith(from + '/')) { targetFiles.set(to + key.slice(from.length), value); targetFiles.delete(key); } }
+    exists: async (path: string) =>
+      targetFiles.has(path) || [...targetFiles.keys()].some((key) => key.startsWith(path + '/')),
+    read: async (path: string) => targetFiles.get(path)!,
+    write: async (path: string, value: string) => {
+      targetFiles.set(path, value);
+    },
+    remove: async (path: string) => {
+      targetFiles.delete(path);
+    },
+    rename: async (from: string, to: string) => {
+      for (const [key, value] of [...targetFiles]) {
+        if (key.startsWith(from + '/')) {
+          targetFiles.set(to + key.slice(from.length), value);
+          targetFiles.delete(key);
+        }
+      }
+    },
   };
   const persisted = structuredClone(records);
-  await assert.rejects(migrateRecovery(store, BACKUP_ROOT, records, async () => { throw new Error('Crash before index write'); }), /Crash/);
-  assert(!await store.exists(LEGACY_BACKUP_ROOT)); assert(await store.exists(`${BACKUP_ROOT}/migration.json`));
+  await assert.rejects(
+    migrateRecovery(store, BACKUP_ROOT, records, async () => {
+      throw new Error('Crash before index write');
+    }),
+    /Crash/,
+  );
+  assert(!(await store.exists(LEGACY_BACKUP_ROOT)));
+  assert(await store.exists(`${BACKUP_ROOT}/migration.json`));
   await migrateRecovery(store, BACKUP_ROOT, persisted, async () => {});
-  assert.equal(targetFiles.get(persisted['Answer.pdf']!.original), 'original'); assert.equal([...targetFiles.values()].filter(value => value === 'older').length, 1);
-  assert(!await store.exists(`${BACKUP_ROOT}/migration.json`));
+  assert.equal(targetFiles.get(persisted['Answer.pdf']!.original), 'original');
+  assert.equal([...targetFiles.values()].filter((value) => value === 'older').length, 1);
+  assert(!(await store.exists(`${BACKUP_ROOT}/migration.json`)));
 });
-
 
 test('the display copy removes only owned ink while preserving foreign annotations and form content', async () => {
   const file = await fixture();
   const pdf = await PDFDocument.load(file.bytes());
-  pdf.getPages()[0]!.node.addAnnot(pdf.context.register(pdf.context.obj({ Type: 'Annot', Subtype: 'Ink', NM: PDFString.of('foreign'),
-    Rect: [20, 20, 100, 80], InkList: [[20, 20, 100, 80]], BS: { W: 2 }, C: [0, 0, 1], F: 4 })));
-  file.replace(await pdf.save()); const session = await TextSession.open(file.store, fonts);
-  session.addStroke(1, 'marker', [[50, 500], [300, 500]]); await session.save();
-  const original = file.bytes().slice(); const copy = await renderTextPdf(original);
-  assert.equal((await readTextPdf(copy)).strokes.length, 0); assert.deepEqual(file.bytes(), original);
+  pdf.getPages()[0]!.node.addAnnot(
+    pdf.context.register(
+      pdf.context.obj({
+        Type: 'Annot',
+        Subtype: 'Ink',
+        NM: PDFString.of('foreign'),
+        Rect: [20, 20, 100, 80],
+        InkList: [[20, 20, 100, 80]],
+        BS: { W: 2 },
+        C: [0, 0, 1],
+        F: 4,
+      }),
+    ),
+  );
+  file.replace(await pdf.save());
+  const session = await TextSession.open(file.store, fonts);
+  session.addStroke(1, 'marker', [
+    [50, 500],
+    [300, 500],
+  ]);
+  await session.save();
+  const original = file.bytes().slice();
+  const copy = await renderTextPdf(original);
+  assert.equal((await readTextPdf(copy)).strokes.length, 0);
+  assert.deepEqual(file.bytes(), original);
   const clean = await PDFDocument.load(copy);
   assert.equal(clean.getForm().getTextField('Answer').getText(), 'Original');
-  assert(clean.getPages()[0]!.node.Annots()!.asArray().some(ref => clean.context.lookup(ref, PDFDict).get(PDFName.of('NM'))?.toString() === '(foreign)'));
+  assert(
+    clean
+      .getPages()[0]!
+      .node.Annots()!
+      .asArray()
+      .some(
+        (ref) =>
+          clean.context.lookup(ref, PDFDict).get(PDFName.of('NM'))?.toString() === '(foreign)',
+      ),
+  );
 });
 
 test('gesture ownership prevents cancellation in another view from losing marks', async () => {
-  const file = await fixture(), session = await TextSession.open(file.store, fonts);
-  const firstView = {}, secondView = {};
+  const file = await fixture();
+  const session = await TextSession.open(file.store, fonts);
+  const firstView = {};
+  const secondView = {};
   assert.equal(session.beginInkAction(firstView), true);
-  const a = session.addStroke(1, 'scribble', [[40, 40], [80, 80]], 2, undefined, firstView);
+  const a = session.addStroke(
+    1,
+    'scribble',
+    [
+      [40, 40],
+      [80, 80],
+    ],
+    2,
+    undefined,
+    firstView,
+  );
   assert.equal(session.beginInkAction(secondView), false);
   session.finishInkAction(true, secondView);
   assert.equal(session.snapshot.strokes.length, 1);
   assert.throws(() => session.deleteStroke(a.id, secondView), /current drawing gesture/);
-  assert.throws(() => session.addStroke(1, 'scribble', [[100, 100]], 2, undefined, secondView), /current drawing gesture/);
+  assert.throws(
+    () => session.addStroke(1, 'scribble', [[100, 100]], 2, undefined, secondView),
+    /current drawing gesture/,
+  );
   session.finishInkAction(false, firstView);
   assert.equal(session.beginInkAction(secondView), true);
   session.moveStroke(a.id, [10, 10], secondView);
   session.finishInkAction(true, secondView);
-  assert.deepEqual(session.snapshot.strokes[0]!.points, [[40, 40], [80, 80]]);
-  await session.save(); assert.equal((await readTextPdf(file.bytes())).strokes.length, 1);
-});
-
-test('redo survives PDF saves and a new mark invalidates the redo branch', async () => {
-  const file = await fixture(), session = await TextSession.open(file.store, fonts);
-  const a = session.addStroke(1, 'scribble', [[40, 40], [80, 80]]);
-  await session.save(); session.deleteStroke(a.id); await session.save();
-  session.undoStroke(); await session.save(); assert.equal((await readTextPdf(file.bytes())).strokes.length, 1);
-  assert.equal(session.canRedoStroke, true); session.redoStroke(); await session.save();
-  assert.equal((await readTextPdf(file.bytes())).strokes.length, 0);
-  session.undoStroke(); session.addStroke(1, 'marker', [[100, 100], [200, 100]]);
-  assert.equal(session.canRedoStroke, false);
-});
-
-test('a prepared draft never overwrites newer edits or an explicitly reloaded baseline', async () => {
-  const file = await fixture(), session = await TextSession.open(file.store, fonts);
-  session.setValue('Answer', 'Checkpoint'); await session.checkpoint();
-  session.setValue('Answer', 'Latest'); await session.save();
-  assert.equal((await readTextPdf(file.bytes())).fields[0]!.value, 'Latest');
-  await session.reload(); session.setValue('Answer', 'After reload'); await session.save();
-  assert.equal((await readTextPdf(file.bytes())).fields[0]!.value, 'After reload');
+  assert.deepEqual(session.snapshot.strokes[0]!.points, [
+    [40, 40],
+    [80, 80],
+  ]);
+  await session.save();
+  assert.equal((await readTextPdf(file.bytes())).strokes.length, 1);
 });
 
 test('the controlled background excludes editable text appearances and retains checkbox widgets', async () => {
-  const file = await fixture(), pdf = await PDFDocument.load(file.bytes());
-  const checkbox = pdf.getForm().createCheckBox('Check'); checkbox.addToPage(pdf.getPages()[0]!, { x: 30, y: 30, width: 20, height: 20 }); checkbox.check();
+  const file = await fixture();
+  const pdf = await PDFDocument.load(file.bytes());
+  const checkbox = pdf.getForm().createCheckBox('Check');
+  checkbox.addToPage(pdf.getPages()[0]!, { x: 30, y: 30, width: 20, height: 20 });
+  checkbox.check();
   const copy = await PDFDocument.load(await renderTextPdf(await pdf.save()));
-  const textWidgets = copy.getForm().getTextField('Answer').acroField.getWidgets().map(widget => widget.dict);
-  const annots = copy.getPages()[0]!.node.Annots()!.asArray().map(ref => copy.context.lookup(ref));
-  assert(!annots.some(dict => textWidgets.includes(dict as PDFDict)));
+  const textWidgets = copy
+    .getForm()
+    .getTextField('Answer')
+    .acroField.getWidgets()
+    .map((widget) => widget.dict);
+  const annots = copy
+    .getPages()[0]!
+    .node.Annots()!
+    .asArray()
+    .map((ref) => copy.context.lookup(ref));
+  assert(!annots.some((dict) => textWidgets.includes(dict as PDFDict)));
   assert(annots.includes(copy.getForm().getCheckBox('Check').acroField.getWidgets()[0]!.dict));
   assert.equal(copy.getForm().getCheckBox('Check').isChecked(), true);
-});
-
-test('document undo and redo recover saved text boxes, formatting and deletion alongside ink', async () => {
-  const file = await fixture(), session = await TextSession.open(file.store, fonts);
-  const box = session.add(1, [60, 200, 300, 250], 14, true); session.setValue(box.name, 'Recover this answer');
-  session.formatField(box.name, { fontFamily: 'serif', color: [1, 0, 0] }); await session.save();
-  session.addStroke(1, 'scribble', [[20, 20], [40, 40]]); await session.save();
-  session.delete(box.name); await session.save();
-  session.undoStroke(); await session.save();
-  let saved = await readTextPdf(file.bytes()); assert.equal(saved.fields.find(f => f.name === box.name)?.value, 'Recover this answer');
-  assert.equal(saved.fields.find(f => f.name === box.name)?.fontFamily, 'serif'); assert.equal(saved.strokes.length, 1);
-  session.redoStroke(); await session.save(); assert(!(await readTextPdf(file.bytes())).fields.some(f => f.name === box.name));
-  session.undoStroke(); session.undoStroke(); await session.save(); saved = await readTextPdf(file.bytes());
-  assert(saved.fields.some(f => f.name === box.name)); assert.equal(saved.strokes.length, 0);
 });

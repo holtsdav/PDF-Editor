@@ -10,10 +10,35 @@ const fonts = new WeakMap<Document, { faces: FontFace[]; users: number }>();
 export function usePdfFont(doc: Document): () => void {
   let entry = fonts.get(doc);
   if (!entry) {
-    const faces = ([['sans', fontBytes], ['serif', serif], ['mono', mono]] as const).map(([family, bytes]) => new doc.defaultView!.FontFace(fontFaces[family], bytes.slice().buffer));
-    entry = { faces, users: 0 }; fonts.set(doc, entry);
+    const faces = (
+      [
+        ['sans', fontBytes],
+        ['serif', serif],
+        ['mono', mono],
+      ] as const
+    ).map(
+      ([family, bytes]) => new doc.defaultView!.FontFace(fontFaces[family], bytes.slice().buffer),
+    );
+    entry = { faces, users: 0 };
+    fonts.set(doc, entry);
   }
-  const shared = entry; shared.users++;
-  for (const face of shared.faces) void face.load().then(() => { if (shared.users > 0) doc.fonts.add(face); }).catch(() => {});
-  return () => { if (--shared.users === 0) for (const face of shared.faces) doc.fonts.delete(face); };
+  const shared = entry;
+  shared.users++;
+  for (const face of shared.faces) {
+    void face
+      .load()
+      .then(() => {
+        if (shared.users > 0) {
+          doc.fonts.add(face);
+        }
+      })
+      .catch(() => {});
+  }
+  return () => {
+    if (--shared.users === 0) {
+      for (const face of shared.faces) {
+        doc.fonts.delete(face);
+      }
+    }
+  };
 }

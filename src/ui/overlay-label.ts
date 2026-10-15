@@ -10,7 +10,9 @@ export function labelOverlay(element: HTMLElement, text: string): void {
     label.hidden = true;
     label.id = `pfs-overlay-label-${globalThis.crypto.randomUUID()}`;
     const host = element.matches('input, textarea') ? element.parentElement : element;
-    if (!host) throw new Error('PDF overlay control must be attached before labeling.');
+    if (!host) {
+      throw new Error('PDF overlay control must be attached before labeling.');
+    }
     host.append(label);
     labels.set(element, label);
     element.setAttribute('aria-labelledby', label.id);
