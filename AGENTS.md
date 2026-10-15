@@ -5,6 +5,7 @@ This repository contains a desktop PDF editing beta for Obsidian. Read `README.m
 ## Working conventions
 
 - Use Node.js 24, TypeScript and the public Obsidian API wherever possible. Keep dependencies pinned and `package-lock.json` synchronized.
+- Keep `README.md` focused on user features, installation and brief beta limitations. Keep detailed audit results, test-session logs and engine research in ignored `tmp/`, outside the README.
 - Run `npm run check` after code or build changes. Run `npm run test:stress` for persistence, recovery, resource-management or release changes. Fixtures must be anonymous; generated audit artifacts belong in ignored `tmp/`.
 - Keep tests compact and behavior-focused. Extend an existing scenario or small case table before adding a new test. Add coverage for distinct regressions, PDF compatibility and data-safety failures; avoid duplicate UI/model checks, cosmetic assertions and tests of private implementation structure. Keep stress workloads separate from the normal suite.
 - Test final assets in an isolated vault. Record the actual app version, platform, surfaces and actions checked. Do not turn automated fixtures, a declared minimum version or an older smoke test into a broad support claim.
