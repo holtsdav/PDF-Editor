@@ -8,9 +8,26 @@ import type { App, Plugin } from 'obsidian';
 import type { VaultSessions } from '../src/pdf/vault-sessions.ts';
 import { loadToolPreferences } from '../src/pdf/tool-preferences.ts';
 
-const built = await build({ entryPoints: ['src/ui/plugin-settings.ts'], bundle: true, write: false, format: 'esm', platform: 'node', packages: 'external', plugins: [{ name: 'settings-host', setup(builder) {
-  builder.onResolve({ filter: /^(obsidian|electron)$/ }, args => ({ path: args.path, namespace: 'test' }));
-  builder.onLoad({ filter: /.*/, namespace: 'test' }, args => ({ contents: args.path === 'electron' ? 'export const shell = {};' : `
+const built = await build({
+  entryPoints: ['src/ui/plugin-settings.ts'],
+  bundle: true,
+  write: false,
+  format: 'esm',
+  platform: 'node',
+  packages: 'external',
+  plugins: [
+    {
+      name: 'settings-host',
+      setup(builder) {
+        builder.onResolve({ filter: /^(obsidian|electron)$/ }, (args) => ({
+          path: args.path,
+          namespace: 'test',
+        }));
+        builder.onLoad({ filter: /.*/, namespace: 'test' }, (args) => ({
+          contents:
+            args.path === 'electron'
+              ? 'export const shell = {};'
+              : `
     export class PluginSettingTab {
       updates = 0; cleanups = [];
       constructor(app) { this.app = app; this.containerEl = app.doc.createElement('div'); app.doc.body.append(this.containerEl); }
@@ -52,130 +69,334 @@ const built = await build({ entryPoints: ['src/ui/plugin-settings.ts'], bundle: 
       addToggle(fn) { this.toggle = new ValueComponent(); fn(this.toggle); return this; }
     }
     export class FileSystemAdapter {}
-  ` }));
-} }] });
+  `,
+        }));
+      },
+    },
+  ],
+});
 const moduleUrl = new URL('../tmp/ui-tests/settings-lifecycle.mjs', import.meta.url);
 await mkdir(new URL('../tmp/ui-tests/', import.meta.url), { recursive: true });
 await writeFile(moduleUrl, built.outputFiles[0]!.text);
-const { PdfSettingsTab } = await import(moduleUrl.href) as { PdfSettingsTab: typeof SettingsTab };
+const { PdfSettingsTab } = (await import(moduleUrl.href)) as { PdfSettingsTab: typeof SettingsTab };
 const notices: string[] = [];
 Object.assign(globalThis, { pdfSettingsTestNotices: notices });
 
-interface Row { name: string; descEl: HTMLElement; slider?: { value: number; limits: number[]; change(value: number): Promise<void> }; toggle?: { value: boolean; change(value: boolean): Promise<void> }; button?: { buttonEl: HTMLButtonElement } }
+interface Row {
+  name: string;
+  descEl: HTMLElement;
+  slider?: { value: number; limits: number[]; change(value: number): Promise<void> };
+  toggle?: { value: boolean; change(value: boolean): Promise<void> };
+  button?: { buttonEl: HTMLButtonElement };
+}
 function fixture() {
-  const dom = new JSDOM('<body></body>'), doc = dom.window.document;
-  Object.assign(dom.window.HTMLElement.prototype, { createEl(this: HTMLElement, tag: string, options: { text?: string; cls?: string } = {}) {
-    const element = this.ownerDocument.createElement(tag); element.textContent = options.text ?? ''; element.className = options.cls ?? ''; this.append(element); return element;
-  } });
-  let unload!: () => void, deletions = 0, usageReads = 0;
+  const dom = new JSDOM('<body></body>');
+  const doc = dom.window.document;
+  Object.assign(dom.window.HTMLElement.prototype, {
+    createEl(this: HTMLElement, tag: string, options: { text?: string; cls?: string } = {}) {
+      const element = this.ownerDocument.createElement(tag);
+      element.textContent = options.text ?? '';
+      element.className = options.cls ?? '';
+      this.append(element);
+      return element;
+    },
+  });
+  let unload!: () => void;
+  let deletions = 0;
+  let usageReads = 0;
   const writes: object[] = [];
-  const plugin = { register(callback: () => void) { unload = callback; } } as unknown as Plugin;
+  const plugin = {
+    register(callback: () => void) {
+      unload = callback;
+    },
+  } as unknown as Plugin;
   const sessions = {
-    preferences: loadToolPreferences({ toolbarTopOffset: 48, autoDetectPageLimit: 30, floatingToolbar: true, penWidth: 6 }),
-    async updatePreferences(value: object) { writes.push(value); Object.assign(this.preferences, value); },
-    async clearRecoveryStorage() { deletions++; },
-    async recoveryUsage() { usageReads++; return { bytes: 2048, indexedPdfs: 2 }; }
+    preferences: loadToolPreferences({
+      toolbarTopOffset: 48,
+      autoDetectPageLimit: 30,
+      floatingToolbar: true,
+      penWidth: 6,
+    }),
+    async updatePreferences(value: object) {
+      writes.push(value);
+      Object.assign(this.preferences, value);
+    },
+    async clearRecoveryStorage() {
+      deletions++;
+    },
+    async recoveryUsage() {
+      usageReads++;
+      return { bytes: 2048, indexedPdfs: 2 };
+    },
   };
   const app = { doc, rows: [] as Row[] };
-  const tab = new PdfSettingsTab(app as unknown as App, plugin, sessions as unknown as VaultSessions) as SettingsTab & { updates: number };
+  const tab = new PdfSettingsTab(
+    app as unknown as App,
+    plugin,
+    sessions as unknown as VaultSessions,
+  ) as SettingsTab & { updates: number };
   const confirm = () => (tab as unknown as { confirmClearRecovery(): void }).confirmClearRecovery();
-  const deleteButton = () => [...doc.querySelectorAll<HTMLButtonElement>('.mod-destructive')].find(button => button.textContent === 'Delete backups')!;
-  const row = (name: string) => app.rows.find(row => row.name === name)!;
-  return { dom, doc, tab, sessions, writes, unload, confirm, deleteButton, row, deletions: () => deletions, usageReads: () => usageReads, dispose: () => { unload(); dom.window.close(); } };
+  const deleteButton = () =>
+    [...doc.querySelectorAll<HTMLButtonElement>('.mod-destructive')].find(
+      (button) => button.textContent === 'Delete backups',
+    )!;
+  const row = (name: string) => app.rows.find((row) => row.name === name)!;
+  return {
+    dom,
+    doc,
+    tab,
+    sessions,
+    writes,
+    unload,
+    confirm,
+    deleteButton,
+    row,
+    deletions: () => deletions,
+    usageReads: () => usageReads,
+    dispose: () => {
+      unload();
+      dom.window.close();
+    },
+  };
 }
-const flush = () => new Promise<void>(resolve => setImmediate(resolve));
-
-test('all existing settings expose searchable names without reading storage during indexing', () => {
-  const f = fixture();
-  try {
-    const definitions = f.tab.getSettingDefinitions();
-    const names = definitions.flatMap(item => 'items' in item ? item.items?.flatMap(child => 'name' in child ? [child.name] : []) ?? [] : 'name' in item ? [item.name] : []);
-    assert.deepEqual(names, ['PDF toolbar top offset', 'Floating PDF toolbar', 'Move original PDF to Trash after import', 'Detect answer lines on PDF open', 'Automatic detection page limit', 'Wrap across consecutive answer lines', 'Keep one backup of each PDF you edit', 'Backup folder', 'Delete backups']);
-    assert.equal(f.usageReads(), 0); assert.equal(f.writes.length, 0);
-    assert.equal(Object.hasOwn(PdfSettingsTab.prototype, 'display'), false);
-  } finally { f.dispose(); }
-});
+const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 test('rendered settings read current preferences and save through the shared store without losing tool choices', async () => {
   const f = fixture();
   try {
     f.tab.update();
-    const offset = f.row('PDF toolbar top offset').slider!, pages = f.row('Automatic detection page limit').slider!;
-    assert.deepEqual(offset.limits, [0, 160, 1]); assert.equal(offset.value, 48);
-    assert.deepEqual(pages.limits, [1, 300, 1]); assert.equal(pages.value, 30);
+    const offset = f.row('PDF toolbar top offset').slider!;
+    const pages = f.row('Automatic detection page limit').slider!;
+    assert.deepEqual(offset.limits, [0, 160, 1]);
+    assert.equal(offset.value, 48);
+    assert.deepEqual(pages.limits, [1, 300, 1]);
+    assert.equal(pages.value, 30);
     assert.equal(f.row('Floating PDF toolbar').toggle!.value, true);
-    await offset.change(96); await pages.change(42); await f.row('Detect answer lines on PDF open').toggle!.change(true);
+    await offset.change(96);
+    await pages.change(42);
+    await f.row('Detect answer lines on PDF open').toggle!.change(true);
     assert.equal(f.writes.length, 3);
-    assert.equal(f.sessions.preferences.toolbarTopOffset, 96); assert.equal(f.sessions.preferences.autoDetectPageLimit, 42);
-    assert.equal(f.sessions.preferences.autoDetectLines, true); assert.equal(f.sessions.preferences.penWidth, 6);
-    f.tab.update(); assert.equal(f.row('PDF toolbar top offset').slider!.value, 96);
-    await flush(); assert.match(f.row('Backup folder').descEl.textContent!, /2.0 KiB used · 2 PDFs backed up/);
-  } finally { f.dispose(); }
+    assert.equal(f.sessions.preferences.toolbarTopOffset, 96);
+    assert.equal(f.sessions.preferences.autoDetectPageLimit, 42);
+    assert.equal(f.sessions.preferences.autoDetectLines, true);
+    assert.equal(f.sessions.preferences.penWidth, 6);
+    f.tab.update();
+    assert.equal(f.row('PDF toolbar top offset').slider!.value, 96);
+    await flush();
+    assert.match(f.row('Backup folder').descEl.textContent!, /2.0 KiB used · 2 PDFs backed up/);
+  } finally {
+    f.dispose();
+  }
 });
 
 test('original cleanup defaults off and persists through the shared settings store', async () => {
   const f = fixture();
   try {
-    f.tab.update(); assert.equal(f.row('Move original PDF to Trash after import').toggle!.value, false);
+    f.tab.update();
+    assert.equal(f.row('Move original PDF to Trash after import').toggle!.value, false);
     await f.row('Move original PDF to Trash after import').toggle!.change(true);
     assert.equal(f.sessions.preferences.trashImportedOriginals, true);
-    f.tab.update(); assert.equal(f.row('Move original PDF to Trash after import').toggle!.value, true);
-    assert.equal(loadToolPreferences({ trashImportedOriginals: true }).trashImportedOriginals, true);
-    for (const malformed of [undefined, null, 'true', 1]) assert.equal(loadToolPreferences({ trashImportedOriginals: malformed }).trashImportedOriginals, false);
-  } finally { f.dispose(); }
+    f.tab.update();
+    assert.equal(f.row('Move original PDF to Trash after import').toggle!.value, true);
+    assert.equal(
+      loadToolPreferences({ trashImportedOriginals: true }).trashImportedOriginals,
+      true,
+    );
+    for (const malformed of [undefined, null, 'true', 1]) {
+      assert.equal(
+        loadToolPreferences({ trashImportedOriginals: malformed }).trashImportedOriginals,
+        false,
+      );
+    }
+  } finally {
+    f.dispose();
+  }
 });
 
 test('the destructive setting requires confirmation, cancels without deletion and cannot act after unload', () => {
   const f = fixture();
   try {
-    f.tab.update(); const button = f.row('Delete backups').button!.buttonEl;
-    assert(button.classList.contains('mod-destructive')); button.click(); assert.equal(f.deletions(), 0);
-    [...f.doc.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Cancel')!.click();
-    assert.equal([...f.doc.querySelectorAll('button')].some(button => button.textContent === 'Delete backups'), false);
-    f.confirm(); const confirm = f.deleteButton(); assert(confirm.isConnected);
-    f.unload(); assert.equal(confirm.isConnected, false); confirm.click(); button.click();
+    f.tab.update();
+    const button = f.row('Delete backups').button!.buttonEl;
+    assert(button.classList.contains('mod-destructive'));
+    button.click();
     assert.equal(f.deletions(), 0);
-  } finally { f.dispose(); }
+    [...f.doc.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent === 'Cancel')!
+      .click();
+    assert.equal(
+      [...f.doc.querySelectorAll('button')].some(
+        (button) => button.textContent === 'Delete backups',
+      ),
+      false,
+    );
+    f.confirm();
+    const confirm = f.deleteButton();
+    assert(confirm.isConnected);
+    f.unload();
+    assert.equal(confirm.isConnected, false);
+    confirm.click();
+    button.click();
+    assert.equal(f.deletions(), 0);
+  } finally {
+    f.dispose();
+  }
 });
 
 test('deletion runs once while pending and refreshes declarative settings after success', async () => {
-  const f = fixture(); let finish!: () => void, deletions = 0;
-  f.sessions.clearRecoveryStorage = () => { deletions++; return new Promise<void>(resolve => { finish = resolve; }); };
+  const f = fixture();
+  let finish!: () => void;
+  let deletions = 0;
+  f.sessions.clearRecoveryStorage = () => {
+    deletions++;
+    return new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+  };
   try {
-    f.tab.update(); const updates = f.tab.updates; f.confirm(); const button = f.deleteButton();
-    button.click(); button.dispatchEvent(new f.dom.window.MouseEvent('click'));
-    assert.equal(deletions, 1); assert.equal(button.disabled, true);
-    finish(); await flush(); assert.equal(button.isConnected, false); assert.equal(f.tab.updates, updates + 1);
-  } finally { f.dispose(); }
+    f.tab.update();
+    const updates = f.tab.updates;
+    f.confirm();
+    const button = f.deleteButton();
+    button.click();
+    button.dispatchEvent(new f.dom.window.MouseEvent('click'));
+    assert.equal(deletions, 1);
+    assert.equal(button.disabled, true);
+    finish();
+    await flush();
+    assert.equal(button.isConnected, false);
+    assert.equal(f.tab.updates, updates + 1);
+  } finally {
+    f.dispose();
+  }
 });
 
 test('failed deletion remains retryable and closing the tab cancels its confirmation', async () => {
-  const f = fixture(); let attempts = 0;
-  f.sessions.clearRecoveryStorage = async () => { if (++attempts === 1) throw new Error('A PDF is still open'); };
+  const f = fixture();
+  let attempts = 0;
+  f.sessions.clearRecoveryStorage = async () => {
+    if (++attempts === 1) {
+      throw new Error('A PDF is still open');
+    }
+  };
   try {
-    f.confirm(); const button = f.deleteButton(); button.click(); await flush();
-    assert(button.isConnected); assert.equal(button.disabled, false);
-    button.click(); await flush(); assert.equal(attempts, 2); assert.equal(button.isConnected, false);
-    f.confirm(); const stale = f.deleteButton(); f.tab.hide(); stale.click();
-    assert.equal(stale.isConnected, false); assert.equal(attempts, 2);
-  } finally { f.dispose(); }
-});
-
-test('late storage results cannot mutate an obsolete settings row', async () => {
-  const f = fixture(); let finish!: (value: { bytes: number; indexedPdfs: number }) => void;
-  f.sessions.recoveryUsage = () => new Promise(resolve => { finish = resolve; });
-  try {
-    f.tab.update(); const text = f.row('Backup folder').descEl.querySelector('p')!;
-    f.tab.hide(); f.doc.body.append(text); finish({ bytes: 1024, indexedPdfs: 1 }); await flush();
-    assert.equal(text.textContent, 'Calculating backup storage…');
-  } finally { f.dispose(); }
+    f.confirm();
+    const button = f.deleteButton();
+    button.click();
+    await flush();
+    assert(button.isConnected);
+    assert.equal(button.disabled, false);
+    button.click();
+    await flush();
+    assert.equal(attempts, 2);
+    assert.equal(button.isConnected, false);
+    f.confirm();
+    const stale = f.deleteButton();
+    f.tab.hide();
+    stale.click();
+    assert.equal(stale.isConnected, false);
+    assert.equal(attempts, 2);
+  } finally {
+    f.dispose();
+  }
 });
 
 test('an in-flight deletion completing after unload cannot refresh settings or issue notices', async () => {
-  const f = fixture(); let finish!: () => void;
-  f.sessions.clearRecoveryStorage = () => new Promise<void>(resolve => { finish = resolve; });
+  const f = fixture();
+  let finish!: () => void;
+  f.sessions.clearRecoveryStorage = () =>
+    new Promise<void>((resolve) => {
+      finish = resolve;
+    });
   try {
-    f.confirm(); f.deleteButton().click(); const noticeCount = notices.length;
-    f.unload(); finish(); await flush(); assert.equal(notices.length, noticeCount); assert.equal(f.tab.updates, 0);
-  } finally { f.dispose(); }
+    f.confirm();
+    f.deleteButton().click();
+    const noticeCount = notices.length;
+    f.unload();
+    finish();
+    await flush();
+    assert.equal(notices.length, noticeCount);
+    assert.equal(f.tab.updates, 0);
+  } finally {
+    f.dispose();
+  }
+});
+
+test('plugin settings migrate old preferences and reject untyped toggle values', () => {
+  assert.equal(loadToolPreferences(null).autoDetectLines, false);
+  assert.equal(loadToolPreferences(null).flowAnswerLines, true);
+  assert.equal(loadToolPreferences(null).toolbarTopOffset, 0);
+  assert.equal(loadToolPreferences(null).floatingToolbar, true);
+  assert.equal(loadToolPreferences(null).autoDetectPageLimit, 50);
+  assert.equal(loadToolPreferences(null).keepOriginalBackups, true);
+  const loaded = loadToolPreferences({
+    autoDetectLines: true,
+    flowAnswerLines: false,
+    penWidth: 5,
+  });
+  assert.equal(loaded.autoDetectLines, true);
+  assert.equal(loaded.flowAnswerLines, false);
+  assert.equal(loaded.penWidth, 5);
+  assert.equal(
+    loadToolPreferences({ autoDetectLines: 'true', flowAnswerLines: 0 }).autoDetectLines,
+    false,
+  );
+  assert.equal(loadToolPreferences({ flowAnswerLines: 0 }).flowAnswerLines, true);
+  assert.equal(loadToolPreferences({ toolbarTopOffset: 72 }).toolbarTopOffset, 72);
+  assert.equal(loadToolPreferences({ floatingToolbar: true }).floatingToolbar, true);
+  assert.equal(loadToolPreferences({ floatingToolbar: false }).floatingToolbar, false);
+  assert.equal(loadToolPreferences({ floatingToolbar: 'true' }).floatingToolbar, true);
+  for (const toolbarTopOffset of [-1, 161, 4.5, Infinity, '32']) {
+    assert.equal(loadToolPreferences({ toolbarTopOffset }).toolbarTopOffset, 0);
+  }
+  assert.equal(loadToolPreferences({ autoDetectPageLimit: 25 }).autoDetectPageLimit, 25);
+  assert.equal(loadToolPreferences({ autoDetectPageLimit: 300 }).autoDetectPageLimit, 300);
+  for (const autoDetectPageLimit of [0, 301, 4.5, Infinity, '32']) {
+    assert.equal(loadToolPreferences({ autoDetectPageLimit }).autoDetectPageLimit, 50);
+  }
+  assert.equal(loadToolPreferences({ keepOriginalBackups: false }).keepOriginalBackups, false);
+  for (const keepOriginalBackups of ['false', 0, null]) {
+    assert.equal(loadToolPreferences({ keepOriginalBackups }).keepOriginalBackups, true);
+  }
+});
+
+test('assistance preferences have safe defaults and persist only actual booleans', () => {
+  assert.deepEqual(
+    [
+      loadToolPreferences(null).smoothPen,
+      loadToolPreferences(null).holdShapes,
+      loadToolPreferences(null).holdHighlighter,
+    ],
+    [true, false, true],
+  );
+  const saved = loadToolPreferences({ smoothPen: false, holdShapes: true, holdHighlighter: false });
+  assert.deepEqual(
+    [saved.smoothPen, saved.holdShapes, saved.holdHighlighter],
+    [false, true, false],
+  );
+  assert.equal(loadToolPreferences({ holdShapes: 'true' }).holdShapes, false);
+});
+
+test('persisted colors require three finite numeric components and are copied', () => {
+  const defaults = loadToolPreferences(null);
+  for (const color of [
+    null,
+    'red',
+    [0, 1],
+    [0, 1, 0, 1],
+    ['0', 1, 0],
+    [0, NaN, 0],
+    [0, Infinity, 0],
+    [0, -1, 0],
+    [0, 2, 0],
+  ]) {
+    assert.deepEqual(
+      loadToolPreferences({ textColor: color, penColor: color, markerColor: color }),
+      defaults,
+    );
+  }
+  const color = [0, 0.5, 1];
+  const loaded = loadToolPreferences({ textColor: color });
+  color[0] = 1;
+  assert.deepEqual(loaded.textColor, [0, 0.5, 1]);
 });

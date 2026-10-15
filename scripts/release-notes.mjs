@@ -10,6 +10,9 @@ const readme = await readFile('README.md', 'utf8');
 const heading = `### ${version}\n`;
 const start = readme.indexOf(heading);
 assert(start >= 0, `README.md is missing the ${version} changelog.`);
-const notes = readme.slice(start + heading.length).split(/\n#{1,3} /, 1)[0].trim();
+const notes = readme
+  .slice(start + heading.length)
+  .split(/\n#{1,3} /, 1)[0]
+  .trim();
 assert(notes.length > 0, 'Release notes must not be empty.');
 process.stdout.write(`${notes}\n`);

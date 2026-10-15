@@ -10,26 +10,48 @@ export interface MigrationStore {
 }
 
 /** Receipt precedes the folder move, so an interrupted index write is recoverable. */
-export async function migrateRecovery(store: MigrationStore, root: string, records: Record<string, BackupRecord>, persist: () => Promise<void>): Promise<void> {
+export async function migrateRecovery(
+  store: MigrationStore,
+  root: string,
+  records: Record<string, BackupRecord>,
+  persist: () => Promise<void>,
+): Promise<void> {
   const receipt = `${root}/migration.json`;
   let target: string;
   if (await store.exists(receipt)) {
     const saved: unknown = JSON.parse(await store.read(receipt));
-    if (!saved || typeof saved !== 'object' || !('target' in saved) || typeof saved.target !== 'string'
-      || !saved.target.startsWith(root + '/legacy-') || saved.target.includes('..')) throw new Error('Invalid recovery migration receipt.');
+    if (
+      !saved ||
+      typeof saved !== 'object' ||
+      !('target' in saved) ||
+      typeof saved.target !== 'string' ||
+      !saved.target.startsWith(root + '/legacy-') ||
+      saved.target.includes('..')
+    ) {
+      throw new Error('Invalid recovery migration receipt.');
+    }
     target = saved.target;
   } else {
-    if (!await store.exists(LEGACY_BACKUP_ROOT)) return;
+    if (!(await store.exists(LEGACY_BACKUP_ROOT))) {
+      return;
+    }
     target = `${root}/legacy-${globalThis.crypto.randomUUID()}`;
     await store.write(receipt, JSON.stringify({ target }));
   }
-  if (!await store.exists(target)) {
-    if (!await store.exists(LEGACY_BACKUP_ROOT)) throw new Error('The recovery folder was moved outside PDF Editor during migration.');
+  if (!(await store.exists(target))) {
+    if (!(await store.exists(LEGACY_BACKUP_ROOT))) {
+      throw new Error('The recovery folder was moved outside PDF Editor during migration.');
+    }
     await store.rename(LEGACY_BACKUP_ROOT, target);
   }
-  for (const record of Object.values(records)) for (const kind of ['original', 'recovery'] as const) {
-    const path = record[kind];
-    if (path?.startsWith(LEGACY_BACKUP_ROOT + '/')) record[kind] = target + path.slice(LEGACY_BACKUP_ROOT.length);
+  for (const record of Object.values(records)) {
+    for (const kind of ['original', 'recovery'] as const) {
+      const path = record[kind];
+      if (path?.startsWith(LEGACY_BACKUP_ROOT + '/')) {
+        record[kind] = target + path.slice(LEGACY_BACKUP_ROOT.length);
+      }
+    }
   }
-  await persist(); await store.remove(receipt);
+  await persist();
+  await store.remove(receipt);
 }

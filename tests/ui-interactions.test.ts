@@ -12,17 +12,30 @@ import type { TextEditor as Editor } from '../src/ui/text-editor.ts';
 import type { EditorSurface } from '../src/compat/native-pdf.ts';
 import type { VaultSessions } from '../src/pdf/vault-sessions.ts';
 import type { App } from 'obsidian';
-import { authoredForms, legacyBlank, prefixBlank, prefixValue, uuidCollision } from './fixtures/authored-forms.ts';
+import { authoredForms, prefixBlank } from './fixtures/authored-forms.ts';
 import { orphanForms } from './fixtures/orphan-forms.ts';
 import { getDocument, OPS } from 'pdfjs-dist/legacy/build/pdf.mjs';
-import { rotatedHandle } from '../src/pdf/box-geometry.ts';
 import { bindSurfaceInput } from '../src/ui/surface-input.ts';
 
 // Exercise the actual editor and pointer handlers; only the host API/layout is mocked.
-const built = await build({ entryPoints: ['src/ui/text-editor.ts'], bundle: true, write: false, format: 'esm', platform: 'node', packages: 'external', plugins: [{ name: 'test-host', setup(builder) {
-  builder.onResolve({ filter: /^obsidian$/ }, () => ({ path: 'host', namespace: 'test' }));
-  builder.onResolve({ filter: /\/pdf-font$/ }, () => ({ path: 'font', namespace: 'test' }));
-  builder.onLoad({ filter: /.*/, namespace: 'test' }, args => ({ contents: args.path === 'font' ? 'export const usePdfFont = () => () => {};' : `
+const built = await build({
+  entryPoints: ['src/ui/text-editor.ts'],
+  bundle: true,
+  write: false,
+  format: 'esm',
+  platform: 'node',
+  packages: 'external',
+  plugins: [
+    {
+      name: 'test-host',
+      setup(builder) {
+        builder.onResolve({ filter: /^obsidian$/ }, () => ({ path: 'host', namespace: 'test' }));
+        builder.onResolve({ filter: /\/pdf-font$/ }, () => ({ path: 'font', namespace: 'test' }));
+        builder.onLoad({ filter: /.*/, namespace: 'test' }, (args) => ({
+          contents:
+            args.path === 'font'
+              ? 'export const usePdfFont = () => () => {};'
+              : `
     export class Component {
       cleanups = []; children = [];
       register(fn) { this.cleanups.push(fn); }
@@ -40,514 +53,748 @@ const built = await build({ entryPoints: ['src/ui/text-editor.ts'], bundle: true
     export const loadPdfJs = () => { throw new Error('Not used by editor fixture'); };
     export class TFile {}
     export class App {}
-  ` }));
-} }] });
+  `,
+        }));
+      },
+    },
+  ],
+});
 // A local file URL keeps package resolution anchored in this repository.
 const { mkdir, writeFile } = await import('node:fs/promises');
 await mkdir(new URL('../tmp/ui-tests/', import.meta.url), { recursive: true });
 const moduleUrl = new URL('../tmp/ui-tests/editor.mjs', import.meta.url);
 await writeFile(moduleUrl, built.outputFiles[0]!.text);
-const { TextEditor } = await import(moduleUrl.href) as { TextEditor: typeof Editor };
-const font = new Uint8Array(await readFile(new URL('../assets/fonts/NotoSans-Regular.ttf', import.meta.url)));
+const { TextEditor } = (await import(moduleUrl.href)) as { TextEditor: typeof Editor };
+const font = new Uint8Array(
+  await readFile(new URL('../assets/fonts/NotoSans-Regular.ttf', import.meta.url)),
+);
 
-interface MockScope { handlers: { key: string; modifiers: string[]; func(event: KeyboardEvent): unknown }[] }
+interface MockScope {
+  handlers: { key: string; modifiers: string[]; func(event: KeyboardEvent): unknown }[];
+}
 /** Mount the real editor on an anonymous session, mocking only host APIs, clipboard and page layout. */
-async function fixture(pageCount = 1, withKeymap = false, rotation = 0, seed?: Uint8Array, shared?: TextSession, visible?: number[], hostFirst = false,
-  initialFocus: { windowFocused?: boolean; pdfFocused?: boolean } = {}) {
-  const pdf = await PDFDocument.create(); for (let i = 0; i < pageCount; i++) pdf.addPage([600, 800]).setRotation(degrees(rotation)); let bytes = await pdf.save();
-  if (seed) bytes = seed.slice(); let writes = 0;
-  const session = shared ?? await TextSession.open({ read: async () => bytes, write: async value => { bytes = value; writes++; }, backup: async () => 'original.pdf' }, font);
-  const dom = new JSDOM(`<body><div id="editor"><div id="tools"></div>${Array.from({ length: pageCount }, (_, i) => `<div id="${i ? 'page' + (i + 1) : 'page'}"></div>`).join('')}</div><button id="outside">Outside</button></body>`, { pretendToBeVisual: true });
+async function fixture(
+  pageCount = 1,
+  withKeymap = false,
+  rotation = 0,
+  seed?: Uint8Array,
+  shared?: TextSession,
+  visible?: number[],
+  hostFirst = false,
+  initialFocus: { windowFocused?: boolean; pdfFocused?: boolean } = {},
+) {
+  const pdf = await PDFDocument.create();
+  for (let i = 0; i < pageCount; i++) {
+    pdf.addPage([600, 800]).setRotation(degrees(rotation));
+  }
+  let bytes = await pdf.save();
+  if (seed) {
+    bytes = seed.slice();
+  }
+  let writes = 0;
+  const session =
+    shared ??
+    (await TextSession.open(
+      {
+        read: async () => bytes,
+        write: async (value) => {
+          bytes = value;
+          writes++;
+        },
+        backup: async () => 'original.pdf',
+      },
+      font,
+    ));
+  const dom = new JSDOM(
+    `<body><div id="editor"><div id="tools"></div>${Array.from({ length: pageCount }, (_, i) => `<div id="${i ? 'page' + (i + 1) : 'page'}"></div>`).join('')}</div><button id="outside">Outside</button></body>`,
+    { pretendToBeVisual: true },
+  );
   const doc = dom.window.document;
   let windowFocused = initialFocus.windowFocused ?? true;
   Object.defineProperty(doc, 'hasFocus', { value: () => windowFocused });
-  dom.window.addEventListener('focus', () => { windowFocused = true; });
-  dom.window.addEventListener('blur', () => { windowFocused = false; });
-  Object.assign(dom.window.Node.prototype, { instanceOf(this: Node, type: typeof Node) { return this instanceof type; } });
+  dom.window.addEventListener('focus', () => {
+    windowFocused = true;
+  });
+  dom.window.addEventListener('blur', () => {
+    windowFocused = false;
+  });
+  Object.assign(dom.window.Node.prototype, {
+    instanceOf(this: Node, type: typeof Node) {
+      return this instanceof type;
+    },
+  });
   let clipboardText = '';
-  Object.defineProperty(dom.window.navigator, 'clipboard', { configurable: true, value: {
-    writeText: async (text: string) => { clipboardText = text; },
-    readText: async () => clipboardText
-  } });
-  const create = function(this: HTMLElement, tag: string, options: { cls?: string; text?: string; attr?: Record<string, string> } = {}) {
-    const el = doc.createElement(tag); if (options.cls) el.className = options.cls; if (options.text) el.textContent = options.text;
-    for (const [key, value] of Object.entries(options.attr ?? {})) el.setAttribute(key, value); this.append(el); return el;
+  Object.defineProperty(dom.window.navigator, 'clipboard', {
+    configurable: true,
+    value: {
+      writeText: async (text: string) => {
+        clipboardText = text;
+      },
+      readText: async () => clipboardText,
+    },
+  });
+  const create = function (
+    this: HTMLElement,
+    tag: string,
+    options: { cls?: string; text?: string; attr?: Record<string, string> } = {},
+  ) {
+    const el = doc.createElement(tag);
+    if (options.cls) {
+      el.className = options.cls;
+    }
+    if (options.text) {
+      el.textContent = options.text;
+    }
+    for (const [key, value] of Object.entries(options.attr ?? {})) {
+      el.setAttribute(key, value);
+    }
+    this.append(el);
+    return el;
   };
   Object.assign(dom.window.HTMLElement.prototype, {
     createEl: create,
-    createDiv(this: HTMLElement, options: object) { return create.call(this, 'div', options); },
-    createSpan(this: HTMLElement, options: object) { return create.call(this, 'span', options); },
+    createDiv(this: HTMLElement, options: object) {
+      return create.call(this, 'div', options);
+    },
+    createSpan(this: HTMLElement, options: object) {
+      return create.call(this, 'span', options);
+    },
     scrollIntoView() {},
-    getBoundingClientRect: () => ({ left: 0, top: 0, right: 600, bottom: 800, width: 600, height: 800 }),
-    setPointerCapture(this: HTMLElement, id: number) { this.dataset.capture = String(id); },
-    hasPointerCapture(this: HTMLElement, id: number) { return this.dataset.capture === String(id); },
-    releasePointerCapture(this: HTMLElement) { delete this.dataset.capture; }
+    getBoundingClientRect: () => ({
+      left: 0,
+      top: 0,
+      right: 600,
+      bottom: 800,
+      width: 600,
+      height: 800,
+    }),
+    setPointerCapture(this: HTMLElement, id: number) {
+      this.dataset.capture = String(id);
+    },
+    hasPointerCapture(this: HTMLElement, id: number) {
+      return this.dataset.capture === String(id);
+    },
+    releasePointerCapture(this: HTMLElement) {
+      delete this.dataset.capture;
+    },
   });
-  const scanButton = doc.createElement('button'); scanButton.setAttribute('aria-label', 'Detect answer lines in PDF');
+  const scanButton = doc.createElement('button');
+  scanButton.setAttribute('aria-label', 'Detect answer lines in PDF');
   const viewports = Array.from({ length: pageCount }, () => ({
-    width: 600, height: 800, scale: 1, rotation, convertToPdfPoint: (x: number, y: number) => [x, 800 - y], convertToViewportRectangle: (r: number[]) => [r[0]!, 800 - r[1]!, r[2]!, 800 - r[3]!]
+    width: 600,
+    height: 800,
+    scale: 1,
+    rotation,
+    convertToPdfPoint: (x: number, y: number) => [x, 800 - y],
+    convertToViewportRectangle: (r: number[]) => [r[0]!, 800 - r[1]!, r[2]!, 800 - r[3]!],
   }));
-  const native = { identity: {}, element: doc.querySelector('#editor')!, file: {}, toolbarHost: () => doc.querySelector('#tools')!, answerLineButton: () => scanButton, pages: () => Array.from({ length: pageCount }, (_, i) => ({ div: doc.querySelector(i ? '#page' + (i + 1) : '#page')!, number: i + 1, annotationElements: () => [], viewport: viewports[i] })) } as unknown as EditorSurface;
+  const native = {
+    identity: {},
+    element: doc.querySelector('#editor')!,
+    file: {},
+    toolbarHost: () => doc.querySelector('#tools')!,
+    answerLineButton: () => scanButton,
+    pages: () =>
+      Array.from({ length: pageCount }, (_, i) => ({
+        div: doc.querySelector(i ? '#page' + (i + 1) : '#page')!,
+        number: i + 1,
+        viewport: viewports[i],
+      })),
+  } as unknown as EditorSurface;
   if (visible) {
-    Object.assign(native, { editablePages: () => native.pages().filter(page => visible.includes(page.number)), revealPage: (number: number) => visible.splice(0, visible.length, number) });
+    Object.assign(native, {
+      editablePages: () => native.pages().filter((page) => visible.includes(page.number)),
+      revealPage: (number: number) => visible.splice(0, visible.length, number),
+    });
   }
-  const sessions = { get: async () => session, preferences: loadToolPreferences({ holdShapes: true }), updatePreferences: async () => {} } as unknown as VaultSessions;
+  const sessions = {
+    get: async () => session,
+    preferences: loadToolPreferences({ holdShapes: true }),
+    updatePreferences: async () => {},
+  } as unknown as VaultSessions;
   const scopes: MockScope[] = [];
-  const app = withKeymap ? { scope: {}, keymap: {
-    pushScope(scope: MockScope) { scopes.push(scope); },
-    popScope(scope: MockScope) { const index = scopes.lastIndexOf(scope); if (index >= 0) scopes.splice(index, 1); }
-  } } : {};
+  const app = withKeymap
+    ? {
+        scope: {},
+        keymap: {
+          pushScope(scope: MockScope) {
+            scopes.push(scope);
+          },
+          popScope(scope: MockScope) {
+            const index = scopes.lastIndexOf(scope);
+            if (index >= 0) {
+              scopes.splice(index, 1);
+            }
+          },
+        },
+      }
+    : {};
   let noteUndos = 0;
-  if (hostFirst) dom.window.addEventListener('keydown', event => {
-    if (!(event.metaKey || event.ctrlKey) || event.altKey || event.key.toLowerCase() !== 'z') return;
-    const handler = scopes.at(-1)?.handlers.find(handler => handler.key === 'z' && handler.modifiers.includes('Shift') === event.shiftKey);
-    // A matched public Scope handler stops parent lookup even when it permits
-    // native input undo. The host capture listener predates the PDF editor.
-    if (handler) { if (handler.func(event) === false) { event.preventDefault(); event.stopPropagation(); } }
-    else { noteUndos++; event.preventDefault(); event.stopImmediatePropagation(); }
-  }, true);
+  if (hostFirst) {
+    dom.window.addEventListener(
+      'keydown',
+      (event) => {
+        if (!(event.metaKey || event.ctrlKey) || event.altKey || event.key.toLowerCase() !== 'z') {
+          return;
+        }
+        const handler = scopes
+          .at(-1)
+          ?.handlers.find(
+            (handler) =>
+              handler.key === 'z' && handler.modifiers.includes('Shift') === event.shiftKey,
+          );
+        // A matched public Scope handler stops parent lookup even when it permits
+        // native input undo. The host capture listener predates the PDF editor.
+        if (handler) {
+          if (handler.func(event) === false) {
+            event.preventDefault();
+            event.stopPropagation();
+          }
+        } else {
+          noteUndos++;
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+      },
+      true,
+    );
+  }
   if (initialFocus.pdfFocused) {
     const page = native.pages()[0]!.div;
-    page.tabIndex = 0; page.focus();
+    page.tabIndex = 0;
+    page.focus();
   }
   const editor = new TextEditor(app as unknown as App, native, sessions);
   await pause(0);
   const pointer = (target: Element, name: string, x = 0, y = 0, shiftKey = false) => {
-    const event = new dom.window.MouseEvent(name, { bubbles: true, clientX: x, clientY: y, button: 0, shiftKey, cancelable: true });
-    Object.defineProperty(event, 'pointerId', { value: 1 }); target.dispatchEvent(event); return event;
+    const event = new dom.window.MouseEvent(name, {
+      bubbles: true,
+      clientX: x,
+      clientY: y,
+      button: 0,
+      shiftKey,
+      cancelable: true,
+    });
+    Object.defineProperty(event, 'pointerId', { value: 1 });
+    target.dispatchEvent(event);
+    return event;
   };
+  const key = (key: string, options: KeyboardEventInit = {}) =>
+    new dom.window.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...options });
   const tool = (label: string) => {
     const button = doc.querySelector<HTMLButtonElement>(`button[aria-label^="${label}"]`)!;
-    pointer(button, 'pointerdown'); button.focus(); button.click();
+    pointer(button, 'pointerdown');
+    button.focus();
+    button.click();
   };
-  const dispose = () => { (editor as Editor & { unload(): void }).unload(); dom.window.close(); };
-  return { doc, session, editor, sessions, scopes, pointer, tool, dispose, native, viewports, bytes: () => bytes, writes: () => writes, noteUndos: () => noteUndos,
-    clipboard: { get text() { return clipboardText; }, set text(value: string) { clipboardText = value; } } };
+  const dispose = () => {
+    (editor as Editor & { unload(): void }).unload();
+    dom.window.close();
+  };
+  return {
+    doc,
+    session,
+    editor,
+    sessions,
+    scopes,
+    pointer,
+    key,
+    tool,
+    dispose,
+    native,
+    viewports,
+    bytes: () => bytes,
+    writes: () => writes,
+    noteUndos: () => noteUndos,
+    clipboard: {
+      get text() {
+        return clipboardText;
+      },
+      set text(value: string) {
+        clipboardText = value;
+      },
+    },
+  };
 }
 
-test('a 450-page PDF bounds editing layers while retaining an offscreen caret and save/reopen state', async context => {
-  const visible = [1, 2, 3], started = performance.now(), f = await fixture(450, false, 0, undefined, undefined, visible);
+test('a 450-page PDF bounds editing layers while retaining an offscreen caret and save/reopen state', async (context) => {
+  const visible = [1, 2, 3];
+  const started = performance.now();
+  const f = await fixture(450, false, 0, undefined, undefined, visible);
   try {
-    context.diagnostic(JSON.stringify({ pages: 450, mountedLayers: f.doc.querySelectorAll('.pdf-form-studio-layer').length, nodes: f.doc.querySelectorAll('*').length, mountMilliseconds: Math.round(performance.now() - started) }));
+    context.diagnostic(
+      JSON.stringify({
+        pages: 450,
+        mountedLayers: f.doc.querySelectorAll('.pdf-form-studio-layer').length,
+        nodes: f.doc.querySelectorAll('*').length,
+        mountMilliseconds: Math.round(performance.now() - started),
+      }),
+    );
     assert.equal(f.doc.querySelectorAll('.pdf-form-studio-layer').length, 3);
-    const field = f.session.add(1, [80, 500, 340, 540], 14, true); f.session.setValue(field.name, 'Unicode café');
-    const input = f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!; input.focus(); input.setSelectionRange(2, 6);
-    visible.splice(0, visible.length, 448, 449, 450); f.editor.refresh();
+    const field = f.session.add(1, [80, 500, 340, 540], 14, true);
+    f.session.setValue(field.name, 'Unicode café');
+    const input = f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!;
+    input.focus();
+    input.setSelectionRange(2, 6);
+    visible.splice(0, visible.length, 448, 449, 450);
+    f.editor.refresh();
     assert.equal(f.doc.querySelectorAll('.pdf-form-studio-layer').length, 4);
-    assert.equal(f.doc.activeElement, input); assert(input.isConnected); assert.equal(input.selectionStart, 2); assert.equal(input.selectionEnd, 6);
-    f.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); await pause(0); f.editor.refresh();
-    assert.equal(f.doc.querySelectorAll('.pdf-form-studio-layer').length, 3); assert.equal(input.isConnected, false);
-    await f.session.saveWhenIdle(); assert.equal((await readTextPdf(f.bytes())).fields.find(item => item.name === field.name)!.value, 'Unicode café');
-    visible.splice(0, visible.length, 1); f.editor.refresh();
-    assert.equal(f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!.value, 'Unicode café');
+    assert.equal(f.doc.activeElement, input);
+    assert(input.isConnected);
+    assert.equal(input.selectionStart, 2);
+    assert.equal(input.selectionEnd, 6);
+    f.doc.querySelector<HTMLButtonElement>('#outside')!.focus();
+    await pause(0);
+    f.editor.refresh();
+    assert.equal(f.doc.querySelectorAll('.pdf-form-studio-layer').length, 3);
+    assert.equal(input.isConnected, false);
+    await f.session.saveWhenIdle();
+    assert.equal(
+      (await readTextPdf(f.bytes())).fields.find((item) => item.name === field.name)!.value,
+      'Unicode café',
+    );
+    visible.splice(0, visible.length, 1);
+    f.editor.refresh();
+    assert.equal(
+      f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!.value,
+      'Unicode café',
+    );
     f.editor.addSuggestedField(449, [80, 600, 340, 620], true);
-    assert.equal((f.doc.activeElement as HTMLElement).dataset.pdfField, f.session.snapshot.fields.at(-1)!.name);
-  } finally { f.dispose(); }
+    assert.equal(
+      (f.doc.activeElement as HTMLElement).dataset.pdfField,
+      f.session.snapshot.fields.at(-1)!.name,
+    );
+  } finally {
+    f.dispose();
+  }
 });
 
 test('virtualized pages retain active placement and pen capture until cancelled, without adding history', async () => {
   for (const tool of ['Add text box', 'Pen']) {
-    const visible = [1], f = await fixture(450, false, 0, undefined, undefined, visible);
+    const visible = [1];
+    const f = await fixture(450, false, 0, undefined, undefined, visible);
     try {
-      f.tool(tool); const layer = f.doc.querySelector<HTMLElement>('.pdf-form-studio-layer')!;
-      f.pointer(layer, 'pointerdown', 80, 180); f.pointer(layer, 'pointermove', 240, 280);
-      visible.splice(0, visible.length, 450); f.editor.refresh();
-      assert(layer.isConnected); assert.equal(f.doc.querySelectorAll('.pdf-form-studio-layer').length, 2);
-      f.editor.cancelInteractions(); f.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); await pause(0); f.editor.refresh();
-      assert.equal(layer.isConnected, false); assert.equal(f.doc.querySelectorAll('.pdf-form-studio-layer').length, 1);
-      assert.equal(f.session.snapshot.fields.length, 0); assert.equal(f.session.snapshot.strokes.length, 0); assert.equal(f.session.canUndoStroke, false);
-    } finally { f.dispose(); }
+      f.tool(tool);
+      const layer = f.doc.querySelector<HTMLElement>('.pdf-form-studio-layer')!;
+      f.pointer(layer, 'pointerdown', 80, 180);
+      f.pointer(layer, 'pointermove', 240, 280);
+      visible.splice(0, visible.length, 450);
+      f.editor.refresh();
+      assert(layer.isConnected);
+      assert.equal(f.doc.querySelectorAll('.pdf-form-studio-layer').length, 2);
+      f.editor.cancelInteractions();
+      f.doc.querySelector<HTMLButtonElement>('#outside')!.focus();
+      await pause(0);
+      f.editor.refresh();
+      assert.equal(layer.isConnected, false);
+      assert.equal(f.doc.querySelectorAll('.pdf-form-studio-layer').length, 1);
+      assert.equal(f.session.snapshot.fields.length, 0);
+      assert.equal(f.session.snapshot.strokes.length, 0);
+      assert.equal(f.session.canUndoStroke, false);
+    } finally {
+      f.dispose();
+    }
   }
-});
-
-test('spacing scrubs preview without mutating history, retain the caret and commit once with undo and redo', async () => {
-  const f = await fixture(); try {
-    const field = f.session.add(1, [80, 400, 340, 620], 14, true); f.session.setValue(field.name, 'Unicode café e\u0301\nSecond row');
-    const input = f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!;
-    input.focus(); input.setSelectionRange(2, 8); f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
-    const scrub = f.doc.querySelector<HTMLButtonElement>('[aria-label="Letter spacing"]')!;
-    f.pointer(scrub, 'pointerdown', 100); f.pointer(scrub, 'pointermove', 130);
-    assert.equal(field.letterSpacing, undefined); assert.equal(input.style.letterSpacing, '0.6px'); assert.equal(f.doc.activeElement, input);
-    assert.equal(input.selectionStart, 2); assert.equal(input.selectionEnd, 8);
-    f.pointer(scrub, 'pointermove', 160); f.pointer(scrub, 'pointerup', 160);
-    assert.equal(field.letterSpacing, 1.2); assert.equal(input.selectionStart, 2); assert.equal(input.selectionEnd, 8);
-    f.session.undoStroke(); assert.equal(f.session.snapshot.fields.find(item => item.name === field.name)!.letterSpacing, undefined);
-    f.session.redoStroke(); assert.equal(f.session.snapshot.fields.find(item => item.name === field.name)!.letterSpacing, 1.2);
-    await f.session.save(); assert.equal((await readTextPdf(f.bytes())).fields.find(item => item.name === field.name)!.letterSpacing, 1.2);
-  } finally { f.dispose(); }
-});
-
-test('spacing cancels on Escape, capture loss, blur, disposal and replacement; decimal commas and keyboard stepping work', async () => {
-  for (const interruption of ['Escape', 'pointercancel', 'lostpointercapture', 'blur', 'dispose', 'reload']) {
-    const f = await fixture(); try {
-      const field = f.session.add(1, [80, 400, 340, 620], 14, true); f.session.setValue(field.name, 'Kept'); await f.session.save();
-      f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!.focus(); f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
-      const scrub = f.doc.querySelector<HTMLButtonElement>('[aria-label="Line spacing"]')!;
-      f.pointer(scrub, 'pointerdown', 100); f.pointer(scrub, 'pointermove', 200);
-      if (interruption === 'Escape') f.doc.activeElement!.dispatchEvent(new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-      else if (interruption === 'blur') f.doc.defaultView!.dispatchEvent(new f.doc.defaultView!.Event('blur'));
-      else if (interruption === 'dispose') f.doc.querySelector<HTMLButtonElement>('[aria-label="Close tool settings"]')!.click();
-      else if (interruption === 'reload') await f.session.reload();
-      else f.pointer(scrub, interruption);
-      f.pointer(scrub, 'pointerup', 200); assert.equal(f.session.snapshot.fields.find(item => item.name === field.name)!.lineSpacing ?? 1.2, 1.2);
-      await f.session.save(); assert.equal(f.session.status, 'saved');
-    } finally { f.dispose(); }
-  }
-  const f = await fixture(); try {
-    f.tool('Add text box'); f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
-    const input = f.doc.querySelector<HTMLInputElement>('[aria-label="Line spacing (multiplier)"]')!;
-    input.value = '1,75'; input.dispatchEvent(new f.doc.defaultView!.Event('change', { bubbles: true })); assert.equal(input.value, '1.75');
-    input.dispatchEvent(new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true })); assert.equal(input.value, '1.8');
-    input.value = 'Infinity'; input.dispatchEvent(new f.doc.defaultView!.Event('change')); assert.equal(input.getAttribute('aria-invalid'), 'true');
-    const scrub = f.doc.querySelector<HTMLButtonElement>('[aria-label="Letter spacing"]')!;
-    f.pointer(scrub, 'pointerdown', 100); f.pointer(scrub, 'pointermove', 102); f.pointer(scrub, 'pointerup', 102);
-    assert.equal(f.doc.activeElement?.getAttribute('aria-label'), 'Letter spacing (PDF points)');
-  } finally { f.dispose(); }
 });
 
 test('unfocused spacing values scrub with captured pointers, retain the PDF caret and commit one history action', async () => {
-  for (const [label, distance, expected] of [['Letter spacing (PDF points)', 60, 1.2], ['Line spacing (multiplier)', 100, 1.7]] as const) {
-    const f = await fixture(); try {
-      const field = f.session.add(1, [80, 400, 340, 620], 14, true); f.session.setValue(field.name, 'Unicode café\nSecond line'); await f.session.save();
+  for (const [label, distance, expected] of [
+    ['Letter spacing (PDF points)', 60, 1.2],
+    ['Line spacing (multiplier)', 100, 1.7],
+  ] as const) {
+    const f = await fixture();
+    try {
+      const field = f.session.add(1, [80, 400, 340, 620], 14, true);
+      f.session.setValue(field.name, 'Unicode café\nSecond line');
+      await f.session.save();
       const answer = f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!;
-      answer.focus(); answer.setSelectionRange(2, 8); f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
+      answer.focus();
+      answer.setSelectionRange(2, 8);
+      f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
       const value = f.doc.querySelector<HTMLInputElement>(`[aria-label="${label}"]`)!;
-      f.pointer(value, 'pointerdown', 100); assert(value.hasPointerCapture(1)); f.pointer(value, 'pointermove', 100 + distance);
-      assert.equal(f.doc.activeElement, answer); assert.equal(answer.selectionStart, 2); assert.equal(answer.selectionEnd, 8);
-      assert.equal(field.letterSpacing, undefined); assert.equal(field.lineSpacing, undefined);
-      f.pointer(value, 'pointerup', 100 + distance); assert.equal(value.hasPointerCapture(1), false);
+      f.pointer(value, 'pointerdown', 100);
+      assert(value.hasPointerCapture(1));
+      f.pointer(value, 'pointermove', 100 + distance);
+      assert.equal(f.doc.activeElement, answer);
+      assert.equal(answer.selectionStart, 2);
+      assert.equal(answer.selectionEnd, 8);
+      assert.equal(field.letterSpacing, undefined);
+      assert.equal(field.lineSpacing, undefined);
+      f.pointer(value, 'pointerup', 100 + distance);
+      assert.equal(value.hasPointerCapture(1), false);
       const property = label.startsWith('Letter') ? 'letterSpacing' : 'lineSpacing';
       assert.equal(field[property], expected);
-      f.session.undoStroke(); assert.equal(f.session.snapshot.fields.find(item => item.name === field.name)![property], undefined);
-      f.session.redoStroke(); assert.equal(f.session.snapshot.fields.find(item => item.name === field.name)![property], expected);
-      await f.session.saveWhenIdle(); assert.equal((await readTextPdf(f.bytes())).fields.find(item => item.name === field.name)![property], expected);
-    } finally { f.dispose(); }
+      f.session.undoStroke();
+      assert.equal(
+        f.session.snapshot.fields.find((item) => item.name === field.name)![property],
+        undefined,
+      );
+      f.session.redoStroke();
+      assert.equal(
+        f.session.snapshot.fields.find((item) => item.name === field.name)![property],
+        expected,
+      );
+      await f.session.saveWhenIdle();
+      assert.equal(
+        (await readTextPdf(f.bytes())).fields.find((item) => item.name === field.name)![property],
+        expected,
+      );
+    } finally {
+      f.dispose();
+    }
   }
 });
 
 test('value clicks enter editing and interrupted focused-value scrubs restore spacing and release capture', async () => {
-  for (const interruption of ['Escape', 'pointercancel', 'lostpointercapture', 'blur', 'dispose', 'reload']) {
-    const f = await fixture(); try {
-      const field = f.session.add(1, [80, 400, 340, 620], 14, true); f.session.setValue(field.name, 'Kept'); await f.session.save();
+  for (const interruption of [
+    'Escape',
+    'pointercancel',
+    'lostpointercapture',
+    'blur',
+    'dispose',
+    'reload',
+  ]) {
+    const f = await fixture();
+    try {
+      const field = f.session.add(1, [80, 400, 340, 620], 14, true);
+      f.session.setValue(field.name, 'Kept');
+      await f.session.save();
       const answer = f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!;
-      answer.focus(); f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
-      const value = f.doc.querySelector<HTMLInputElement>('[aria-label="Line spacing (multiplier)"]')!;
-      f.pointer(value, 'pointerdown', 100); f.pointer(value, 'pointermove', 102); f.pointer(value, 'pointerup', 102);
-      assert.equal(f.doc.activeElement, value); assert.equal(f.session.dirty, false);
+      answer.focus();
+      f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
+      const value = f.doc.querySelector<HTMLInputElement>(
+        '[aria-label="Line spacing (multiplier)"]',
+      )!;
+      f.pointer(value, 'pointerdown', 100);
+      f.pointer(value, 'pointermove', 102);
+      f.pointer(value, 'pointerup', 102);
+      assert.equal(f.doc.activeElement, value);
+      assert.equal(f.session.dirty, false);
       value.setSelectionRange(0, 2);
       assert.equal(f.pointer(value, 'pointerdown', 100).defaultPrevented, true);
-      f.pointer(value, 'pointermove', 200); assert.equal(value.hasPointerCapture(1), true); assert.equal(f.doc.activeElement, value);
-      if (interruption === 'Escape') value.dispatchEvent(new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-      else if (interruption === 'blur') f.doc.defaultView!.dispatchEvent(new f.doc.defaultView!.Event('blur'));
-      else if (interruption === 'dispose') f.doc.querySelector<HTMLButtonElement>('[aria-label="Close tool settings"]')!.click();
-      else if (interruption === 'reload') await f.session.reload();
-      else f.pointer(value, interruption);
+      f.pointer(value, 'pointermove', 200);
+      assert.equal(value.hasPointerCapture(1), true);
+      assert.equal(f.doc.activeElement, value);
+      if (interruption === 'Escape') {
+        value.dispatchEvent(f.key('Escape'));
+      } else if (interruption === 'blur') {
+        f.doc.defaultView!.dispatchEvent(new f.doc.defaultView!.Event('blur'));
+      } else if (interruption === 'dispose') {
+        f.doc.querySelector<HTMLButtonElement>('[aria-label="Close tool settings"]')!.click();
+      } else if (interruption === 'reload') {
+        await f.session.reload();
+      } else {
+        f.pointer(value, interruption);
+      }
       assert.equal(value.hasPointerCapture(1), false, interruption);
-      assert.equal(f.session.snapshot.fields.find(item => item.name === field.name)!.lineSpacing, undefined, interruption);
-      assert.equal(f.session.dirty, false, interruption); await f.session.saveWhenIdle();
-    } finally { f.dispose(); }
+      assert.equal(
+        f.session.snapshot.fields.find((item) => item.name === field.name)!.lineSpacing,
+        undefined,
+        interruption,
+      );
+      assert.equal(f.session.dirty, false, interruption);
+      await f.session.saveWhenIdle();
+    } finally {
+      f.dispose();
+    }
   }
 });
 
-test('a focused spacing value remains focused after a scrub and accepts keyboard decimal edits and selection', async () => {
-  const f = await fixture(1, true); try {
-    const field = f.session.add(1, [80, 400, 340, 620], 14, true); f.session.setValue(field.name, 'Original answer'); await f.session.save();
-    f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!.focus(); f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
-    const value = f.doc.querySelector<HTMLInputElement>('[aria-label="Letter spacing (PDF points)"]')!; value.focus(); value.setSelectionRange(0, value.value.length);
-    f.pointer(value, 'pointerdown', 100); f.pointer(value, 'pointermove', 160); f.pointer(value, 'pointerup', 160);
-    assert.equal(f.doc.activeElement, value); assert.equal(field.letterSpacing, 1.2); assert.equal(field.value, 'Original answer');
-    const selectKey = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'ArrowLeft', shiftKey: true, bubbles: true, cancelable: true });
-    value.dispatchEvent(selectKey); assert.equal(selectKey.defaultPrevented, false);
-    f.clipboard.text = 'Unchanged clipboard';
-    for (const key of ['c', 'v', 'd']) {
-      const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key, metaKey: true, bubbles: true, cancelable: true }); value.dispatchEvent(event);
-      assert.equal(f.scopes.at(-1)!.handlers.find(item => item.key === key)!.func(event), undefined);
-      assert.equal(event.defaultPrevented, false);
-    }
-    assert.equal(f.clipboard.text, 'Unchanged clipboard'); assert.equal(f.session.snapshot.fields.length, 1);
-    value.value = '1,35'; value.dispatchEvent(new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
-    assert.equal(field.letterSpacing, 1.35); assert.equal(f.doc.activeElement, value); assert.equal(field.value, 'Original answer');
-    value.dispatchEvent(new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true })); assert.equal(field.letterSpacing, 1.45);
-    value.value = '2,00'; f.pointer(value, 'pointerdown', 100); f.pointer(value, 'pointermove', 150); f.pointer(value, 'pointerup', 150);
-    assert.equal(field.letterSpacing, 3); assert.equal(f.doc.activeElement, value);
-    f.session.undoStroke(); assert.equal(f.session.snapshot.fields.find(item => item.name === field.name)!.letterSpacing, 1.45); assert.equal(value.value, '1.45');
-    value.value = '2,00'; f.pointer(value, 'pointerdown', 100); f.pointer(value, 'pointermove', 150); f.pointer(value, 'pointercancel');
-    assert.equal(value.value, '2,00'); assert.equal(f.session.snapshot.fields.find(item => item.name === field.name)!.letterSpacing, 1.45);
-  } finally { f.dispose(); }
-});
-
 test('spacing resets restore defaults independently, clear validation errors and each undo once', async () => {
-  const f = await fixture(); try {
-    const field = f.session.add(1, [80, 400, 340, 620], 14, true); f.session.setValue(field.name, 'Two lines\nUnicode café');
-    f.session.formatField(field.name, { letterSpacing: 2, lineSpacing: 1.75 }); await f.session.save();
+  const f = await fixture();
+  try {
+    const field = f.session.add(1, [80, 400, 340, 620], 14, true);
+    f.session.setValue(field.name, 'Two lines\nUnicode café');
+    f.session.formatField(field.name, { letterSpacing: 2, lineSpacing: 1.75 });
+    await f.session.save();
     const answer = f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!;
-    answer.focus(); answer.setSelectionRange(2, 8); f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
-    const value = f.doc.querySelector<HTMLInputElement>('[aria-label="Letter spacing (PDF points)"]')!;
-    value.value = 'Infinity'; value.dispatchEvent(new f.doc.defaultView!.Event('change')); assert.equal(value.getAttribute('aria-invalid'), 'true');
-    const reset = f.doc.querySelector<HTMLButtonElement>('[aria-label="Reset letter spacing to 0 pt"]')!;
-    f.pointer(reset, 'pointerdown'); reset.click();
-    assert.equal(field.letterSpacing, 0); assert.equal(field.lineSpacing, 1.75); assert.equal(value.getAttribute('aria-invalid'), 'false');
-    assert.equal(f.doc.activeElement, answer); assert.equal(answer.selectionStart, 2); assert.equal(answer.selectionEnd, 8);
-    f.session.undoStroke(); assert.equal(f.session.snapshot.fields.find(item => item.name === field.name)!.letterSpacing, 2); assert.equal(value.value, '2');
+    answer.focus();
+    answer.setSelectionRange(2, 8);
+    f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
+    const value = f.doc.querySelector<HTMLInputElement>(
+      '[aria-label="Letter spacing (PDF points)"]',
+    )!;
+    value.value = 'Infinity';
+    value.dispatchEvent(new f.doc.defaultView!.Event('change'));
+    assert.equal(value.getAttribute('aria-invalid'), 'true');
+    const reset = f.doc.querySelector<HTMLButtonElement>(
+      '[aria-label="Reset letter spacing to 0 pt"]',
+    )!;
+    f.pointer(reset, 'pointerdown');
+    reset.click();
+    assert.equal(field.letterSpacing, 0);
+    assert.equal(field.lineSpacing, 1.75);
+    assert.equal(value.getAttribute('aria-invalid'), 'false');
+    assert.equal(f.doc.activeElement, answer);
+    assert.equal(answer.selectionStart, 2);
+    assert.equal(answer.selectionEnd, 8);
+    f.session.undoStroke();
+    assert.equal(
+      f.session.snapshot.fields.find((item) => item.name === field.name)!.letterSpacing,
+      2,
+    );
+    assert.equal(value.value, '2');
     f.session.redoStroke();
     f.doc.querySelector<HTMLButtonElement>('[aria-label="Reset line spacing to 1.2 ×"]')!.click();
-    assert.equal(f.session.snapshot.fields.find(item => item.name === field.name)!.lineSpacing, 1.2);
-    f.session.undoStroke(); assert.equal(f.session.snapshot.fields.find(item => item.name === field.name)!.lineSpacing, 1.75);
-    assert.equal(f.session.snapshot.fields.find(item => item.name === field.name)!.letterSpacing, 0);
-    f.session.redoStroke(); await f.session.saveWhenIdle(); const reopened = (await readTextPdf(f.bytes())).fields.find(item => item.name === field.name)!;
-    assert.equal(reopened.letterSpacing, 0); assert.equal(reopened.lineSpacing, 1.2); assert.equal(reopened.value, 'Two lines\nUnicode café');
-    const task = getDocument({ data: f.bytes().slice(), standardFontDataUrl: new URL('../node_modules/pdfjs-dist/standard_fonts/', import.meta.url).pathname });
+    assert.equal(
+      f.session.snapshot.fields.find((item) => item.name === field.name)!.lineSpacing,
+      1.2,
+    );
+    f.session.undoStroke();
+    assert.equal(
+      f.session.snapshot.fields.find((item) => item.name === field.name)!.lineSpacing,
+      1.75,
+    );
+    assert.equal(
+      f.session.snapshot.fields.find((item) => item.name === field.name)!.letterSpacing,
+      0,
+    );
+    f.session.redoStroke();
+    await f.session.saveWhenIdle();
+    const reopened = (await readTextPdf(f.bytes())).fields.find(
+      (item) => item.name === field.name,
+    )!;
+    assert.equal(reopened.letterSpacing, 0);
+    assert.equal(reopened.lineSpacing, 1.2);
+    assert.equal(reopened.value, 'Two lines\nUnicode café');
+    const task = getDocument({
+      data: f.bytes().slice(),
+      standardFontDataUrl: new URL('../node_modules/pdfjs-dist/standard_fonts/', import.meta.url)
+        .pathname,
+    });
     try {
-      const page = await (await task.promise).getPage(1), operators = await page.getOperatorList();
-      const matrices = operators.fnArray.flatMap((op, index) => op === OPS.setTextMatrix ? [operators.argsArray[index]![0] as number[]] : []);
-      const baselines = [...new Set(matrices.map(matrix => matrix[5]!))].sort((a, b) => b - a);
-      assert.equal(baselines.length, 2); assert(Math.abs(baselines[0]! - baselines[1]! - 14 * 1.2) < 0.01);
-      assert.equal((await page.getAnnotations()).find(item => item.fieldName === field.name)!.fieldValue, 'Two lines\nUnicode café');
-    } finally { await task.destroy(); }
-  } finally { f.dispose(); }
-});
-
-test('reset controls preserve authored forms and follow ruled-pitch locks across resize history', async () => {
-  const authored = await fixture(2, false, 0, await authoredForms());
-  try {
-    const input = authored.doc.querySelector<HTMLInputElement>('.is-form-field [data-pdf-field]')!, before = JSON.stringify(authored.session.snapshot.fields);
-    input.focus(); authored.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
-    for (const reset of authored.doc.querySelectorAll<HTMLButtonElement>('.pfs-spacing-reset')) { assert.equal(reset.disabled, true); reset.click(); }
-    for (const control of authored.doc.querySelectorAll<HTMLElement>('.pfs-spacing-value, .pfs-spacing-scrub, .pfs-spacing-reset')) assert.equal(control.getAttribute('aria-description'), 'Spacing is unavailable for this field.');
-    assert.equal(JSON.stringify(authored.session.snapshot.fields), before); assert.equal(authored.session.dirty, false);
-  } finally { authored.dispose(); }
-  const f = await fixture(); try {
-    const added = f.session.add(1, [80, 400, 340, 466.8], 14, true, 0, { spacing: 24, rows: 3 }); f.session.setValue(added.name, 'Ruled answer'); await f.session.save(); await f.session.reload();
-    const field = f.session.snapshot.fields.find(item => item.name === added.name)!;
-    f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!.focus(); f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
-    const reset = f.doc.querySelector<HTMLButtonElement>('[aria-label="Reset line spacing to 1.2 ×"]')!;
-    const value = f.doc.querySelector<HTMLInputElement>('[aria-label="Line spacing (multiplier)"]')!;
-    const scrub = f.doc.querySelector<HTMLButtonElement>('[aria-label="Line spacing"]')!;
-    const warning = 'Printed line spacing. Resize the box to change it.';
-    for (const control of [value, scrub, reset]) assert.equal(control.getAttribute('aria-description'), warning);
-    assert.equal(reset.disabled, true); reset.click(); assert.deepEqual(field.ruled, { spacing: 24, rows: 3 });
-    f.session.updateBox(field.name, [80, 400, 340, 520]); assert.equal(reset.disabled, false);
-    const editingDescription = value.getAttribute('aria-description'); assert(editingDescription?.startsWith('Drag horizontally to adjust'));
-    assert.equal(scrub.getAttribute('aria-description'), 'Drag left or right to adjust.'); assert.equal(reset.hasAttribute('aria-description'), false);
-    f.session.undoStroke(); assert.equal(reset.disabled, true); assert.deepEqual(f.session.snapshot.fields.find(item => item.name === field.name)!.ruled, { spacing: 24, rows: 3 });
-    for (const control of [value, scrub, reset]) assert.equal(control.getAttribute('aria-description'), warning);
-    f.session.redoStroke(); assert.equal(reset.disabled, false); assert.equal(value.getAttribute('aria-description'), editingDescription);
-    assert.equal(scrub.getAttribute('aria-description'), 'Drag left or right to adjust.'); assert.equal(reset.hasAttribute('aria-description'), false);
-  } finally { f.dispose(); }
+      const page = await (await task.promise).getPage(1);
+      const operators = await page.getOperatorList();
+      const matrices = operators.fnArray.flatMap((op, index) =>
+        op === OPS.setTextMatrix ? [operators.argsArray[index]![0] as number[]] : [],
+      );
+      const baselines = [...new Set(matrices.map((matrix) => matrix[5]!))].sort((a, b) => b - a);
+      assert.equal(baselines.length, 2);
+      assert(Math.abs(baselines[0]! - baselines[1]! - 14 * 1.2) < 0.01);
+      assert.equal(
+        (await page.getAnnotations()).find((item) => item.fieldName === field.name)!.fieldValue,
+        'Two lines\nUnicode café',
+      );
+    } finally {
+      await task.destroy();
+    }
+  } finally {
+    f.dispose();
+  }
 });
 
 test('alignment controls expose the authored selection and resize can fit a single narrow glyph below 40pt', async () => {
-  const f = await fixture(); try {
-    const field = f.session.add(1, [80, 400, 340, 620], 14, true); f.session.setValue(field.name, 'iiii'); f.session.formatField(field.name, { alignment: 'right' });
-    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!; frame.focus(); f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
-    assert.equal(f.doc.querySelector('[aria-label="Align right"]')!.getAttribute('aria-pressed'), 'true');
-    f.doc.querySelector<HTMLButtonElement>('[aria-label="Align center"]')!.click(); assert.equal(field.alignment, 'center');
+  const f = await fixture();
+  try {
+    const field = f.session.add(1, [80, 400, 340, 620], 14, true);
+    f.session.setValue(field.name, 'iiii');
+    f.session.formatField(field.name, { alignment: 'right' });
+    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
+    frame.focus();
+    f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
+    assert.equal(
+      f.doc.querySelector('[aria-label="Align right"]')!.getAttribute('aria-pressed'),
+      'true',
+    );
+    f.doc.querySelector<HTMLButtonElement>('[aria-label="Align center"]')!.click();
+    assert.equal(field.alignment, 'center');
     f.doc.querySelector<HTMLButtonElement>('[aria-label="Close tool settings"]')!.click();
-    const minimum = f.session.minimumTextBoxSize(field.name)[0]; assert(minimum < 40);
-    f.pointer(frame.querySelector('[data-resize="e"]')!, 'pointerdown', 340, 500); f.pointer(frame, 'pointermove', 80, 500); f.pointer(frame, 'pointerup', 80, 500);
-    assert(Math.abs(field.widgets[0]!.rect[2] - field.widgets[0]!.rect[0] - minimum) < 0.01); assert.equal(field.value, 'iiii');
-    await f.session.save(); assert.equal((await readTextPdf(f.bytes())).fields.find(item => item.name === field.name)!.value, 'iiii');
-  } finally { f.dispose(); }
+    const minimum = f.session.minimumTextBoxSize(field.name)[0];
+    assert(minimum < 40);
+    f.pointer(frame.querySelector('[data-resize="e"]')!, 'pointerdown', 340, 500);
+    f.pointer(frame, 'pointermove', 80, 500);
+    f.pointer(frame, 'pointerup', 80, 500);
+    assert(Math.abs(field.widgets[0]!.rect[2] - field.widgets[0]!.rect[0] - minimum) < 0.01);
+    assert.equal(field.value, 'iiii');
+    await f.session.save();
+    assert.equal(
+      (await readTextPdf(f.bytes())).fields.find((item) => item.name === field.name)!.value,
+      'iiii',
+    );
+  } finally {
+    f.dispose();
+  }
 });
 
 test('an open text popover keeps its captured document target and closes when keyboard focus moves outside', async () => {
-  const f = await fixture(); try {
-    const field = f.session.add(1, [80, 400, 340, 620], 14, true); f.session.setValue(field.name, 'Retained target');
-    f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!.focus(); f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
-    const center = f.doc.querySelector<HTMLButtonElement>('[aria-label="Align center"]')!; center.focus();
+  const f = await fixture();
+  try {
+    const field = f.session.add(1, [80, 400, 340, 620], 14, true);
+    f.session.setValue(field.name, 'Retained target');
+    f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!.focus();
+    f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
+    const center = f.doc.querySelector<HTMLButtonElement>('[aria-label="Align center"]')!;
+    center.focus();
     // Native focus changes can release the selected-object proxy while a portal owns interaction.
-    Object.assign(f.editor, { selected: undefined }); center.click(); assert.equal(field.alignment, 'center');
-    f.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); assert.equal(f.doc.querySelector('.pfs-tool-popover'), null);
-  } finally { f.dispose(); }
-});
-
-test('an existing unspaced box shows its own defaults after another box changes new-box defaults', async () => {
-  const f = await fixture(); try {
-    const a = f.session.add(1, [80, 400, 340, 620], 14, true), b = f.session.add(1, [80, 100, 340, 320], 14, true);
-    f.session.setValue(a.name, 'First'); f.session.setValue(b.name, 'Existing');
-    const open = (name: string) => { f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${name}"]`)!.focus(); f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click(); };
-    open(a.name); const letter = f.doc.querySelector<HTMLInputElement>('[aria-label="Letter spacing (PDF points)"]')!;
-    letter.value = '2.5'; letter.dispatchEvent(new f.doc.defaultView!.Event('change'));
-    f.doc.querySelector<HTMLButtonElement>('[aria-label="Close tool settings"]')!.click(); open(b.name);
-    assert.equal(f.doc.querySelector<HTMLInputElement>('[aria-label="Letter spacing (PDF points)"]')!.value, '0');
-    assert.equal(f.doc.querySelector<HTMLInputElement>('[aria-label="Line spacing (multiplier)"]')!.value, '1.2'); assert.equal(b.letterSpacing, undefined);
-  } finally { f.dispose(); }
-});
-
-test('glyph resize floors stay in PDF units across zoom, all quarter turns and page-edge anchors', async () => {
-  const seed = await PDFDocument.create(); seed.addPage([600, 800]); const task = getDocument({ data: await seed.save() });
-  try {
-    const page = await (await task.promise).getPage(1);
-    for (const rotation of [0, 90, 180, 270]) for (const scale of [0.5, 1, 2]) {
-      const f = await fixture(); try {
-        f.viewports[0] = page.getViewport({ scale, rotation });
-        const field = f.session.add(1, [0, 0, 250, 250], 18, true); f.session.setValue(field.name, 'i'); f.editor.refresh();
-        const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!, v = f.viewports[0]!;
-        const r = v.convertToViewportRectangle(field.widgets[0]!.rect), screen = [Math.min(r[0]!, r[2]!), Math.min(r[1]!, r[3]!), Math.max(r[0]!, r[2]!), Math.max(r[1]!, r[3]!)];
-        const handle = rotatedHandle('e', rotation), start = [(screen[0]! + screen[2]!) / 2, (screen[1]! + screen[3]!) / 2];
-        const delta = handle === 'e' ? [-2000, 0] : handle === 'w' ? [2000, 0] : handle === 's' ? [0, -2000] : [0, 2000];
-        f.pointer(frame.querySelector('[data-resize="e"]')!, 'pointerdown', start[0]! * 600 / v.width, start[1]! * 800 / v.height);
-        f.pointer(frame, 'pointermove', (start[0]! + delta[0]!) * 600 / v.width, (start[1]! + delta[1]!) * 800 / v.height);
-        f.pointer(frame, 'pointerup', (start[0]! + delta[0]!) * 600 / v.width, (start[1]! + delta[1]!) * 800 / v.height);
-        const rect = field.widgets[0]!.rect; assert(Math.abs(rect[2] - rect[0] - f.session.minimumTextBoxSize(field.name)[0]) < 0.01);
-        assert(rect[0] >= 0 && rect[1] >= 0); assert.equal(field.fontSize, 18); assert.equal(field.value, 'i');
-        await f.session.save(); assert.equal((await readTextPdf(f.bytes())).fields.find(item => item.name === field.name)!.value, 'i');
-      } finally { f.dispose(); }
-    }
-  } finally { await task.destroy(); }
-});
-
-test('mounting an existing form never schedules destructive blank cleanup; authored controls are visible and click to edit', async () => {
-  const seed = await authoredForms(), f = await fixture(1, true, 0, seed);
-  try {
-    await pause(1050); assert.equal(f.writes(), 0); assert.equal(f.session.dirty, false); assert.deepEqual(f.bytes(), seed);
-    assert.equal(f.session.snapshot.fields.length, 8);
-    for (const name of ['Blank', 'Prefilled', prefixBlank, prefixValue, uuidCollision, 'Multiline']) {
-      const input = f.doc.querySelector<HTMLInputElement | HTMLTextAreaElement>(`[data-pdf-field="${name}"]`)!;
-      const frame = input.parentElement!;
-      assert(frame.classList.contains('is-form-field'));
-      assert.equal(frame.style.backgroundColor, 'rgb(230, 242, 255)'); assert.equal(frame.style.borderWidth, '2px');
-      assert.equal(frame.style.borderColor, 'rgb(51, 77, 153)'); assert.equal(frame.querySelector('[data-resize]'), null);
-      assert.equal(input.tagName, name === 'Multiline' ? 'TEXTAREA' : 'INPUT');
-      f.pointer(frame, 'pointerdown', 100, 200); assert.equal(f.doc.activeElement, input); assert.equal(input.readOnly, false);
-      input.value = name === 'Multiline' ? 'Edited row one\nEdited row two' : 'Edited ' + name.slice(-8);
-      input.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true }));
-      f.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); await pause(0);
-      assert(f.session.snapshot.fields.some(field => field.name === name));
-    }
-    assert.equal(f.doc.querySelector('[data-pdf-field="Readonly"]'), null);
-    const prefilled = f.doc.querySelector<HTMLInputElement>('[data-pdf-field="Prefilled"]')!;
-    assert.equal(prefilled.maxLength, 40); assert.equal(prefilled.style.textAlign, 'right');
-    prefilled.parentElement!.focus(); assert.equal(f.doc.activeElement, prefilled, 'Tab into a form frame enters its input');
-    prefilled.value = ''; prefilled.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true }));
-    f.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); await pause(0); await f.session.saveWhenIdle();
-    const saved = await readTextPdf(f.bytes()); assert.equal(saved.fields.length, 8); assert.equal(saved.fields.find(field => field.name === 'Prefilled')!.value, '');
-    assert(saved.fields.some(field => field.name === legacyBlank));
-  } finally { f.dispose(); }
+    Object.assign(f.editor, { selected: undefined });
+    center.click();
+    assert.equal(field.alignment, 'center');
+    f.doc.querySelector<HTMLButtonElement>('#outside')!.focus();
+    assert.equal(f.doc.querySelector('.pfs-tool-popover'), null);
+  } finally {
+    f.dispose();
+  }
 });
 
 test('authored inputs retain geometry, styles, focus and values through zoom and every page rotation', async () => {
-  const seed = await authoredForms(), f = await fixture(1, false, 0, seed);
-  const task = getDocument({ data: seed.slice(), standardFontDataUrl: new URL('../node_modules/pdfjs-dist/standard_fonts/', import.meta.url).pathname });
+  const seed = await authoredForms();
+  const f = await fixture(1, false, 0, seed);
+  const task = getDocument({
+    data: seed.slice(),
+    standardFontDataUrl: new URL('../node_modules/pdfjs-dist/standard_fonts/', import.meta.url)
+      .pathname,
+  });
   try {
     const page = await (await task.promise).getPage(1);
-    const input = f.doc.querySelector<HTMLInputElement>('[data-pdf-field="Blank"]')!, frame = input.parentElement!;
-    const rect = [...f.session.snapshot.fields.find(field => field.name === 'Blank')!.widgets[0]!.rect];
-    f.pointer(frame, 'pointerdown', 100, 200); input.value = 'Rotation answer'; input.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true }));
+    const input = f.doc.querySelector<HTMLInputElement>('[data-pdf-field="Blank"]')!;
+    const frame = input.parentElement!;
+    const rect = [
+      ...f.session.snapshot.fields.find((field) => field.name === 'Blank')!.widgets[0]!.rect,
+    ];
+    f.pointer(frame, 'pointerdown', 100, 200);
+    input.value = 'Rotation answer';
+    input.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true }));
     input.setSelectionRange(3, 6);
-    for (const rotation of [0, 90, 180, 270]) for (const scale of [0.5, 2]) {
-      const viewport = page.getViewport({ scale, rotation }); f.viewports[0] = viewport; f.editor.refresh();
-      assert.equal(input.style.fontSize, `${16 * scale}px`); assert.equal(frame.style.borderWidth, `${2 * scale}px`);
-      assert.equal(frame.style.transform, `rotate(${rotation}deg)`); assert.equal(f.doc.activeElement, input);
-      assert.equal(input.selectionStart, 3); assert.equal(input.selectionEnd, 6);
-      const r = viewport.convertToViewportRectangle(rect), left = Math.min(r[0]!, r[2]!), right = Math.max(r[0]!, r[2]!), top = Math.min(r[1]!, r[3]!), bottom = Math.max(r[1]!, r[3]!);
-      assert.equal(frame.style.left, `${rotation === 90 || rotation === 180 ? right : left}px`);
-      assert.equal(frame.style.top, `${rotation === 180 || rotation === 270 ? bottom : top}px`);
+    for (const rotation of [0, 90, 180, 270]) {
+      for (const scale of [0.5, 2]) {
+        const viewport = page.getViewport({ scale, rotation });
+        f.viewports[0] = viewport;
+        f.editor.refresh();
+        assert.equal(input.style.fontSize, `${16 * scale}px`);
+        assert.equal(frame.style.borderWidth, `${2 * scale}px`);
+        assert.equal(frame.style.transform, `rotate(${rotation}deg)`);
+        assert.equal(f.doc.activeElement, input);
+        assert.equal(input.selectionStart, 3);
+        assert.equal(input.selectionEnd, 6);
+        const r = viewport.convertToViewportRectangle(rect);
+        const left = Math.min(r[0]!, r[2]!);
+        const right = Math.max(r[0]!, r[2]!);
+        const top = Math.min(r[1]!, r[3]!);
+        const bottom = Math.max(r[1]!, r[3]!);
+        assert.equal(frame.style.left, `${rotation === 90 || rotation === 180 ? right : left}px`);
+        assert.equal(frame.style.top, `${rotation === 180 || rotation === 270 ? bottom : top}px`);
+      }
     }
-    f.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); await f.session.saveWhenIdle();
-    assert.deepEqual((await readTextPdf(f.bytes())).fields.find(field => field.name === 'Blank')!.widgets[0]!.rect, rect);
-  } finally { f.dispose(); await task.destroy(); }
+    f.doc.querySelector<HTMLButtonElement>('#outside')!.focus();
+    await f.session.saveWhenIdle();
+    assert.deepEqual(
+      (await readTextPdf(f.bytes())).fields.find((field) => field.name === 'Blank')!.widgets[0]!
+        .rect,
+      rect,
+    );
+  } finally {
+    f.dispose();
+    await task.destroy();
+  }
 });
 
 test('two document windows share authored values and preserve blanks during focus handoff, autosave and undo/redo', async () => {
-  const seed = await authoredForms(), main = await fixture(1, true, 0, seed), popout = await fixture(1, true, 0, seed, main.session);
+  const seed = await authoredForms();
+  const main = await fixture(1, true, 0, seed);
+  const popout = await fixture(1, true, 0, seed, main.session);
   try {
     const a = main.doc.querySelector<HTMLInputElement>(`[data-pdf-field="${prefixBlank}"]`)!;
     const b = popout.doc.querySelector<HTMLInputElement>(`[data-pdf-field="${prefixBlank}"]`)!;
-    main.pointer(a.parentElement!, 'pointerdown', 100, 200); a.value = 'Main answer'; a.dispatchEvent(new main.doc.defaultView!.Event('input', { bubbles: true }));
+    main.pointer(a.parentElement!, 'pointerdown', 100, 200);
+    a.value = 'Main answer';
+    a.dispatchEvent(new main.doc.defaultView!.Event('input', { bubbles: true }));
     assert.equal(b.value, 'Main answer');
-    popout.pointer(b.parentElement!, 'pointerdown', 100, 200); b.value = ''; b.dispatchEvent(new popout.doc.defaultView!.Event('input', { bubbles: true }));
-    main.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); popout.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); await pause(0);
-    assert.equal(main.session.pruneEmptyBoxes(), 0); await main.session.saveWhenIdle();
+    popout.pointer(b.parentElement!, 'pointerdown', 100, 200);
+    b.value = '';
+    b.dispatchEvent(new popout.doc.defaultView!.Event('input', { bubbles: true }));
+    main.doc.querySelector<HTMLButtonElement>('#outside')!.focus();
+    popout.doc.querySelector<HTMLButtonElement>('#outside')!.focus();
+    await pause(0);
+    assert.equal(main.session.pruneEmptyBoxes(), 0);
+    await main.session.saveWhenIdle();
     assert.equal((await readTextPdf(main.bytes())).fields.length, 8);
-    b.parentElement!.focus(); b.value = 'Popout answer'; b.dispatchEvent(new popout.doc.defaultView!.Event('input', { bubbles: true }));
-    popout.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); await main.session.saveWhenIdle();
-    assert.equal((await readTextPdf(main.bytes())).fields.find(field => field.name === prefixBlank)!.value, 'Popout answer');
-    main.session.undoStroke(); assert.equal(a.value, ''); assert.equal(b.value, ''); await main.session.saveWhenIdle();
-    main.session.redoStroke(); assert.equal(a.value, 'Popout answer'); assert.equal(b.value, 'Popout answer'); await main.session.saveWhenIdle();
-  } finally { popout.dispose(); main.dispose(); }
+    b.parentElement!.focus();
+    b.value = 'Popout answer';
+    b.dispatchEvent(new popout.doc.defaultView!.Event('input', { bubbles: true }));
+    popout.doc.querySelector<HTMLButtonElement>('#outside')!.focus();
+    await main.session.saveWhenIdle();
+    assert.equal(
+      (await readTextPdf(main.bytes())).fields.find((field) => field.name === prefixBlank)!.value,
+      'Popout answer',
+    );
+    main.session.undoStroke();
+    assert.equal(a.value, '');
+    assert.equal(b.value, '');
+    await main.session.saveWhenIdle();
+    main.session.redoStroke();
+    assert.equal(a.value, 'Popout answer');
+    assert.equal(b.value, 'Popout answer');
+    await main.session.saveWhenIdle();
+  } finally {
+    popout.dispose();
+    main.dispose();
+  }
 });
 
 test('recovered orphan inputs mount visibly without autosaving and share edits through popout focus, rotation and zoom', async () => {
-  const seed = await orphanForms(), main = await fixture(1, true, 0, seed), popout = await fixture(1, true, 0, seed, main.session);
-  const task = getDocument({ data: seed.slice(), standardFontDataUrl: new URL('../node_modules/pdfjs-dist/standard_fonts/', import.meta.url).pathname });
+  const seed = await orphanForms();
+  const main = await fixture(1, true, 0, seed);
+  const popout = await fixture(1, true, 0, seed, main.session);
+  const task = getDocument({
+    data: seed.slice(),
+    standardFontDataUrl: new URL('../node_modules/pdfjs-dist/standard_fonts/', import.meta.url)
+      .pathname,
+  });
   try {
-    await pause(1050); assert.equal(main.writes(), 0); assert.deepEqual(main.bytes(), seed);
+    await pause(1050);
+    assert.equal(main.writes(), 0);
+    assert.deepEqual(main.bytes(), seed);
     const a = main.doc.querySelector<HTMLTextAreaElement>('[data-pdf-field="Orphan multiline"]')!;
     const b = popout.doc.querySelector<HTMLTextAreaElement>('[data-pdf-field="Orphan multiline"]')!;
-    assert.equal(a.tagName, 'TEXTAREA'); assert.equal(a.parentElement!.style.borderWidth, '1px');
+    assert.equal(a.tagName, 'TEXTAREA');
+    assert.equal(a.parentElement!.style.borderWidth, '1px');
     assert.equal(a.parentElement!.style.backgroundColor, 'rgb(255, 255, 255)');
-    main.pointer(a.parentElement!, 'pointerdown', 100, 200); assert.equal(main.doc.activeElement, a);
-    a.value = 'Main row\nSecond row'; a.dispatchEvent(new main.doc.defaultView!.Event('input', { bubbles: true })); assert.equal(b.value, a.value);
+    main.pointer(a.parentElement!, 'pointerdown', 100, 200);
+    assert.equal(main.doc.activeElement, a);
+    a.value = 'Main row\nSecond row';
+    a.dispatchEvent(new main.doc.defaultView!.Event('input', { bubbles: true }));
+    assert.equal(b.value, a.value);
     const page = await (await task.promise).getPage(1);
-    for (const rotation of [0, 90, 180, 270]) for (const scale of [0.5, 2]) {
-      main.viewports[0] = page.getViewport({ rotation, scale }); main.editor.refresh();
-      assert.equal(a.style.fontSize, `${12 * scale}px`); assert.equal(a.parentElement!.style.borderWidth, `${scale}px`);
-      assert.equal(a.parentElement!.style.transform, `rotate(${rotation}deg)`); assert.equal(main.doc.activeElement, a);
+    for (const rotation of [0, 90, 180, 270]) {
+      for (const scale of [0.5, 2]) {
+        main.viewports[0] = page.getViewport({ rotation, scale });
+        main.editor.refresh();
+        assert.equal(a.style.fontSize, `${12 * scale}px`);
+        assert.equal(a.parentElement!.style.borderWidth, `${scale}px`);
+        assert.equal(a.parentElement!.style.transform, `rotate(${rotation}deg)`);
+        assert.equal(main.doc.activeElement, a);
+      }
     }
-    main.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); await pause(0); await main.session.saveWhenIdle();
+    main.doc.querySelector<HTMLButtonElement>('#outside')!.focus();
+    await pause(0);
+    await main.session.saveWhenIdle();
     await pause(1050); // Separate typing bursts for the session's normal text undo grouping.
-    popout.pointer(b.parentElement!, 'pointerdown', 100, 200); b.value = ''; b.dispatchEvent(new popout.doc.defaultView!.Event('input', { bubbles: true }));
-    main.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); popout.doc.querySelector<HTMLButtonElement>('#outside')!.focus();
-    await pause(0); await main.session.saveWhenIdle();
-    assert.equal((await readTextPdf(main.bytes())).fields.find(field => field.name === 'Orphan multiline')!.value, '');
-    main.session.undoStroke(); assert.equal(a.value, 'Main row\nSecond row'); assert.equal(b.value, a.value); await main.session.saveWhenIdle();
-    main.session.redoStroke(); assert.equal(a.value, ''); await main.session.saveWhenIdle();
-    assert.equal(main.session.snapshot.fields.length, 9); assert.equal(main.session.pruneEmptyBoxes(), 0);
-  } finally { popout.dispose(); main.dispose(); await task.destroy(); }
-});
-
-test('answer-line scan button sits beside Add text box in the editing toolbar', async () => {
-  const f = await fixture();
-  try {
-    const labels = [...f.doc.querySelectorAll<HTMLButtonElement>('.pdf-form-studio-toolbar > button')].map(button => button.getAttribute('aria-label'));
-    const text = labels.findIndex(label => label?.startsWith('Add text box'));
-    assert.equal(labels[text + 1], 'Detect answer lines in PDF');
-    assert(labels[text + 2]?.startsWith('Highlighter'));
-  } finally { f.dispose(); }
-});
-
-test('tool hover labels stay concise while routine controls retain names without hover help', async () => {
-  const f = await fixture();
-  try {
-    const labels = [...f.doc.querySelectorAll<HTMLButtonElement>('.pdf-form-studio-toolbar > button')].map(button => button.getAttribute('aria-label'));
-    for (const label of ['Select', 'Add text box', 'Highlighter', 'Pen', 'Eraser']) assert(labels.includes(label));
-    assert.equal(f.doc.querySelector('.pdf-form-studio-status')!.hasAttribute('aria-label'), false, 'visible save status does not become a hover tooltip');
-    const field = f.session.add(1, [80, 580, 240, 610], 12, true); f.session.setValue(field.name, 'Settings');
-    f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!.focus(); f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
-    for (const selector of ['.pfs-spacing-value', '.pfs-swatch', '.pfs-alignment button', '.pfs-text-sizes button']) {
-      const controls = f.doc.querySelectorAll<HTMLElement>(selector); assert(controls.length);
-      for (const control of controls) { assert(control.getAttribute('aria-label')); assert.equal(control.getAttribute('data-tooltip-classes'), 'pfs-overlay-tooltip'); assert.equal(control.hasAttribute('title'), false); }
-    }
-    const scrub = f.doc.querySelector<HTMLButtonElement>('.pfs-spacing-scrub')!;
-    assert.equal(scrub.getAttribute('aria-label'), 'Letter spacing'); assert.notEqual(scrub.getAttribute('data-tooltip-classes'), 'pfs-overlay-tooltip');
-    assert.equal(scrub.getAttribute('aria-description'), 'Drag left or right to adjust.');
-    assert(f.doc.querySelector<HTMLButtonElement>('.pfs-spacing-reset')!.getAttribute('aria-label')!.startsWith('Reset'));
-  } finally { f.dispose(); }
-});
-
-test('a newly placed empty box can move, resize and switch to Select before typing; leaving it deletes it', async () => {
-  const f = await fixture();
-  try {
-    f.tool('Add text box'); const layer = f.doc.querySelector('.pdf-form-studio-layer')!;
-    f.pointer(layer, 'pointerdown', 80, 180); f.pointer(layer, 'pointerup', 80, 180);
-    const field = f.session.snapshot.fields[0]!, original = [...field.widgets[0]!.rect];
-    assert.equal(f.doc.activeElement?.tagName, 'TEXTAREA');
-    // Native toolbar activation can blur to body before its click/focus runs.
-    (f.doc.activeElement as HTMLElement).blur(); await pause(0);
-    assert.equal(f.session.snapshot.fields.length, 1);
-    f.tool('Select'); await pause(0); assert.equal(f.session.snapshot.fields.length, 1);
-    const frame = f.doc.querySelector('.pdf-form-studio-box')!;
-    f.pointer(frame, 'pointerdown', 100, 175); f.pointer(frame, 'pointermove', 140, 200); f.pointer(frame, 'pointerup', 140, 200);
-    assert.equal(f.session.snapshot.fields.length, 1); assert.equal(field.widgets[0]!.rect[0], original[0]! + 40);
-    const handle = frame.querySelector('[data-resize="e"]')!;
-    const width = field.widgets[0]!.rect[2] - field.widgets[0]!.rect[0];
-    f.pointer(handle, 'pointerdown', 340, 200); f.pointer(frame, 'pointermove', 380, 200); f.pointer(frame, 'pointerup', 380, 200);
-    assert(field.widgets[0]!.rect[2] - field.widgets[0]!.rect[0] > width);
-    assert.equal(f.session.pruneEmptyBoxes(), 0);
-    const outside = f.doc.querySelector<HTMLButtonElement>('#outside')!; f.pointer(outside, 'pointerdown'); outside.focus(); await pause(0);
-    assert.equal(f.session.snapshot.fields.length, 0);
-  } finally { f.dispose(); }
+    popout.pointer(b.parentElement!, 'pointerdown', 100, 200);
+    b.value = '';
+    b.dispatchEvent(new popout.doc.defaultView!.Event('input', { bubbles: true }));
+    main.doc.querySelector<HTMLButtonElement>('#outside')!.focus();
+    popout.doc.querySelector<HTMLButtonElement>('#outside')!.focus();
+    await pause(0);
+    await main.session.saveWhenIdle();
+    assert.equal(
+      (await readTextPdf(main.bytes())).fields.find((field) => field.name === 'Orphan multiline')!
+        .value,
+      '',
+    );
+    main.session.undoStroke();
+    assert.equal(a.value, 'Main row\nSecond row');
+    assert.equal(b.value, a.value);
+    await main.session.saveWhenIdle();
+    main.session.redoStroke();
+    assert.equal(a.value, '');
+    await main.session.saveWhenIdle();
+    assert.equal(main.session.snapshot.fields.length, 9);
+    assert.equal(main.session.pruneEmptyBoxes(), 0);
+  } finally {
+    popout.dispose();
+    main.dispose();
+    await task.destroy();
+  }
 });
 test('modifier-wheel zoom cancels text placement before changing its viewport and releases autosave', async () => {
   for (const modifier of ['ctrlKey', 'metaKey']) {
@@ -557,20 +804,42 @@ test('modifier-wheel zoom cancels text placement before changing its viewport an
       interrupt: () => f.editor.cancelInteractions(),
       zoom: () => {
         assert.equal(f.doc.querySelector('.pdf-form-studio-placement'), null);
-        f.viewports[0]!.scale = 2; f.viewports[0]!.width = 1200; f.viewports[0]!.height = 1600;
+        f.viewports[0]!.scale = 2;
+        f.viewports[0]!.width = 1200;
+        f.viewports[0]!.height = 1600;
         f.editor.refresh();
-      }
+      },
     });
     try {
-      f.tool('Add text box'); f.pointer(layer, 'pointerdown', 80, 180); f.pointer(layer, 'pointermove', 240, 280);
+      f.tool('Add text box');
+      f.pointer(layer, 'pointerdown', 80, 180);
+      f.pointer(layer, 'pointermove', 240, 280);
       assert(f.doc.querySelector('.pdf-form-studio-placement'));
-      layer.dispatchEvent(new f.doc.defaultView!.WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: -20, [modifier]: true }));
+      layer.dispatchEvent(
+        new f.doc.defaultView!.WheelEvent('wheel', {
+          bubbles: true,
+          cancelable: true,
+          deltaY: -20,
+          [modifier]: true,
+        }),
+      );
       f.pointer(layer, 'pointerup', 240, 280);
-      assert.equal(f.session.snapshot.fields.length, 0); assert.equal(f.session.canUndoStroke, false);
-      const field = f.session.add(1, [80, 500, 340, 540], 14, true); f.session.setValue(field.name, 'Retained edit');
-      await Promise.race([f.session.saveWhenIdle(), pause(1000).then(() => { throw new Error('Cancelled placement blocked autosave'); })]);
-      assert.equal(f.writes(), 1); assert.equal((await readTextPdf(f.bytes())).fields[0]!.value, 'Retained edit');
-    } finally { stop(); f.dispose(); }
+      assert.equal(f.session.snapshot.fields.length, 0);
+      assert.equal(f.session.canUndoStroke, false);
+      const field = f.session.add(1, [80, 500, 340, 540], 14, true);
+      f.session.setValue(field.name, 'Retained edit');
+      await Promise.race([
+        f.session.saveWhenIdle(),
+        pause(1000).then(() => {
+          throw new Error('Cancelled placement blocked autosave');
+        }),
+      ]);
+      assert.equal(f.writes(), 1);
+      assert.equal((await readTextPdf(f.bytes())).fields[0]!.value, 'Retained edit');
+    } finally {
+      stop();
+      f.dispose();
+    }
   }
 });
 test('click and drag Text placement each return to Select after one box', async () => {
@@ -580,135 +849,196 @@ test('click and drag Text placement each return to Select after one box', async 
     for (const drag of [false, true]) {
       f.tool('Add text box');
       f.pointer(layer, 'pointerdown', drag ? 340 : 80, drag ? 250 : 180);
-      if (drag) f.pointer(layer, 'pointermove', 500, 300);
+      if (drag) {
+        f.pointer(layer, 'pointermove', 500, 300);
+      }
       f.pointer(layer, 'pointerup', drag ? 500 : 80, drag ? 300 : 180);
-      assert.equal(f.doc.querySelector<HTMLButtonElement>('button[aria-label^="Select"]')!.getAttribute('aria-pressed'), 'true');
-      assert.equal(f.doc.querySelector<HTMLButtonElement>('button[aria-label^="Add text box"]')!.getAttribute('aria-pressed'), 'false');
+      assert.equal(
+        f.doc
+          .querySelector<HTMLButtonElement>('button[aria-label^="Select"]')!
+          .getAttribute('aria-pressed'),
+        'true',
+      );
+      assert.equal(
+        f.doc
+          .querySelector<HTMLButtonElement>('button[aria-label^="Add text box"]')!
+          .getAttribute('aria-pressed'),
+        'false',
+      );
       const input = f.doc.activeElement as HTMLTextAreaElement;
       assert.equal(input.tagName, 'TEXTAREA');
-      input.value = drag ? 'Dragged' : 'Clicked'; input.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true }));
+      input.value = drag ? 'Dragged' : 'Clicked';
+      input.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true }));
       const count = f.session.snapshot.fields.length;
-      f.pointer(layer, 'pointerdown', 550, 450); f.pointer(layer, 'pointerup', 550, 450);
+      f.pointer(layer, 'pointerdown', 550, 450);
+      f.pointer(layer, 'pointerup', 550, 450);
       assert.equal(f.session.snapshot.fields.length, count);
     }
-    assert.deepEqual(f.session.snapshot.fields.map(field => field.value), ['Clicked', 'Dragged']);
-  } finally { f.dispose(); }
+    assert.deepEqual(
+      f.session.snapshot.fields.map((field) => field.value),
+      ['Clicked', 'Dragged'],
+    );
+  } finally {
+    f.dispose();
+  }
 });
-test('keyboard unfocus removes an empty box, while typed text survives leaving and reopening', async () => {
-  const f = await fixture();
-  try {
-    f.editor.addSuggestedField(1, [80, 600, 340, 620]);
-    const outside = f.doc.querySelector<HTMLButtonElement>('#outside')!; outside.focus(); await pause(0);
-    assert.equal(f.session.snapshot.fields.length, 0);
-    f.editor.addSuggestedField(1, [80, 600, 340, 620]);
-    const input = f.doc.querySelector<HTMLTextAreaElement>('textarea[data-pdf-field]')!;
-    input.value = 'Filled answer'; input.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true })); outside.focus(); await pause(0);
-    await f.session.save(); assert.equal((await readTextPdf(f.bytes())).fields[0]!.value, 'Filled answer');
-  } finally { f.dispose(); }
-});
-test('real hold timer snaps a circle and dragging while held resizes its saved geometry instead of adding freehand points', async () => {
-  const f = await fixture();
-  try {
-    f.tool('Pen'); const layer = f.doc.querySelector('.pdf-form-studio-layer')!;
-    f.pointer(layer, 'pointerdown', 250, 250);
-    for (let i = 1; i <= 96; i++) f.pointer(layer, 'pointermove', 200 + 50 * Math.cos(i / 96 * Math.PI * 2), 250 + 50 * Math.sin(i / 96 * Math.PI * 2));
-    await pause(800);
-    const hint = f.doc.querySelector<HTMLElement>('.pfs-ink-hint')!; assert(!hint.hidden); assert.equal(hint.textContent, 'Circle');
-    f.pointer(layer, 'pointermove', 300, 250); assert(!hint.hidden);
-    f.pointer(layer, 'pointerup', 300, 250); await f.session.save();
-    const points = (await readTextPdf(f.bytes())).strokes[0]!.points;
-    assert.equal(points.length, 97); assert.deepEqual(points[0], points.at(-1));
-    const width = Math.max(...points.map(p => p[0])) - Math.min(...points.map(p => p[0]));
-    assert(width > 190 && width < 210);
-  } finally { f.dispose(); }
-});
-
 
 test('blank-space marquee selects mixed objects, moves as one group, cancels and undoes atomically', async () => {
   const f = await fixture();
   try {
-    const text = f.session.add(1, [80, 580, 180, 610], 14, true); f.session.setValue(text.name, 'Group answer');
-    const stroke = f.session.addStroke(1, 'scribble', [[230, 580], [260, 620], [290, 580]], 2);
+    const text = f.session.add(1, [80, 580, 180, 610], 14, true);
+    f.session.setValue(text.name, 'Group answer');
+    const stroke = f.session.addStroke(
+      1,
+      'scribble',
+      [
+        [230, 580],
+        [260, 620],
+        [290, 580],
+      ],
+      2,
+    );
     const page = f.doc.querySelector('#page')!;
-    f.pointer(page, 'pointerdown', 60, 160); f.pointer(page, 'pointermove', 310, 240); f.pointer(page, 'pointerup', 310, 240);
+    f.pointer(page, 'pointerdown', 60, 160);
+    f.pointer(page, 'pointermove', 310, 240);
+    f.pointer(page, 'pointerup', 310, 240);
     assert.equal(f.doc.querySelectorAll('.is-multi-selected').length, 2);
-    const originalText = [...text.widgets[0]!.rect], originalInk = structuredClone(stroke.points);
+    const originalText = [...text.widgets[0]!.rect];
+    const originalInk = structuredClone(stroke.points);
     const frame = f.doc.querySelector('.pdf-form-studio-box')!;
-    f.pointer(frame, 'pointerdown', 100, 200); f.pointer(page, 'pointermove', 130, 220);
-    assert.deepEqual(text.widgets[0]!.rect, originalText, 'drag preview must not change persistent state');
-    f.pointer(page, 'pointercancel'); assert.deepEqual(text.widgets[0]!.rect, originalText);
-    f.pointer(frame, 'pointerdown', 100, 200); f.pointer(page, 'pointermove', 130, 220); f.pointer(page, 'pointerup', 130, 220);
+    f.pointer(frame, 'pointerdown', 100, 200);
+    f.pointer(page, 'pointermove', 130, 220);
+    assert.deepEqual(
+      text.widgets[0]!.rect,
+      originalText,
+      'drag preview must not change persistent state',
+    );
+    f.pointer(page, 'pointercancel');
+    assert.deepEqual(text.widgets[0]!.rect, originalText);
+    f.pointer(frame, 'pointerdown', 100, 200);
+    f.pointer(page, 'pointermove', 130, 220);
+    f.pointer(page, 'pointerup', 130, 220);
     assert.deepEqual(text.widgets[0]!.rect, [110, 560, 210, 590]);
-    assert.deepEqual(f.session.snapshot.strokes[0]!.points, originalInk.map(([x, y]) => [x + 30, y - 20]));
-    f.doc.body.dispatchEvent(new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true, cancelable: true })); assert.deepEqual(f.session.snapshot.fields[0]!.widgets[0]!.rect, originalText); assert.deepEqual(f.session.snapshot.strokes[0]!.points, originalInk);
-    f.session.redoStroke(); await f.session.save();
-    const reopened = await readTextPdf(f.bytes()); assert.equal(reopened.fields[0]!.value, 'Group answer'); assert.equal(reopened.strokes.length, 1);
-    f.doc.body.dispatchEvent(new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'Delete', bubbles: true, cancelable: true }));
-    assert.equal(f.session.snapshot.fields.length, 0); assert.equal(f.session.snapshot.strokes.length, 0);
-    f.session.undoStroke(); assert.equal(f.session.snapshot.fields.length, 1); assert.equal(f.session.snapshot.strokes.length, 1);
-  } finally { f.dispose(); }
+    assert.deepEqual(
+      f.session.snapshot.strokes[0]!.points,
+      originalInk.map(([x, y]) => [x + 30, y - 20]),
+    );
+    f.doc.body.dispatchEvent(f.key('z', { metaKey: true }));
+    assert.deepEqual(f.session.snapshot.fields[0]!.widgets[0]!.rect, originalText);
+    assert.deepEqual(f.session.snapshot.strokes[0]!.points, originalInk);
+    f.session.redoStroke();
+    await f.session.save();
+    const reopened = await readTextPdf(f.bytes());
+    assert.equal(reopened.fields[0]!.value, 'Group answer');
+    assert.equal(reopened.strokes.length, 1);
+    f.doc.body.dispatchEvent(f.key('Delete'));
+    assert.equal(f.session.snapshot.fields.length, 0);
+    assert.equal(f.session.snapshot.strokes.length, 0);
+    f.session.undoStroke();
+    assert.equal(f.session.snapshot.fields.length, 1);
+    assert.equal(f.session.snapshot.strokes.length, 1);
+  } finally {
+    f.dispose();
+  }
 });
-test('printed PDF text and editing inputs retain native drags; Shift-click adds and removes objects', async () => {
-  const f = await fixture();
-  try {
-    const a = f.session.add(1, [80, 580, 180, 610], 14, true); f.session.setValue(a.name, 'First');
-    const b = f.session.add(1, [230, 580, 330, 610], 14, true); f.session.setValue(b.name, 'Second');
-    const frames = f.doc.querySelectorAll('.pdf-form-studio-box');
-    f.pointer(frames[0]!, 'pointerdown', 100, 200, true); f.pointer(frames[1]!, 'pointerdown', 250, 200, true);
-    assert.equal(f.doc.querySelectorAll('.is-multi-selected').length, 2);
-    f.pointer(frames[1]!, 'pointerdown', 250, 200, true); assert.equal(f.doc.querySelectorAll('.is-multi-selected').length, 1);
-    const textLayer = f.doc.createElement('div'); textLayer.className = 'pfs-text-layer'; const span = f.doc.createElement('span'); span.textContent = 'Printed PDF text'; textLayer.append(span); f.doc.querySelector('#page')!.append(textLayer);
-    assert.equal(f.pointer(span, 'pointerdown', 100, 400).defaultPrevented, false);
-    assert.equal(f.doc.querySelectorAll('.is-multi-selected').length, 0);
-    const input = frames[0]!.querySelector<HTMLTextAreaElement>('textarea')!; input.focus();
-    assert.equal(f.pointer(input, 'pointerdown', 100, 200).defaultPrevented, false);
-    assert.equal(f.pointer(input, 'pointermove', 160, 200).defaultPrevented, false);
-  } finally { f.dispose(); }
-});
-
 
 test('another view starting an ink action cancels a pending group drag without changing its geometry', async () => {
   const f = await fixture();
   try {
-    const text = f.session.add(1, [80, 580, 180, 610], 14, true); f.session.setValue(text.name, 'Keep position');
+    const text = f.session.add(1, [80, 580, 180, 610], 14, true);
+    f.session.setValue(text.name, 'Keep position');
     const page = f.doc.querySelector('#page')!;
-    f.pointer(page, 'pointerdown', 60, 160); f.pointer(page, 'pointermove', 220, 240); f.pointer(page, 'pointerup', 220, 240);
-    f.pointer(f.doc.querySelector('.pdf-form-studio-box')!, 'pointerdown', 100, 200); f.pointer(page, 'pointermove', 160, 260);
-    const owner = {}; assert(f.session.beginInkAction(owner));
-    f.session.addStroke(1, 'scribble', [[400, 400], [450, 450]], 2, undefined, owner);
-    f.pointer(page, 'pointerup', 160, 260); f.session.finishInkAction(false, owner);
-    assert.deepEqual(text.widgets[0]!.rect, [80, 580, 180, 610]); assert.equal(f.session.snapshot.strokes.length, 1);
-    assert.equal((f.doc.querySelector('.pdf-form-studio-box') as HTMLElement).style.translate, '0px 0px');
-  } finally { f.dispose(); }
+    f.pointer(page, 'pointerdown', 60, 160);
+    f.pointer(page, 'pointermove', 220, 240);
+    f.pointer(page, 'pointerup', 220, 240);
+    f.pointer(f.doc.querySelector('.pdf-form-studio-box')!, 'pointerdown', 100, 200);
+    f.pointer(page, 'pointermove', 160, 260);
+    const owner = {};
+    assert(f.session.beginInkAction(owner));
+    f.session.addStroke(
+      1,
+      'scribble',
+      [
+        [400, 400],
+        [450, 450],
+      ],
+      2,
+      undefined,
+      owner,
+    );
+    f.pointer(page, 'pointerup', 160, 260);
+    f.session.finishInkAction(false, owner);
+    assert.deepEqual(text.widgets[0]!.rect, [80, 580, 180, 610]);
+    assert.equal(f.session.snapshot.strokes.length, 1);
+    assert.equal(
+      (f.doc.querySelector('.pdf-form-studio-box') as HTMLElement).style.translate,
+      '0px 0px',
+    );
+  } finally {
+    f.dispose();
+  }
 });
-
 
 test('detected answers use Select, reuse fields and never create boxes from subsequent blank-page clicks', async () => {
   const f = await fixture();
   try {
     const rect = [80, 600, 340, 620] as [number, number, number, number];
-    f.tool('Pen'); f.editor.setAnswerLines([{ page: 1, rect }]); f.editor.addSuggestedField(1, rect);
+    f.tool('Pen');
+    f.editor.setAnswerLines([{ page: 1, rect }]);
+    f.editor.addSuggestedField(1, rect);
     const first = f.session.snapshot.fields[0]!;
-    assert.equal(f.doc.querySelector<HTMLButtonElement>('button[aria-label^="Select"]')!.getAttribute('aria-pressed'), 'true');
-    assert.equal(f.doc.querySelector<HTMLButtonElement>('button[aria-label^="Add text box"]')!.getAttribute('aria-pressed'), 'false');
-    f.editor.addSuggestedField(1, rect); assert.equal(f.session.snapshot.fields.length, 1); assert.equal(f.session.snapshot.fields[0]!.name, first.name);
-    const input = f.doc.activeElement as HTMLTextAreaElement; input.value = 'Keep this answer'; input.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true }));
+    assert.equal(
+      f.doc
+        .querySelector<HTMLButtonElement>('button[aria-label^="Select"]')!
+        .getAttribute('aria-pressed'),
+      'true',
+    );
+    assert.equal(
+      f.doc
+        .querySelector<HTMLButtonElement>('button[aria-label^="Add text box"]')!
+        .getAttribute('aria-pressed'),
+      'false',
+    );
+    f.editor.addSuggestedField(1, rect);
+    assert.equal(f.session.snapshot.fields.length, 1);
+    assert.equal(f.session.snapshot.fields[0]!.name, first.name);
+    const input = f.doc.activeElement as HTMLTextAreaElement;
+    input.value = 'Keep this answer';
+    input.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true }));
     const layer = f.doc.querySelector('.pdf-form-studio-layer')!;
-    f.pointer(layer, 'pointerdown', 150, 250); f.pointer(layer, 'pointerup', 150, 250);
+    f.pointer(layer, 'pointerdown', 150, 250);
+    f.pointer(layer, 'pointerup', 150, 250);
     assert.equal(f.session.snapshot.fields.length, 1);
     const frame = f.doc.querySelector('.pdf-form-studio-box')!;
     for (const element of [frame, frame.querySelector('[data-resize="se"]')!, input]) {
-      assert.equal(element.hasAttribute('aria-label'), false, 'PDF objects do not trigger Obsidian hover labels');
+      assert.equal(
+        element.hasAttribute('aria-label'),
+        false,
+        'PDF objects do not trigger Obsidian hover labels',
+      );
       assert.equal(element.hasAttribute('title'), false);
       const label = f.doc.getElementById(element.getAttribute('aria-labelledby')!);
       assert.equal(label?.hidden, true, 'screen-reader names remain available');
     }
-    f.pointer(frame, 'pointerdown', 100, 180); assert.equal(f.doc.activeElement, input); assert.equal(input.readOnly, false);
-    f.editor.addSuggestedField(1, rect); assert.equal(f.session.snapshot.fields.length, 1); assert.equal(f.session.snapshot.fields[0]!.value, 'Keep this answer');
-    f.editor.setAnswerLines([]); input.blur(); f.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); await pause(0);
-    f.pointer(frame, 'pointerdown', 100, 180); assert.equal(f.doc.activeElement, input);
-    await f.session.save(); const reopened = await readTextPdf(f.bytes()); assert.equal(reopened.fields.length, 1); assert.equal(reopened.fields[0]!.value, 'Keep this answer');
-  } finally { f.dispose(); }
+    f.pointer(frame, 'pointerdown', 100, 180);
+    assert.equal(f.doc.activeElement, input);
+    assert.equal(input.readOnly, false);
+    f.editor.addSuggestedField(1, rect);
+    assert.equal(f.session.snapshot.fields.length, 1);
+    assert.equal(f.session.snapshot.fields[0]!.value, 'Keep this answer');
+    f.editor.setAnswerLines([]);
+    input.blur();
+    f.doc.querySelector<HTMLButtonElement>('#outside')!.focus();
+    await pause(0);
+    f.pointer(frame, 'pointerdown', 100, 180);
+    assert.equal(f.doc.activeElement, input);
+    await f.session.save();
+    const reopened = await readTextPdf(f.bytes());
+    assert.equal(reopened.fields.length, 1);
+    assert.equal(reopened.fields[0]!.value, 'Keep this answer');
+  } finally {
+    f.dispose();
+  }
 });
 test('Tab and Shift+Tab navigate detected lines in page order without duplicates, including offscreen pages', async () => {
   const f = await fixture(2);
@@ -716,172 +1046,186 @@ test('Tab and Shift+Tab navigate detected lines in page order without duplicates
     const a = { page: 1, rect: [80, 600, 340, 620] as [number, number, number, number] };
     const b = { page: 1, rect: [80, 540, 340, 560] as [number, number, number, number] };
     const c = { page: 2, rect: [80, 600, 340, 620] as [number, number, number, number] };
-    f.editor.setAnswerLines([c, b, a]); f.editor.addSuggestedField(a.page, a.rect);
-    const enter = (value: string) => { const input = f.doc.activeElement as HTMLTextAreaElement; input.value = value; input.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true })); return input.dataset.pdfField; };
-    const tab = (shiftKey = false) => { const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true, cancelable: true }); f.doc.activeElement!.dispatchEvent(event); return event; };
-    let escaped = 0; f.doc.addEventListener('keydown', () => escaped++);
-    const first = enter('First'); assert.equal(tab().defaultPrevented, true); const second = enter('Second');
-    assert.equal(tab().defaultPrevented, true); const third = enter('Third');
-    assert.equal(f.doc.activeElement!.closest('#page2')?.id, 'page2'); assert.equal(f.session.snapshot.fields.length, 3); assert.equal(escaped, 0);
-    tab(true); assert.equal((f.doc.activeElement as HTMLElement).dataset.pdfField, second); tab(true); assert.equal((f.doc.activeElement as HTMLElement).dataset.pdfField, first);
-    assert.equal(tab(true).defaultPrevented, false); tab(); tab(); assert.equal((f.doc.activeElement as HTMLElement).dataset.pdfField, third); assert.equal(tab().defaultPrevented, false);
+    f.editor.setAnswerLines([c, b, a]);
+    f.editor.addSuggestedField(a.page, a.rect);
+    const enter = (value: string) => {
+      const input = f.doc.activeElement as HTMLTextAreaElement;
+      input.value = value;
+      input.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true }));
+      return input.dataset.pdfField;
+    };
+    const tab = (shiftKey = false) => {
+      const event = f.key('Tab', { shiftKey });
+      f.doc.activeElement!.dispatchEvent(event);
+      return event;
+    };
+    let escaped = 0;
+    f.doc.addEventListener('keydown', () => escaped++);
+    const first = enter('First');
+    assert.equal(tab().defaultPrevented, true);
+    const second = enter('Second');
+    assert.equal(tab().defaultPrevented, true);
+    const third = enter('Third');
+    assert.equal(f.doc.activeElement!.closest('#page2')?.id, 'page2');
     assert.equal(f.session.snapshot.fields.length, 3);
-    await f.session.save(); const reopened = await readTextPdf(f.bytes()); assert.deepEqual(reopened.fields.map(field => field.value), ['First', 'Second', 'Third']); assert.equal(reopened.fields[2]!.widgets[0]!.page, 2);
-  } finally { f.dispose(); }
-});
-test('leaving a blank detected line prunes only that blank and preserves navigation; Enter remains text editing', async () => {
-  const f = await fixture();
-  try {
-    const lines = [{ page: 1, rect: [80, 600, 340, 620] as [number, number, number, number] }, { page: 1, rect: [80, 540, 340, 560] as [number, number, number, number] }];
-    f.editor.setAnswerLines(lines); f.editor.addSuggestedField(1, lines[0]!.rect);
-    const key = (key: string, shiftKey = false) => { const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key, shiftKey, bubbles: true, cancelable: true }); f.doc.activeElement!.dispatchEvent(event); return event; };
-    key('Tab'); assert.equal(f.session.snapshot.fields.length, 1); assert.deepEqual(f.session.snapshot.fields[0]!.widgets[0]!.rect, lines[1]!.rect);
-    const input = f.doc.activeElement as HTMLTextAreaElement; assert.equal(key('Enter').defaultPrevented, false); assert.equal(f.doc.activeElement, input);
-    input.value = 'Same answer\ncontinued'; input.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true }));
-    key('Tab', true); assert.equal(f.session.snapshot.fields.length, 2); key('Tab'); assert.equal(f.session.snapshot.fields.length, 1); assert.equal(f.doc.activeElement, input);
-    f.editor.setAnswerLines([]); assert.equal(key('Tab', true).defaultPrevented, false);
-  } finally { f.dispose(); }
+    assert.equal(escaped, 0);
+    tab(true);
+    assert.equal((f.doc.activeElement as HTMLElement).dataset.pdfField, second);
+    tab(true);
+    assert.equal((f.doc.activeElement as HTMLElement).dataset.pdfField, first);
+    assert.equal(tab(true).defaultPrevented, false);
+    tab();
+    tab();
+    assert.equal((f.doc.activeElement as HTMLElement).dataset.pdfField, third);
+    assert.equal(tab().defaultPrevented, false);
+    assert.equal(f.session.snapshot.fields.length, 3);
+    await f.session.save();
+    const reopened = await readTextPdf(f.bytes());
+    assert.deepEqual(
+      reopened.fields.map((field) => field.value),
+      ['First', 'Second', 'Third'],
+    );
+    assert.equal(reopened.fields[2]!.widgets[0]!.page, 2);
+  } finally {
+    f.dispose();
+  }
 });
 
 test('answer navigation skips locked fields and cannot mutate a replacing or conflicted session', async () => {
   const f = await fixture();
   try {
-    const lines = [620, 560, 500].map(top => ({ page: 1, rect: [80, top - 20, 340, top] as [number, number, number, number] }));
-    const locked = f.session.add(1, lines[1]!.rect, 14, false); locked.readOnly = true;
-    f.editor.setAnswerLines(lines); f.editor.addSuggestedField(1, lines[0]!.rect);
-    const tab = () => { const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }); f.doc.activeElement!.dispatchEvent(event); return event; };
-    assert.equal(tab().defaultPrevented, true); assert.equal(f.session.snapshot.fields.length, 2); assert.deepEqual(f.session.snapshot.fields[1]!.widgets[0]!.rect, lines[2]!.rect); assert.equal(locked.value, '');
-    f.session.status = 'conflict'; f.editor.addSuggestedField(1, lines[0]!.rect); assert.equal(f.session.snapshot.fields.length, 2); assert.equal(tab().defaultPrevented, false);
+    const lines = [620, 560, 500].map((top) => ({
+      page: 1,
+      rect: [80, top - 20, 340, top] as [number, number, number, number],
+    }));
+    const locked = f.session.add(1, lines[1]!.rect, 14, false);
+    locked.readOnly = true;
+    f.editor.setAnswerLines(lines);
+    f.editor.addSuggestedField(1, lines[0]!.rect);
+    const tab = () => {
+      const event = f.key('Tab');
+      f.doc.activeElement!.dispatchEvent(event);
+      return event;
+    };
+    assert.equal(tab().defaultPrevented, true);
+    assert.equal(f.session.snapshot.fields.length, 2);
+    assert.deepEqual(f.session.snapshot.fields[1]!.widgets[0]!.rect, lines[2]!.rect);
+    assert.equal(locked.value, '');
+    f.session.status = 'conflict';
+    f.editor.addSuggestedField(1, lines[0]!.rect);
+    assert.equal(f.session.snapshot.fields.length, 2);
+    assert.equal(tab().defaultPrevented, false);
     f.session.status = 'unsaved';
-  } finally { f.dispose(); }
+  } finally {
+    f.dispose();
+  }
 });
 
 test('consecutive detected lines create one persistent ruled answer with normal typing and additional rows', async () => {
   const f = await fixture();
   try {
-    const lines = [620, 596, 572, 480].map(y => ({ page: 1, rect: [80, y, 340, y + 18] as [number, number, number, number] }));
-    f.editor.setAnswerLines(lines); f.editor.addSuggestedField(1, lines[1]!.rect);
-    const field = f.session.snapshot.fields[0]!, input = f.doc.activeElement as HTMLTextAreaElement, rect = [...field.widgets[0]!.rect];
-    assert.equal(f.session.snapshot.fields.length, 1); assert.deepEqual(field.ruled, { spacing: 24, rows: 3 });
-    assert.equal(input.style.lineHeight, '24px'); assert.equal(field.multiline, true);
-    input.value = 'First ruled answer\nSecond line\nThird line'; input.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true }));
-    assert.deepEqual(field.widgets[0]!.rect, rect, 'the original rows are retained while they fit');
-    f.editor.addSuggestedField(1, lines[2]!.rect); assert.equal(f.session.snapshot.fields.length, 1); assert.equal(f.doc.activeElement, input);
-    const enter = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }); input.dispatchEvent(enter); assert.equal(enter.defaultPrevented, false);
-    await f.session.save(); const saved = (await readTextPdf(f.bytes())).fields[0]!;
-    assert.equal(saved.value, input.value); assert.deepEqual(saved.ruled, field.ruled); assert.deepEqual(saved.widgets[0]!.rect, rect);
-    input.value += '\nFourth line without a printed rule'; input.selectionStart = input.selectionEnd = input.value.length;
-    input.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true }));
-    assert.equal(f.doc.activeElement, input); assert.equal(input.selectionStart, input.value.length);
-    assert.equal(field.ruled?.rows, 4); assert.deepEqual(field.widgets[0]!.rect, [80, 548, 340, 638]);
-    await f.session.save(); assert.equal((await readTextPdf(f.bytes())).fields[0]!.value, input.value);
-    input.dispatchEvent(new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
-    assert.equal(f.session.snapshot.fields.length, 2); assert.equal((f.doc.activeElement as HTMLElement).dataset.pdfField, f.session.snapshot.fields[1]!.name);
-    f.doc.activeElement!.dispatchEvent(new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true }));
-    assert.equal(f.doc.activeElement, input);
-  } finally { f.dispose(); }
-});
-test('clicking an adjacent suggestion turns an existing detected answer into one ruled block', async () => {
-  const f = await fixture();
-  try {
-    const lines = [600, 572, 543].map((y, i) => ({ page: 1, rect: [70 - i, y, 460 - i, y + 18] as [number, number, number, number] }));
-    f.editor.setAnswerLines([lines[0]!]); f.editor.addSuggestedField(1, lines[0]!.rect);
-    const first = f.session.snapshot.fields[0]!;
-    const originalRect = [...first.widgets[0]!.rect];
-    f.session.setValue(first.name, 'Existing answer');
-    f.editor.setAnswerLines(lines); f.editor.addSuggestedField(1, lines[1]!.rect);
+    const lines = [620, 596, 572, 480].map((y) => ({
+      page: 1,
+      rect: [80, y, 340, y + 18] as [number, number, number, number],
+    }));
+    f.editor.setAnswerLines(lines);
+    f.editor.addSuggestedField(1, lines[1]!.rect);
+    const field = f.session.snapshot.fields[0]!;
+    const input = f.doc.activeElement as HTMLTextAreaElement;
+    const rect = [...field.widgets[0]!.rect];
     assert.equal(f.session.snapshot.fields.length, 1);
-    assert.equal(first.value, 'Existing answer');
-    assert.equal(first.ruled?.rows, 3);
-    assert.equal(first.multiline, true);
-    f.session.undoStroke();
-    const undone = f.session.snapshot.fields.find(field => field.name === first.name)!;
-    assert.equal(undone.value, 'Existing answer');
-    assert.equal(undone.ruled, undefined);
-    assert.deepEqual(undone.widgets[0]!.rect, originalRect);
-    f.session.redoStroke();
-    assert.equal(f.session.snapshot.fields.find(field => field.name === first.name)?.ruled?.rows, 3);
+    assert.deepEqual(field.ruled, { spacing: 24, rows: 3 });
+    assert.equal(input.style.lineHeight, '24px');
+    assert.equal(field.multiline, true);
+    input.value = 'First ruled answer\nSecond line\nThird line';
+    input.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true }));
+    assert.deepEqual(field.widgets[0]!.rect, rect, 'the original rows are retained while they fit');
+    f.editor.addSuggestedField(1, lines[2]!.rect);
+    assert.equal(f.session.snapshot.fields.length, 1);
+    assert.equal(f.doc.activeElement, input);
+    const enter = f.key('Enter');
+    input.dispatchEvent(enter);
+    assert.equal(enter.defaultPrevented, false);
     await f.session.save();
     const saved = (await readTextPdf(f.bytes())).fields[0]!;
-    assert.equal(saved.value, 'Existing answer');
-    assert.equal(saved.ruled?.rows, 3);
-  } finally { f.dispose(); }
-});
-test('a saved two-row answer extends onto the next detected dotted line', async () => {
-  const f = await fixture();
-  try {
-    const field = f.session.add(1, [76.66, 677.27, 469.99, 722.6], 12, true, 0, { spacing: 27.33, rows: 2 });
-    f.session.setValue(field.name, 'Existing answer');
-    const remaining = [
-      { page: 1, rect: [77.33, 677.27, 470.66, 695.27] as [number, number, number, number] },
-      { page: 1, rect: [76.66, 647.94, 467.32, 665.94] as [number, number, number, number] }
-    ];
-    f.editor.setAnswerLines(remaining); f.editor.addSuggestedField(1, remaining[1]!.rect);
-    assert.equal(f.session.snapshot.fields.length, 1);
-    assert.equal(field.value, 'Existing answer');
-    assert.equal(field.ruled?.rows, 3);
-    assert.equal(field.widgets[0]!.rect[3], 722.6);
-    f.session.undoStroke(); assert.equal(f.session.snapshot.fields[0]!.ruled?.rows, 2);
-    f.session.redoStroke(); await f.session.save();
-    assert.equal((await readTextPdf(f.bytes())).fields[0]!.ruled?.rows, 3);
-  } finally { f.dispose(); }
+    assert.equal(saved.value, input.value);
+    assert.deepEqual(saved.ruled, field.ruled);
+    assert.deepEqual(saved.widgets[0]!.rect, rect);
+    input.value += '\nFourth line without a printed rule';
+    input.selectionStart = input.selectionEnd = input.value.length;
+    input.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true }));
+    assert.equal(f.doc.activeElement, input);
+    assert.equal(input.selectionStart, input.value.length);
+    assert.equal(field.ruled?.rows, 4);
+    assert.deepEqual(field.widgets[0]!.rect, [80, 548, 340, 638]);
+    await f.session.save();
+    assert.equal((await readTextPdf(f.bytes())).fields[0]!.value, input.value);
+    input.dispatchEvent(f.key('Tab'));
+    assert.equal(f.session.snapshot.fields.length, 2);
+    assert.equal(
+      (f.doc.activeElement as HTMLElement).dataset.pdfField,
+      f.session.snapshot.fields[1]!.name,
+    );
+    f.doc.activeElement!.dispatchEvent(f.key('Tab', { shiftKey: true }));
+    assert.equal(f.doc.activeElement, input);
+  } finally {
+    f.dispose();
+  }
 });
 test('selected PDF elements copy, paste and duplicate without intercepting text editing', async () => {
   const f = await fixture();
   try {
-    const field = f.session.add(1, [80, 580, 240, 610], 12, true); f.session.setValue(field.name, 'Copy me'); f.editor.refresh();
-    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!; frame.focus();
+    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
+    f.session.setValue(field.name, 'Copy me');
+    f.editor.refresh();
+    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
+    frame.focus();
     const values = new Map<string, string>();
-    const clipboardData = { setData(type: string, value: string) { values.set(type, value); }, getData(type: string) { return values.get(type) ?? ''; } };
+    const clipboardData = {
+      setData(type: string, value: string) {
+        values.set(type, value);
+      },
+      getData(type: string) {
+        return values.get(type) ?? '';
+      },
+    };
     const copy = new f.doc.defaultView!.Event('copy', { bubbles: true, cancelable: true });
-    Object.defineProperty(copy, 'clipboardData', { value: clipboardData }); frame.dispatchEvent(copy);
+    Object.defineProperty(copy, 'clipboardData', { value: clipboardData });
+    frame.dispatchEvent(copy);
     assert.equal(copy.defaultPrevented, true);
     const paste = new f.doc.defaultView!.Event('paste', { bubbles: true, cancelable: true });
-    Object.defineProperty(paste, 'clipboardData', { value: clipboardData }); frame.dispatchEvent(paste);
-    assert.equal(paste.defaultPrevented, true); assert.equal(f.session.snapshot.fields.length, 2);
+    Object.defineProperty(paste, 'clipboardData', { value: clipboardData });
+    frame.dispatchEvent(paste);
+    assert.equal(paste.defaultPrevented, true);
+    assert.equal(f.session.snapshot.fields.length, 2);
     assert.equal(f.session.snapshot.fields[1]!.value, 'Copy me');
-    const duplicate = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'd', metaKey: true, bubbles: true, cancelable: true });
-    frame.dispatchEvent(duplicate); assert.equal(duplicate.defaultPrevented, true);
+    const duplicate = f.key('d', { metaKey: true });
+    frame.dispatchEvent(duplicate);
+    assert.equal(duplicate.defaultPrevented, true);
     assert.equal(f.session.snapshot.fields.length, 3);
     const input = frame.querySelector<HTMLInputElement | HTMLTextAreaElement>('[data-pdf-field]')!;
     input.setSelectionRange(0, 4);
     const nativeCopy = new f.doc.defaultView!.Event('copy', { bubbles: true, cancelable: true });
-    Object.defineProperty(nativeCopy, 'clipboardData', { value: clipboardData }); input.dispatchEvent(nativeCopy);
+    Object.defineProperty(nativeCopy, 'clipboardData', { value: clipboardData });
+    input.dispatchEvent(nativeCopy);
     assert.equal(nativeCopy.defaultPrevented, false);
-  } finally { f.dispose(); }
-});
-test('a selected box focuses a read-only shortcut target without entering text editing', async () => {
-  const f = await fixture();
-  try {
-    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
-    f.session.setValue(field.name, 'Keep this'); f.editor.refresh();
-    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
-    frame.focus();
-    const proxy = frame.querySelector<HTMLTextAreaElement>('.pdf-form-studio-shortcut-proxy')!;
-    assert.equal(f.doc.activeElement, proxy);
-    assert.equal(proxy.readOnly, true);
-    assert.equal(frame.classList.contains('is-editing'), false);
-    const duplicate = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'd', metaKey: true, bubbles: true, cancelable: true });
-    proxy.dispatchEvent(duplicate);
-    assert.equal(duplicate.defaultPrevented, true);
-    assert.equal(f.session.snapshot.fields.length, 2);
-    assert.equal(f.session.snapshot.fields[0]!.value, 'Keep this');
-    const selectedProxy = f.doc.activeElement!;
-    assert.equal(selectedProxy.classList.contains('pdf-form-studio-shortcut-proxy'), true);
-    const printed = f.doc.createElement('span'); printed.textContent = 'Old selection'; f.doc.body.append(printed);
-    const range = f.doc.createRange(); range.selectNodeContents(printed); f.doc.getSelection()!.addRange(range);
-    const copy = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'c', metaKey: true, bubbles: true, cancelable: true });
-    selectedProxy.dispatchEvent(copy); assert.equal(copy.defaultPrevented, true);
-    const paste = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'v', metaKey: true, bubbles: true, cancelable: true });
-    selectedProxy.dispatchEvent(paste); assert.equal(paste.defaultPrevented, true);
-    await pause(0);
-    assert.equal(f.session.snapshot.fields.length, 3);
-  } finally { f.dispose(); }
+  } finally {
+    f.dispose();
+  }
 });
 test('selected drawing shortcuts use a keyboard target in an embedded PDF', async () => {
   const f = await fixture(1, true);
   try {
-    f.session.addStroke(1, 'scribble', [[80, 500], [120, 520]], 2); f.editor.refresh();
+    f.session.addStroke(
+      1,
+      'scribble',
+      [
+        [80, 500],
+        [120, 520],
+      ],
+      2,
+    );
+    f.editor.refresh();
     const drawing = f.doc.querySelector<SVGGElement>('.pdf-form-studio-ink-control')!;
     f.pointer(drawing, 'pointerdown', 100, 290);
     f.pointer(f.doc.querySelector('.pdf-form-studio-layer')!, 'pointerup', 100, 290);
@@ -890,372 +1234,250 @@ test('selected drawing shortcuts use a keyboard target in an embedded PDF', asyn
     assert.equal(proxy.getAttribute('aria-label'), 'Selected PDF drawing');
     assert.equal(f.scopes.length, 1);
     for (const key of ['c', 'v', 'd']) {
-      const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key, metaKey: true, bubbles: true, cancelable: true });
+      const event = f.key(key, { metaKey: true });
       f.doc.activeElement!.dispatchEvent(event);
-      assert.equal(event.defaultPrevented, true, `⌘${key.toUpperCase()} should be handled for a drawing`);
+      assert.equal(
+        event.defaultPrevented,
+        true,
+        `⌘${key.toUpperCase()} should be handled for a drawing`,
+      );
       await pause(0);
     }
     assert.equal(f.session.snapshot.strokes.length, 3);
     const selected = f.session.snapshot.strokes.at(-1)!;
     const before = structuredClone(selected.points);
-    const arrow = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true });
+    const arrow = f.key('ArrowRight');
     f.doc.activeElement!.dispatchEvent(arrow);
     assert.equal(arrow.defaultPrevented, true);
-    assert.notDeepEqual(f.session.snapshot.strokes.find(stroke => stroke.id === selected.id)!.points, before);
-  } finally { f.dispose(); }
+    assert.notDeepEqual(
+      f.session.snapshot.strokes.find((stroke) => stroke.id === selected.id)!.points,
+      before,
+    );
+  } finally {
+    f.dispose();
+  }
 });
 test('deleting a selected drawing releases its keyboard interaction so autosave can finish', async () => {
   const f = await fixture();
   try {
-    f.session.addStroke(1, 'scribble', [[80, 500], [120, 520]], 2); f.editor.refresh();
+    f.session.addStroke(
+      1,
+      'scribble',
+      [
+        [80, 500],
+        [120, 520],
+      ],
+      2,
+    );
+    f.editor.refresh();
     const drawing = f.doc.querySelector<SVGGElement>('.pdf-form-studio-ink-control')!;
     f.pointer(drawing, 'pointerdown', 100, 290);
     f.pointer(f.doc.querySelector('.pdf-form-studio-layer')!, 'pointerup', 100, 290);
     const proxy = f.doc.activeElement as HTMLTextAreaElement;
     assert.equal(proxy.getAttribute('aria-label'), 'Selected PDF drawing');
-    const remove = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'Delete', bubbles: true, cancelable: true });
+    const remove = f.key('Delete');
     proxy.dispatchEvent(remove);
     assert.equal(remove.defaultPrevented, true);
     assert.equal(f.session.snapshot.strokes.length, 0);
     assert.notEqual(f.doc.activeElement, proxy);
-    await Promise.race([f.session.saveWhenIdle(), pause(1000).then(() => { throw new Error('Autosave remained blocked by the drawing proxy.'); })]);
+    await Promise.race([
+      f.session.saveWhenIdle(),
+      pause(1000).then(() => {
+        throw new Error('Autosave remained blocked by the drawing proxy.');
+      }),
+    ]);
     assert.equal(f.session.status, 'saved');
-  } finally { f.dispose(); }
-});
-test('selected text and drawing proxies keep Undo, Redo and tool shortcuts', async () => {
-  const f = await fixture();
-  try {
-    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
-    f.session.setValue(field.name, 'Undo me');
-    const before = [...field.widgets[0]!.rect];
-    f.session.moveObjects([{ kind: 'text', id: field.name }], [10, 0]); f.editor.refresh();
-    f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!.focus();
-    const shortcut = (target: Element, key: string, metaKey = false, shiftKey = false) => {
-      const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key, metaKey, shiftKey, bubbles: true, cancelable: true });
-      target.dispatchEvent(event); assert.equal(event.defaultPrevented, true, `${key} should work on the selected object`);
-    };
-    const textProxy = f.doc.activeElement!;
-    shortcut(textProxy, 'z', true);
-    assert.deepEqual(f.session.snapshot.fields.find(item => item.name === field.name)?.widgets[0]?.rect, before);
-    f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!.focus();
-    shortcut(f.doc.activeElement!, 'z', true, true);
-    assert.equal(f.session.snapshot.fields.find(item => item.name === field.name)?.widgets[0]?.rect[0], before[0]! + 10);
-    f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!.focus();
-    shortcut(f.doc.activeElement!, 'p');
-    assert.equal(f.doc.querySelector<HTMLButtonElement>('button[aria-label^="Pen"]')!.getAttribute('aria-pressed'), 'true');
-
-    f.tool('Select');
-    f.session.addStroke(1, 'scribble', [[80, 500], [120, 520]], 2); f.editor.refresh();
-    const drawing = f.doc.querySelector<SVGGElement>('.pdf-form-studio-ink-control')!;
-    f.pointer(drawing, 'pointerdown', 100, 290);
-    f.pointer(f.doc.querySelector('.pdf-form-studio-layer')!, 'pointerup', 100, 290);
-    const drawingProxy = f.doc.activeElement!;
-    assert.equal(drawingProxy.getAttribute('aria-label'), 'Selected PDF drawing');
-    shortcut(drawingProxy, 'z', true);
-    assert.equal(f.session.snapshot.strokes.length, 0);
-    shortcut(drawingProxy, 'z', true, true);
-    assert.equal(f.session.snapshot.strokes.length, 1);
-    shortcut(drawingProxy, 'h');
-    assert.equal(f.doc.querySelector<HTMLButtonElement>('button[aria-label^="Highlighter"]')!.getAttribute('aria-pressed'), 'true');
-  } finally { f.dispose(); }
+  } finally {
+    f.dispose();
+  }
 });
 test('PDF answer shortcuts work with a caret while highlighted text retains native editing', async () => {
   const f = await fixture();
   try {
     const field = f.session.add(1, [80, 580, 240, 610], 12, true);
-    f.session.setValue(field.name, 'Copy me'); f.editor.refresh();
+    f.session.setValue(field.name, 'Copy me');
+    f.editor.refresh();
     const input = f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!;
-    input.focus(); input.setSelectionRange(7, 7);
-    const duplicate = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'd', metaKey: true, bubbles: true, cancelable: true });
+    input.focus();
+    input.setSelectionRange(7, 7);
+    const duplicate = f.key('d', { metaKey: true });
     input.dispatchEvent(duplicate);
     assert.equal(duplicate.defaultPrevented, true);
     assert.equal(f.session.snapshot.fields.length, 2);
     assert.equal(f.doc.activeElement?.classList.contains('pdf-form-studio-shortcut-proxy'), true);
-    const held = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'd', metaKey: true, repeat: true, bubbles: true, cancelable: true });
+    const held = f.key('d', { metaKey: true, repeat: true });
     f.doc.activeElement!.dispatchEvent(held);
     assert.equal(held.defaultPrevented, true);
     assert.equal(f.session.snapshot.fields.length, 2);
 
-    input.focus(); input.setSelectionRange(7, 7);
+    input.focus();
+    input.setSelectionRange(7, 7);
     const values = new Map<string, string>();
-    const clipboardData = { setData(type: string, value: string) { values.set(type, value); }, getData(type: string) { return values.get(type) ?? ''; } };
+    const clipboardData = {
+      setData(type: string, value: string) {
+        values.set(type, value);
+      },
+      getData(type: string) {
+        return values.get(type) ?? '';
+      },
+    };
     const copy = new f.doc.defaultView!.Event('copy', { bubbles: true, cancelable: true });
-    Object.defineProperty(copy, 'clipboardData', { value: clipboardData }); input.dispatchEvent(copy);
+    Object.defineProperty(copy, 'clipboardData', { value: clipboardData });
+    input.dispatchEvent(copy);
     assert.equal(copy.defaultPrevented, true);
     const paste = new f.doc.defaultView!.Event('paste', { bubbles: true, cancelable: true });
-    Object.defineProperty(paste, 'clipboardData', { value: clipboardData }); input.dispatchEvent(paste);
+    Object.defineProperty(paste, 'clipboardData', { value: clipboardData });
+    input.dispatchEvent(paste);
     assert.equal(paste.defaultPrevented, true);
     assert.equal(f.session.snapshot.fields.length, 3);
 
-    input.focus(); input.setSelectionRange(0, 4);
+    input.focus();
+    input.setSelectionRange(0, 4);
     const textCopy = new f.doc.defaultView!.Event('copy', { bubbles: true, cancelable: true });
-    Object.defineProperty(textCopy, 'clipboardData', { value: clipboardData }); input.dispatchEvent(textCopy);
+    Object.defineProperty(textCopy, 'clipboardData', { value: clipboardData });
+    input.dispatchEvent(textCopy);
     assert.equal(textCopy.defaultPrevented, false);
     const textPaste = new f.doc.defaultView!.Event('paste', { bubbles: true, cancelable: true });
-    Object.defineProperty(textPaste, 'clipboardData', { value: clipboardData }); input.dispatchEvent(textPaste);
+    Object.defineProperty(textPaste, 'clipboardData', { value: clipboardData });
+    input.dispatchEvent(textPaste);
     assert.equal(textPaste.defaultPrevented, false);
-  } finally { f.dispose(); }
-});
-test('selected PDF owns Obsidian shortcut scope until focus leaves the embed', async () => {
-  const f = await fixture(1, true);
-  try {
-    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
-    f.session.setValue(field.name, 'In a note'); f.editor.refresh();
-    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
-    frame.focus();
-    assert.equal(f.scopes.length, 1);
-    const handler = f.scopes[0]!.handlers.find(item => item.key === 'd')!;
-    const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'd', metaKey: true, cancelable: true });
-    Object.defineProperty(event, 'target', { value: frame });
-    assert.equal(handler.func(event), false);
-    assert.equal(event.defaultPrevented, true);
-    assert.equal(f.session.snapshot.fields.length, 2);
-    assert.equal(f.scopes.length, 1);
-    f.doc.querySelector<HTMLButtonElement>('#outside')!.focus();
-    assert.equal(f.scopes.length, 0);
-  } finally { f.dispose(); }
+  } finally {
+    f.dispose();
+  }
 });
 test('another PDF toolbar releases the first embed shortcut scope while its own popover retains it', async () => {
   const f = await fixture(1, true);
   try {
     const field = f.session.add(1, [80, 580, 240, 610], 12, true);
-    f.session.setValue(field.name, 'First PDF'); f.editor.refresh();
+    f.session.setValue(field.name, 'First PDF');
+    f.editor.refresh();
     const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
-    frame.focus(); assert.equal(f.scopes.length, 1);
+    frame.focus();
+    assert.equal(f.scopes.length, 1);
     f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
     assert(f.doc.querySelector('.pfs-tool-popover'));
     assert.equal(f.scopes.length, 1, 'opening this PDF toolbar popover keeps its selection');
-    f.doc.querySelector<HTMLButtonElement>('.pfs-tool-popover [aria-label="Close tool settings"]')!.click();
-    frame.focus(); assert.equal(f.scopes.length, 1);
-
-    const otherToolbar = f.doc.createElement('div'); otherToolbar.className = 'pdf-form-studio-toolbar';
-    const otherButton = f.doc.createElement('button'); otherToolbar.append(otherButton); f.doc.body.append(otherToolbar);
-    f.pointer(otherButton, 'pointerdown');
-    assert.equal(f.scopes.length, 0, 'pointer input in another PDF toolbar releases the first scope');
-    frame.focus(); assert.equal(f.scopes.length, 1);
-    otherButton.focus();
-    assert.equal(f.scopes.length, 0, 'keyboard focus in another PDF toolbar releases the first scope');
-    assert.equal(f.session.snapshot.fields.length, 1);
-  } finally { f.dispose(); }
-});
-test('a selected PDF never claims shortcuts from another Obsidian window', async () => {
-  const f = await fixture(1, true);
-  const foreign = new JSDOM('<body><div id="note"></div></body>', { pretendToBeVisual: true });
-  try {
-    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
-    f.session.setValue(field.name, 'Original'); f.editor.refresh();
-    f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!.focus();
+    f.doc
+      .querySelector<HTMLButtonElement>('.pfs-tool-popover [aria-label="Close tool settings"]')!
+      .click();
+    frame.focus();
     assert.equal(f.scopes.length, 1);
-    for (const key of ['c', 'v', 'd']) {
-      const handler = f.scopes[0]!.handlers.find(item => item.key === key)!;
-      const event = new foreign.window.KeyboardEvent('keydown', { key, metaKey: true, cancelable: true });
-      Object.defineProperty(event, 'target', { value: foreign.window.document.querySelector('#note') });
-      assert.equal(handler.func(event as unknown as KeyboardEvent), undefined);
-      assert.equal(event.defaultPrevented, false);
-    }
+
+    const otherToolbar = f.doc.createElement('div');
+    otherToolbar.className = 'pdf-form-studio-toolbar';
+    const otherButton = f.doc.createElement('button');
+    otherToolbar.append(otherButton);
+    f.doc.body.append(otherToolbar);
+    f.pointer(otherButton, 'pointerdown');
+    assert.equal(
+      f.scopes.length,
+      0,
+      'pointer input in another PDF toolbar releases the first scope',
+    );
+    frame.focus();
+    assert.equal(f.scopes.length, 1);
+    otherButton.focus();
+    assert.equal(
+      f.scopes.length,
+      0,
+      'keyboard focus in another PDF toolbar releases the first scope',
+    );
     assert.equal(f.session.snapshot.fields.length, 1);
-    f.doc.defaultView!.dispatchEvent(new f.doc.defaultView!.Event('blur'));
-    assert.equal(f.scopes.length, 0);
-  } finally { foreign.window.close(); f.dispose(); }
-});
-test('Live Preview scope copies and pastes a selected PDF box through the system clipboard', async () => {
-  const f = await fixture(1, true);
-  try {
-    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
-    f.session.setValue(field.name, 'Copy me'); f.editor.refresh();
-    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
-    frame.focus();
-    const copy = f.scopes[0]!.handlers.find(item => item.key === 'c')!;
-    const paste = f.scopes[0]!.handlers.find(item => item.key === 'v')!;
-    const key = (letter: string) => {
-      const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key: letter, metaKey: true, cancelable: true });
-      Object.defineProperty(event, 'target', { value: frame });
-      return event;
-    };
-    const copyEvent = key('c'); assert.equal(copy.func(copyEvent), false); assert(copyEvent.defaultPrevented);
-    await pause(0); assert.equal(f.clipboard.text, 'Copy me');
-    const pasteEvent = key('v'); assert.equal(paste.func(pasteEvent), false); assert(pasteEvent.defaultPrevented);
-    await pause(0); assert.equal(f.session.snapshot.fields.length, 2);
-    assert.equal(f.clipboard.text, 'Copy me');
-  } finally { f.dispose(); }
-});
-test('switching windows retains a PDF copy when its clipboard token still matches', async () => {
-  const f = await fixture(1, true);
-  try {
-    const view = f.doc.defaultView!;
-    class FakeClipboardItem {
-      readonly types: string[];
-      private readonly values: Record<string, Blob>;
-      constructor(values: Record<string, Blob>) { this.values = values; this.types = Object.keys(values); }
-      async getType(type: string) { return this.values[type]!; }
-    }
-    Object.defineProperty(view, 'ClipboardItem', { value: FakeClipboardItem });
-    let items: FakeClipboardItem[] = [];
-    Object.defineProperty(view.navigator, 'clipboard', { configurable: true, value: {
-      write: async (value: FakeClipboardItem[]) => { items = value; },
-      read: async () => items,
-      readText: async () => 'Copied before switch'
-    } });
-    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
-    f.session.setValue(field.name, 'Copied before switch'); f.editor.refresh();
-    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
-    frame.focus();
-    const shortcut = (key: string) => f.doc.activeElement!.dispatchEvent(new view.KeyboardEvent('keydown', {
-      key, metaKey: true, bubbles: true, cancelable: true
-    }));
-    shortcut('c'); await pause(0);
-    view.dispatchEvent(new view.Event('blur'));
-    assert.equal(f.scopes.length, 0);
-    f.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); frame.focus();
-    shortcut('v'); await pause(0);
-    assert.equal(f.session.snapshot.fields.length, 2);
-    assert.equal(f.session.snapshot.fields[1]!.widgets[0]!.rect[2] - f.session.snapshot.fields[1]!.widgets[0]!.rect[0], 160);
-  } finally { f.dispose(); }
-});
-test('changed system clipboard text creates a new box instead of pasting a stale PDF object', async () => {
-  const f = await fixture(1, true);
-  try {
-    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
-    f.session.setValue(field.name, 'Old PDF copy'); f.editor.refresh();
-    f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!.focus();
-    const shortcut = (key: string) => f.doc.activeElement!.dispatchEvent(new f.doc.defaultView!.KeyboardEvent('keydown', {
-      key, metaKey: true, bubbles: true, cancelable: true
-    }));
-    shortcut('c'); await pause(0);
-    f.clipboard.text = 'Copied from another source';
-    shortcut('v'); await pause(0);
-    assert.equal(f.session.snapshot.fields.length, 2);
-    assert.equal(f.session.snapshot.fields[1]!.value, 'Copied from another source');
-    assert.equal(f.clipboard.text, 'Copied from another source');
-  } finally { f.dispose(); }
+  } finally {
+    f.dispose();
+  }
 });
 test('a delayed PDF paste is canceled when another object is selected', async () => {
   const f = await fixture(1, true);
   try {
     const first = f.session.add(1, [80, 580, 240, 610], 12, true);
     const second = f.session.add(1, [80, 520, 240, 550], 12, true);
-    f.session.setValue(first.name, 'First'); f.session.setValue(second.name, 'Second'); f.editor.refresh();
+    f.session.setValue(first.name, 'First');
+    f.session.setValue(second.name, 'Second');
+    f.editor.refresh();
     let text = '';
     let finishRead: ((value: string) => void) | undefined;
-    Object.defineProperty(f.doc.defaultView!.navigator, 'clipboard', { configurable: true, value: {
-      writeText: async (value: string) => { text = value; },
-      readText: () => new Promise<string>(resolve => { finishRead = resolve; })
-    } });
+    Object.defineProperty(f.doc.defaultView!.navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: async (value: string) => {
+          text = value;
+        },
+        readText: () =>
+          new Promise<string>((resolve) => {
+            finishRead = resolve;
+          }),
+      },
+    });
     const frames = f.doc.querySelectorAll<HTMLElement>('.pdf-form-studio-box');
     frames[0]!.focus();
-    const shortcut = (key: string) => f.doc.activeElement!.dispatchEvent(new f.doc.defaultView!.KeyboardEvent('keydown', {
-      key, metaKey: true, bubbles: true, cancelable: true
-    }));
-    shortcut('c'); await pause(0);
-    shortcut('v'); await pause(0);
+    const shortcut = (key: string) =>
+      f.doc.activeElement!.dispatchEvent(f.key(key, { metaKey: true }));
+    shortcut('c');
+    await pause(0);
+    shortcut('v');
+    await pause(0);
     assert(finishRead);
     frames[1]!.focus();
-    finishRead(text); await pause(0);
+    finishRead(text);
+    await pause(0);
     assert.equal(f.session.snapshot.fields.length, 2);
-  } finally { f.dispose(); }
-});
-test('a native plain-text paste onto a selected PDF element creates an editable box', async () => {
-  const f = await fixture();
-  try {
-    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
-    f.session.setValue(field.name, 'Existing'); f.editor.refresh();
-    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
-    frame.focus();
-    const paste = new f.doc.defaultView!.Event('paste', { bubbles: true, cancelable: true });
-    Object.defineProperty(paste, 'clipboardData', { value: { getData(type: string) { return type === 'text/plain' ? 'Pasted note text' : ''; } } });
-    frame.dispatchEvent(paste);
-    assert.equal(paste.defaultPrevented, true);
-    assert.equal(f.session.snapshot.fields.length, 2);
-    assert.equal(f.session.snapshot.fields[0]!.value, 'Existing');
-    assert.equal(f.session.snapshot.fields[1]!.value, 'Pasted note text');
-  } finally { f.dispose(); }
-});
-test('plain text pasted beside a selected element follows a rotated PDF page', async () => {
-  const f = await fixture(1, false, 90);
-  try {
-    const field = f.session.add(1, [80, 580, 240, 610], 12, true, 90);
-    f.session.setValue(field.name, 'Existing'); f.editor.refresh();
-    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
-    frame.focus();
-    const paste = new f.doc.defaultView!.Event('paste', { bubbles: true, cancelable: true });
-    Object.defineProperty(paste, 'clipboardData', { value: { getData(type: string) { return type === 'text/plain' ? 'Pasted upright' : ''; } } });
-    frame.dispatchEvent(paste);
-    assert.equal(paste.defaultPrevented, true);
-    assert.equal(f.session.snapshot.fields[1]!.widgets[0]!.rotation, 90);
-    await f.session.save();
-    const saved = await readTextPdf(f.bytes());
-    assert.equal(saved.fields[1]!.widgets[0]!.rotation, 90);
-    assert.equal(saved.fields[1]!.value, 'Pasted upright');
-  } finally { f.dispose(); }
-});
-test('identical clipboard text without the PDF copy token becomes a new text box', async () => {
-  const f = await fixture(1, true);
-  try {
-    const view = f.doc.defaultView!;
-    class FakeClipboardItem {
-      readonly types: string[];
-      private readonly values: Record<string, Blob>;
-      constructor(values: Record<string, Blob>) { this.values = values; this.types = Object.keys(values); }
-      async getType(type: string) { return this.values[type]!; }
-    }
-    Object.defineProperty(view, 'ClipboardItem', { value: FakeClipboardItem });
-    let plainText = '';
-    let items: FakeClipboardItem[] = [];
-    Object.defineProperty(view.navigator, 'clipboard', { configurable: true, value: {
-      write: async (value: FakeClipboardItem[]) => { items = value; plainText = await value[0]!.getType('text/plain').then(blob => blob.text()); },
-      read: async () => items,
-      writeText: async (value: string) => { plainText = value; items = [new FakeClipboardItem({ 'text/plain': new Blob([value]) })]; },
-      readText: async () => plainText
-    } });
-    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
-    f.session.setValue(field.name, 'Same words'); f.editor.refresh();
-    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
-    frame.focus();
-    const shortcut = (key: string) => f.doc.activeElement!.dispatchEvent(new view.KeyboardEvent('keydown', {
-      key, metaKey: true, bubbles: true, cancelable: true
-    }));
-    shortcut('c'); await pause(0);
-    assert.equal(plainText, 'Same words');
-    shortcut('v'); await pause(0);
-    assert.equal(f.session.snapshot.fields.length, 2);
-    // A different application can put the same text on the clipboard. The
-    // cached PDF element must not be treated as the source of that text.
-    items = [new FakeClipboardItem({ 'text/plain': new Blob(['Same words']) })];
-    frame.focus(); shortcut('v'); await pause(0);
-    assert.equal(f.session.snapshot.fields.length, 3);
-    assert.equal(f.session.snapshot.fields[2]!.value, 'Same words');
-  } finally { f.dispose(); }
+  } finally {
+    f.dispose();
+  }
 });
 test('menu copy keeps token provenance for keyboard paste with identical external text', async () => {
   const f = await fixture(1, true);
   try {
     const field = f.session.add(1, [80, 580, 240, 610], 12, true);
-    f.session.setValue(field.name, 'Yes'); f.editor.refresh();
+    f.session.setValue(field.name, 'Yes');
+    f.editor.refresh();
     const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
     frame.focus();
     const values = new Map<string, string>();
     const nativeCopy = new f.doc.defaultView!.Event('copy', { bubbles: true, cancelable: true });
-    Object.defineProperty(nativeCopy, 'clipboardData', { value: { setData(type: string, value: string) { values.set(type, value); } } });
+    Object.defineProperty(nativeCopy, 'clipboardData', {
+      value: {
+        setData(type: string, value: string) {
+          values.set(type, value);
+        },
+      },
+    });
     frame.dispatchEvent(nativeCopy);
     assert.equal(nativeCopy.defaultPrevented, true);
     assert.match(values.get('text/html')!, /data-pdf-editor-objects/);
-    let items = [{ types: ['text/html'], getType: async () => new Blob([values.get('text/html')!]) }];
-    Object.defineProperty(f.doc.defaultView!.navigator, 'clipboard', { configurable: true, value: {
-      read: async () => items,
-      readText: async () => 'Yes'
-    } });
-    const paste = () => f.doc.activeElement!.dispatchEvent(new f.doc.defaultView!.KeyboardEvent('keydown', {
-      key: 'v', metaKey: true, bubbles: true, cancelable: true
-    }));
-    paste(); await pause(0);
+    let items = [
+      { types: ['text/html'], getType: async () => new Blob([values.get('text/html')!]) },
+    ];
+    Object.defineProperty(f.doc.defaultView!.navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        read: async () => items,
+        readText: async () => 'Yes',
+      },
+    });
+    const paste = () => f.doc.activeElement!.dispatchEvent(f.key('v', { metaKey: true }));
+    paste();
+    await pause(0);
     assert.equal(f.session.snapshot.fields.length, 2);
-    assert.equal(f.session.snapshot.fields[1]!.widgets[0]!.rect[2] - f.session.snapshot.fields[1]!.widgets[0]!.rect[0], 160);
+    assert.equal(
+      f.session.snapshot.fields[1]!.widgets[0]!.rect[2] -
+        f.session.snapshot.fields[1]!.widgets[0]!.rect[0],
+      160,
+    );
     items = [{ types: ['text/plain'], getType: async () => new Blob(['Yes']) }];
-    paste(); await pause(0);
+    paste();
+    await pause(0);
     assert.equal(f.session.snapshot.fields.length, 3);
     assert.equal(f.session.snapshot.fields[2]!.value, 'Yes');
-    assert.equal(f.session.snapshot.fields[2]!.widgets[0]!.rect[2] - f.session.snapshot.fields[2]!.widgets[0]!.rect[0], 300);
-  } finally { f.dispose(); }
+    assert.equal(
+      f.session.snapshot.fields[2]!.widgets[0]!.rect[2] -
+        f.session.snapshot.fields[2]!.widgets[0]!.rect[0],
+      300,
+    );
+  } finally {
+    f.dispose();
+  }
 });
 test('menu paste waits for a copied drawing token instead of creating a fallback text box', async () => {
   const f = await fixture(1, true);
@@ -1264,30 +1486,60 @@ test('menu paste waits for a copied drawing token instead of creating a fallback
     class FakeClipboardItem {
       readonly types: string[];
       private readonly values: Record<string, Blob>;
-      constructor(values: Record<string, Blob>) { this.values = values; this.types = Object.keys(values); }
-      async getType(type: string) { return this.values[type]!; }
+      constructor(values: Record<string, Blob>) {
+        this.values = values;
+        this.types = Object.keys(values);
+      }
+      async getType(type: string) {
+        return this.values[type]!;
+      }
     }
     Object.defineProperty(view, 'ClipboardItem', { value: FakeClipboardItem });
     let plainText = 'Earlier clipboard content';
     let items: FakeClipboardItem[] = [];
     let completeWrite: (() => Promise<void>) | undefined;
-    Object.defineProperty(view.navigator, 'clipboard', { configurable: true, value: {
-      write: (value: FakeClipboardItem[]) => new Promise<void>(resolve => {
-        completeWrite = async () => { items = value; plainText = await value[0]!.getType('text/plain').then(blob => blob.text()); resolve(); };
-      }),
-      read: async () => items,
-      writeText: async (value: string) => { plainText = value; },
-      readText: async () => plainText
-    } });
-    f.session.addStroke(1, 'scribble', [[80, 500], [120, 520]], 2); f.editor.refresh();
+    Object.defineProperty(view.navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        write: (value: FakeClipboardItem[]) =>
+          new Promise<void>((resolve) => {
+            completeWrite = async () => {
+              items = value;
+              plainText = await value[0]!.getType('text/plain').then((blob) => blob.text());
+              resolve();
+            };
+          }),
+        read: async () => items,
+        writeText: async (value: string) => {
+          plainText = value;
+        },
+        readText: async () => plainText,
+      },
+    });
+    f.session.addStroke(
+      1,
+      'scribble',
+      [
+        [80, 500],
+        [120, 520],
+      ],
+      2,
+    );
+    f.editor.refresh();
     const drawing = f.doc.querySelector<SVGGElement>('.pdf-form-studio-ink-control')!;
     f.pointer(drawing, 'pointerdown', 100, 290);
     f.pointer(f.doc.querySelector('.pdf-form-studio-layer')!, 'pointerup', 100, 290);
     const proxy = f.doc.activeElement as HTMLTextAreaElement;
-    proxy.dispatchEvent(new view.KeyboardEvent('keydown', { key: 'c', metaKey: true, bubbles: true, cancelable: true }));
+    proxy.dispatchEvent(f.key('c', { metaKey: true }));
     assert(completeWrite);
     const paste = new view.Event('paste', { bubbles: true, cancelable: true });
-    Object.defineProperty(paste, 'clipboardData', { value: { getData(type: string) { return type === 'text/plain' ? plainText : ''; } } });
+    Object.defineProperty(paste, 'clipboardData', {
+      value: {
+        getData(type: string) {
+          return type === 'text/plain' ? plainText : '';
+        },
+      },
+    });
     proxy.dispatchEvent(paste);
     assert.equal(paste.defaultPrevented, true);
     await completeWrite();
@@ -1297,229 +1549,86 @@ test('menu paste waits for a copied drawing token instead of creating a fallback
     assert.equal(f.session.snapshot.fields.length, 0);
     items = [new FakeClipboardItem({ 'text/plain': new Blob([plainText]) })];
     const externalPaste = new view.Event('paste', { bubbles: true, cancelable: true });
-    Object.defineProperty(externalPaste, 'clipboardData', { value: { getData(type: string) { return type === 'text/plain' ? plainText : ''; } } });
+    Object.defineProperty(externalPaste, 'clipboardData', {
+      value: {
+        getData(type: string) {
+          return type === 'text/plain' ? plainText : '';
+        },
+      },
+    });
     proxy.dispatchEvent(externalPaste);
     await pause(0);
     assert.equal(f.session.snapshot.strokes.length, 2);
     assert.equal(f.session.snapshot.fields.length, 1);
     assert.equal(f.session.snapshot.fields[0]!.value, 'PDF Editor elements');
-  } finally { f.dispose(); }
-});
-test('changed clipboard text pastes into an active PDF answer instead of a stale object', async () => {
-  const f = await fixture(1, true);
-  try {
-    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
-    f.session.setValue(field.name, 'Start'); f.editor.refresh();
-    const input = f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!;
-    input.focus(); input.setSelectionRange(5, 5);
-    const shortcut = (key: string) => {
-      const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key, metaKey: true, bubbles: true, cancelable: true });
-      input.dispatchEvent(event); return event;
-    };
-    assert.equal(shortcut('c').defaultPrevented, true);
-    await pause(0); f.clipboard.text = ' from elsewhere';
-    assert.equal(shortcut('v').defaultPrevented, true);
-    await pause(0);
-    assert.equal(f.session.snapshot.fields.length, 1);
-    assert.equal(f.session.snapshot.fields[0]!.value, 'Start from elsewhere');
-  } finally { f.dispose(); }
-});
-test('copying highlighted PDF answer text clears the previous object copy', async () => {
-  const f = await fixture(1, true);
-  try {
-    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
-    f.session.setValue(field.name, 'Answer text'); f.editor.refresh();
-    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
-    frame.focus();
-    f.doc.activeElement!.dispatchEvent(new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'c', metaKey: true, bubbles: true, cancelable: true }));
-    const input = frame.querySelector<HTMLTextAreaElement>('[data-pdf-field]')!;
-    input.focus(); input.setSelectionRange(0, 6);
-    const nativeCopy = new f.doc.defaultView!.Event('copy', { bubbles: true, cancelable: true });
-    Object.defineProperty(nativeCopy, 'clipboardData', { value: { setData() {} } });
-    input.dispatchEvent(nativeCopy);
-    assert.equal(nativeCopy.defaultPrevented, false);
-    input.setSelectionRange(6, 6);
-    const paste = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'v', metaKey: true, bubbles: true, cancelable: true });
-    input.dispatchEvent(paste);
-    assert.equal(paste.defaultPrevented, false);
-    assert.equal(f.session.snapshot.fields.length, 1);
-  } finally { f.dispose(); }
-});
-test('Live Preview note keyboard target still uses the selected PDF box', async () => {
-  const f = await fixture(1, true);
-  try {
-    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
-    f.session.setValue(field.name, 'Selected PDF'); f.editor.refresh();
-    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
-    const note = f.doc.createElement('div'); note.contentEditable = 'true'; note.tabIndex = 0;
-    f.doc.body.append(note);
-    frame.focus();
-    for (const letter of ['c', 'v', 'd']) {
-      const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key: letter, metaKey: true, bubbles: true, cancelable: true });
-      note.dispatchEvent(event);
-      assert(event.defaultPrevented, `${letter} belongs to the selected PDF box`);
-      await pause(0);
-    }
-    assert.equal(f.session.snapshot.fields.length, 3);
-    assert.equal(f.clipboard.text, 'Selected PDF');
-    note.focus();
-    const unrelated = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'd', metaKey: true, bubbles: true, cancelable: true });
-    note.dispatchEvent(unrelated);
-    assert.equal(unrelated.defaultPrevented, false);
-    assert.equal(f.session.snapshot.fields.length, 3);
-  } finally { f.dispose(); }
-});
-test('embedded PDF captures copy and paste before Live Preview handles the keydown', async () => {
-  const f = await fixture(1, true);
-  try {
-    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
-    f.session.setValue(field.name, 'From PDF'); f.editor.refresh();
-    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
-    frame.focus();
-    const key = (letter: string) => new f.doc.defaultView!.KeyboardEvent('keydown', { key: letter, metaKey: true, bubbles: true, cancelable: true });
-    const copy = key('c'); frame.dispatchEvent(copy);
-    assert(copy.defaultPrevented); await pause(0); assert.equal(f.clipboard.text, 'From PDF');
-    const paste = key('v'); frame.dispatchEvent(paste);
-    assert(paste.defaultPrevented); await pause(0); assert.equal(f.session.snapshot.fields.length, 2);
-  } finally { f.dispose(); }
+  } finally {
+    f.dispose();
+  }
 });
 test('PDF element shortcuts still work when Obsidian has no Clipboard API', async () => {
   const f = await fixture(1, true);
   try {
     Object.defineProperty(f.doc.defaultView!.navigator, 'clipboard', { value: undefined });
     const field = f.session.add(1, [80, 580, 240, 610], 12, true);
-    f.session.setValue(field.name, 'Internal copy'); f.editor.refresh();
+    f.session.setValue(field.name, 'Internal copy');
+    f.editor.refresh();
     const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
     frame.focus();
     for (const letter of ['c', 'v']) {
-      const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key: letter, metaKey: true, bubbles: true, cancelable: true });
-      frame.dispatchEvent(event); assert(event.defaultPrevented);
+      const event = f.key(letter, { metaKey: true });
+      frame.dispatchEvent(event);
+      assert(event.defaultPrevented);
     }
-    await pause(0); assert.equal(f.session.snapshot.fields.length, 2);
-  } finally { f.dispose(); }
+    await pause(0);
+    assert.equal(f.session.snapshot.fields.length, 2);
+  } finally {
+    f.dispose();
+  }
 });
 test('leaving Obsidian invalidates an internal PDF copy without Clipboard API', async () => {
   const f = await fixture(1, true);
   try {
     Object.defineProperty(f.doc.defaultView!.navigator, 'clipboard', { value: undefined });
     const field = f.session.add(1, [80, 580, 240, 610], 12, true);
-    f.session.setValue(field.name, 'Old PDF copy'); f.editor.refresh();
+    f.session.setValue(field.name, 'Old PDF copy');
+    f.editor.refresh();
     f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!.focus();
-    const shortcut = (key: string) => f.doc.activeElement!.dispatchEvent(new f.doc.defaultView!.KeyboardEvent('keydown', {
-      key, metaKey: true, bubbles: true, cancelable: true
-    }));
+    const shortcut = (key: string) =>
+      f.doc.activeElement!.dispatchEvent(f.key(key, { metaKey: true }));
     shortcut('c');
     f.doc.defaultView!.dispatchEvent(new f.doc.defaultView!.Event('blur'));
-    shortcut('v'); await pause(0);
+    shortcut('v');
+    await pause(0);
     assert.equal(f.session.snapshot.fields.length, 1);
-  } finally { f.dispose(); }
-});
-test('selecting an ink mark clears old printed-text selection before object copy', async () => {
-  const f = await fixture();
-  try {
-    const printed = f.doc.createElement('span'); printed.textContent = 'Old printed text'; f.doc.querySelector('#page')!.append(printed);
-    const range = f.doc.createRange(); range.selectNodeContents(printed); f.doc.getSelection()!.addRange(range);
-    assert.equal(f.doc.getSelection()!.toString(), 'Old printed text');
-    const stroke = f.session.addStroke(1, 'scribble', [[80, 500], [120, 520]], 2); f.editor.refresh();
-    const mark = f.doc.querySelector<SVGElement>(`[data-pdf-stroke="${stroke.id}"]`)!;
-    f.pointer(mark, 'pointerdown', 90, 290);
-    f.pointer(f.doc.querySelector('.pdf-form-studio-layer')!, 'pointerup', 90, 290);
-    assert.equal(f.doc.getSelection()!.toString(), '');
-    const values = new Map<string, string>();
-    const copy = new f.doc.defaultView!.Event('copy', { bubbles: true, cancelable: true });
-    Object.defineProperty(copy, 'clipboardData', { value: { setData(type: string, value: string) { values.set(type, value); } } });
-    mark.dispatchEvent(copy);
-    assert.equal(copy.defaultPrevented, true);
-    assert([...values.keys()].some(type => type !== 'text/plain'), 'the selected ink mark is copied as a PDF element');
-  } finally { f.dispose(); }
+  } finally {
+    f.dispose();
+  }
 });
 test('Save shortcut remains scoped to the PDF after its toolbar floats outside the editor', async () => {
   const f = await fixture();
   try {
-    const host = f.doc.createElement('div'); host.className = 'pfs-floating-toolbar';
+    const host = f.doc.createElement('div');
+    host.className = 'pfs-floating-toolbar';
     const navigation = host.appendChild(f.doc.createElement('button'));
     const search = host.appendChild(f.doc.createElement('input'));
-    host.append(f.doc.querySelector('#tools')!); f.doc.body.append(host);
+    host.append(f.doc.querySelector('#tools')!);
+    f.doc.body.append(host);
     let saves = 0;
-    (f.editor as unknown as { save(): Promise<void> }).save = async () => { saves++; };
+    (f.editor as unknown as { save(): Promise<void> }).save = async () => {
+      saves++;
+    };
     for (const target of [navigation, search]) {
-      const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 's', metaKey: true, bubbles: true, cancelable: true });
+      const event = f.key('s', { metaKey: true });
       target.dispatchEvent(event);
       assert.equal(event.defaultPrevented, true);
     }
     assert.equal(saves, 2);
-    const outside = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 's', metaKey: true, bubbles: true, cancelable: true });
+    const outside = f.key('s', { metaKey: true });
     f.doc.querySelector('#outside')!.dispatchEvent(outside);
     assert.equal(outside.defaultPrevented, false);
-  } finally { f.dispose(); }
-});
-test('floating toolbar actions retain a selected group until the action runs', async () => {
-  const f = await fixture();
-  try {
-    const first = f.session.add(1, [80, 580, 180, 610], 12, true); f.session.setValue(first.name, 'First');
-    const second = f.session.add(1, [220, 580, 320, 610], 12, true); f.session.setValue(second.name, 'Second');
-    f.editor.refresh();
-    const frames = f.doc.querySelectorAll('.pdf-form-studio-box');
-    f.pointer(frames[0]!, 'pointerdown', 100, 200, true);
-    f.pointer(frames[1]!, 'pointerdown', 250, 200, true);
-    assert.equal(f.doc.querySelectorAll('.is-multi-selected').length, 2);
-    const host = f.doc.createElement('div'); host.className = 'pfs-floating-toolbar';
-    host.append(f.doc.querySelector('#tools')!); f.doc.body.append(host);
-    const search = host.appendChild(f.doc.createElement('input')); search.focus();
-    assert.equal(f.doc.querySelectorAll('.is-multi-selected').length, 0, 'a floated input releases the PDF group scope');
-    f.pointer(frames[0]!, 'pointerdown', 100, 200, true);
-    f.pointer(frames[1]!, 'pointerdown', 250, 200, true);
-    assert.equal(f.doc.querySelectorAll('.is-multi-selected').length, 2);
-    const remove = host.querySelector<HTMLButtonElement>('button[aria-label="Remove selection"]')!;
-    f.pointer(remove, 'pointerdown'); remove.focus(); remove.click();
-    assert.equal(f.session.snapshot.fields.length, 0);
-  } finally { f.dispose(); }
-});
-test('rounded browser scroll measurements do not append an unnecessary ruled row', async () => {
-  const f = await fixture();
-  try {
-    const lines = [620, 596, 572].map(y => ({ page: 1, rect: [80, y, 340, y + 18] as [number, number, number, number] }));
-    f.editor.setAnswerLines(lines); f.editor.addSuggestedField(1, lines[0]!.rect);
-    Object.defineProperty(f.doc.defaultView!.HTMLTextAreaElement.prototype, 'scrollHeight', { configurable: true, get() { return 74; } });
-    const field = f.session.snapshot.fields[0]!, input = f.doc.activeElement as HTMLTextAreaElement;
-    input.value = 'First\nSecond\nThird'; input.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true }));
-    assert.equal(field.ruled?.rows, 3); assert.deepEqual(field.widgets[0]!.rect, [80, 572, 340, 638]);
-    assert.equal(input.parentElement!.classList.contains('is-overflow'), false);
-  } finally { f.dispose(); }
-});
-test('line flow stays off until enabled; clicking an adjacent line then joins the existing answer', async () => {
-  const f = await fixture();
-  try {
-    const lines = [620, 596, 572].map(y => ({ page: 1, rect: [80, y, 340, y + 18] as [number, number, number, number] }));
-    f.sessions.preferences.flowAnswerLines = false; f.editor.setAnswerLines(lines); f.editor.addSuggestedField(1, lines[0]!.rect);
-    const first = f.session.snapshot.fields[0]!; assert.equal(first.ruled, undefined);
-    f.session.setValue(first.name, 'Keep separate'); f.sessions.preferences.flowAnswerLines = true;
-    assert.equal(first.ruled, undefined, 'changing the setting alone does not alter existing answers');
-    f.editor.addSuggestedField(1, lines[1]!.rect); assert.equal(f.session.snapshot.fields.length, 1);
-    assert.deepEqual(first.ruled, { spacing: 24, rows: 3 }); assert.equal(first.value, 'Keep separate');
-  } finally { f.dispose(); }
-});
-
-test('stylesheet hides both shortcut proxies and anchors rotated text boxes', async () => {
-  const f = await fixture();
-  try {
-    const style = f.doc.createElement('style');
-    style.textContent = await readFile(new URL('../styles.css', import.meta.url), 'utf8'); f.doc.head.append(style);
-    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
-    f.session.setValue(field.name, 'Visible answer'); f.editor.refresh();
-    const proxies = [...f.doc.querySelectorAll<HTMLTextAreaElement>('.pdf-form-studio-shortcut-proxy')];
-    assert.equal(proxies.length, 2);
-    for (const proxy of proxies) {
-      const css = f.doc.defaultView!.getComputedStyle(proxy);
-      assert.equal(proxy.getAttribute('style'), null);
-      assert.equal(css.position, 'absolute'); assert.equal(css.width, '1px'); assert.equal(css.height, '1px');
-      assert.equal(css.opacity, '0'); assert.equal(css.pointerEvents, 'none'); assert.equal(css.resize, 'none');
-      proxy.focus(); assert.equal(f.doc.activeElement, proxy);
-    }
-    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
-    assert.equal(frame.style.transformOrigin, '');
-    assert.equal(f.doc.defaultView!.getComputedStyle(frame).transformOrigin, 'top left');
-  } finally { f.dispose(); }
+  } finally {
+    f.dispose();
+  }
 });
 
 test('HTML object copies preserve whitespace safely without inline styles', async () => {
@@ -1527,98 +1636,193 @@ test('HTML object copies preserve whitespace safely without inline styles', asyn
   try {
     const value = '\nFirst  line\n\n<b>literal & safe</b>\tend\n';
     const field = f.session.add(1, [80, 500, 300, 610], 12, true);
-    f.session.setValue(field.name, value); f.editor.refresh();
-    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!; frame.focus();
+    f.session.setValue(field.name, value);
+    f.editor.refresh();
+    const frame = f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!;
+    frame.focus();
     const values = new Map<string, string>();
     const copy = new f.doc.defaultView!.Event('copy', { bubbles: true, cancelable: true });
-    Object.defineProperty(copy, 'clipboardData', { value: { setData(type: string, text: string) { values.set(type, text); } } });
+    Object.defineProperty(copy, 'clipboardData', {
+      value: {
+        setData(type: string, text: string) {
+          values.set(type, text);
+        },
+      },
+    });
     frame.dispatchEvent(copy);
-    assert.equal(copy.defaultPrevented, true); assert.equal(values.get('text/plain'), value);
-    const parsed = new f.doc.defaultView!.DOMParser().parseFromString(values.get('text/html')!, 'text/html');
+    assert.equal(copy.defaultPrevented, true);
+    assert.equal(values.get('text/plain'), value);
+    const parsed = new f.doc.defaultView!.DOMParser().parseFromString(
+      values.get('text/html')!,
+      'text/html',
+    );
     assert(parsed.querySelector('pre > span[data-pdf-editor-objects]'));
     assert.equal(parsed.body.textContent, value);
     assert.equal(parsed.querySelector('[style], b, script'), null);
-  } finally { f.dispose(); }
+  } finally {
+    f.dispose();
+  }
 });
 
 test('host-first preview shortcuts undo unselected drawings once, retain redo after deletion and release the note', async () => {
   for (const modifier of ['metaKey', 'ctrlKey']) {
     const f = await fixture(1, true, 0, undefined, undefined, undefined, true);
     try {
-      f.tool('Pen'); const layer = f.doc.querySelector<HTMLElement>('.pdf-form-studio-layer')!;
-      for (const x of [80, 180]) { f.pointer(layer, 'pointerdown', x, 200); f.pointer(layer, 'pointermove', x + 30, 220); f.pointer(layer, 'pointerup', x + 30, 220); }
-      assert.equal(f.session.snapshot.strokes.length, 2); assert.equal(f.doc.activeElement, layer);
-      assert.equal(f.scopes.length, 1, 'a focused canvas owns the host scope without an object selection');
+      f.tool('Pen');
+      const layer = f.doc.querySelector<HTMLElement>('.pdf-form-studio-layer')!;
+      for (const x of [80, 180]) {
+        f.pointer(layer, 'pointerdown', x, 200);
+        f.pointer(layer, 'pointermove', x + 30, 220);
+        f.pointer(layer, 'pointerup', x + 30, 220);
+      }
+      assert.equal(f.session.snapshot.strokes.length, 2);
+      assert.equal(f.doc.activeElement, layer);
+      assert.equal(
+        f.scopes.length,
+        1,
+        'a focused canvas owns the host scope without an object selection',
+      );
       const shortcut = (options: KeyboardEventInit = {}) => {
-        const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'z', [modifier]: true, bubbles: true, cancelable: true, ...options });
-        f.doc.activeElement!.dispatchEvent(event); return event;
+        const event = f.key('z', { [modifier]: true, ...options });
+        f.doc.activeElement!.dispatchEvent(event);
+        return event;
       };
-      assert.equal(shortcut().defaultPrevented, true); assert.equal(f.session.snapshot.strokes.length, 1);
-      assert.equal(shortcut({ repeat: true }).defaultPrevented, true); assert.equal(f.session.snapshot.strokes.length, 1);
-      shortcut(); assert.equal(f.session.snapshot.strokes.length, 0);
-      shortcut(); assert.equal(f.noteUndos(), 0, 'empty PDF history cannot undo the note');
-      shortcut({ shiftKey: true }); assert.equal(f.session.snapshot.strokes.length, 1);
+      assert.equal(shortcut().defaultPrevented, true);
+      assert.equal(f.session.snapshot.strokes.length, 1);
+      assert.equal(shortcut({ repeat: true }).defaultPrevented, true);
+      assert.equal(f.session.snapshot.strokes.length, 1);
+      shortcut();
+      assert.equal(f.session.snapshot.strokes.length, 0);
+      shortcut();
+      assert.equal(f.noteUndos(), 0, 'empty PDF history cannot undo the note');
+      shortcut({ shiftKey: true });
+      assert.equal(f.session.snapshot.strokes.length, 1);
       assert.equal(f.noteUndos(), 0);
-      const outside = f.doc.querySelector<HTMLButtonElement>('#outside')!; f.pointer(outside, 'pointerdown'); outside.focus();
-      assert.equal(f.scopes.length, 0); shortcut(); assert.equal(f.noteUndos(), 1);
-      layer.focus(); assert.equal(f.scopes.length, 1);
-      f.doc.defaultView!.dispatchEvent(new f.doc.defaultView!.Event('blur')); assert.equal(f.scopes.length, 0);
-      f.doc.defaultView!.dispatchEvent(new f.doc.defaultView!.Event('focus')); assert.equal(f.scopes.length, 1);
-      await f.session.saveWhenIdle(); assert.equal((await readTextPdf(f.bytes())).strokes.length, 1);
+      const outside = f.doc.querySelector<HTMLButtonElement>('#outside')!;
+      f.pointer(outside, 'pointerdown');
+      outside.focus();
+      assert.equal(f.scopes.length, 0);
+      shortcut();
+      assert.equal(f.noteUndos(), 1);
+      layer.focus();
+      assert.equal(f.scopes.length, 1);
+      f.doc.defaultView!.dispatchEvent(new f.doc.defaultView!.Event('blur'));
+      assert.equal(f.scopes.length, 0);
+      f.doc.defaultView!.dispatchEvent(new f.doc.defaultView!.Event('focus'));
+      assert.equal(f.scopes.length, 1);
+      await f.session.saveWhenIdle();
+      assert.equal((await readTextPdf(f.bytes())).strokes.length, 1);
       const task = getDocument({ data: f.bytes().slice() });
       try {
-        const saved = await task.promise, annotations = await (await saved.getPage(1)).getAnnotations();
-        assert.equal(annotations.filter(annotation => annotation.subtype === 'Ink').length, 1, 'PDF.js independently sees the single redone drawing');
-      } finally { await task.destroy(); }
-    } finally { f.dispose(); }
+        const saved = await task.promise;
+        const annotations = await (await saved.getPage(1)).getAnnotations();
+        assert.equal(
+          annotations.filter((annotation) => annotation.subtype === 'Ink').length,
+          1,
+          'PDF.js independently sees the single redone drawing',
+        );
+      } finally {
+        await task.destroy();
+      }
+    } finally {
+      f.dispose();
+    }
   }
 });
 
 test('an editor constructed after window handoff waits for owning-window focus before pushing its scope', async () => {
   for (const windowFocused of [false, true]) {
-    const f = await fixture(1, true, 0, undefined, undefined, undefined, true, { windowFocused, pdfFocused: true });
+    const f = await fixture(1, true, 0, undefined, undefined, undefined, true, {
+      windowFocused,
+      pdfFocused: true,
+    });
     try {
-      assert.equal(f.doc.activeElement, f.native.pages()[0]!.div, 'an inactive window can retain its PDF focus target during loading');
+      assert.equal(
+        f.doc.activeElement,
+        f.native.pages()[0]!.div,
+        'an inactive window can retain its PDF focus target during loading',
+      );
       assert.equal(f.doc.hasFocus(), windowFocused);
-      assert.equal(f.scopes.length, windowFocused ? 1 : 0, 'session synchronization must respect actual initial window focus');
-      f.editor.refresh(); assert.equal(f.scopes.length, windowFocused ? 1 : 0);
-      for (let i = 0; i < 2; i++) f.doc.defaultView!.dispatchEvent(new f.doc.defaultView!.Event('focus'));
+      assert.equal(
+        f.scopes.length,
+        windowFocused ? 1 : 0,
+        'session synchronization must respect actual initial window focus',
+      );
+      f.editor.refresh();
+      assert.equal(f.scopes.length, windowFocused ? 1 : 0);
+      for (let i = 0; i < 2; i++) {
+        f.doc.defaultView!.dispatchEvent(new f.doc.defaultView!.Event('focus'));
+      }
       assert.equal(f.scopes.length, 1, 'returning to the owner pushes one scope');
       f.doc.defaultView!.dispatchEvent(new f.doc.defaultView!.Event('blur'));
-      f.editor.refresh(); assert.equal(f.scopes.length, 0, 'handoff releases the scope even after later synchronization');
-    } finally { f.dispose(); assert.equal(f.scopes.length, 0); }
+      f.editor.refresh();
+      assert.equal(
+        f.scopes.length,
+        0,
+        'handoff releases the scope even after later synchronization',
+      );
+    } finally {
+      f.dispose();
+      assert.equal(f.scopes.length, 0);
+    }
   }
 });
 
 test('host-first preview routing preserves typing undo and guards toolbar, composition and disposal', async () => {
   const f = await fixture(1, true, 0, undefined, undefined, undefined, true);
   try {
-    const field = f.session.add(1, [80, 580, 240, 610], 12, true); f.session.setValue(field.name, 'Typing');
-    const input = f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!; input.focus();
+    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
+    f.session.setValue(field.name, 'Typing');
+    const input = f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!;
+    input.focus();
     const shortcut = (target: Element, options: KeyboardEventInit = {}) => {
-      const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true, cancelable: true, ...options }); target.dispatchEvent(event); return event;
+      const event = f.key('z', { metaKey: true, ...options });
+      target.dispatchEvent(event);
+      return event;
     };
-    assert.equal(shortcut(input).defaultPrevented, false); assert.equal(f.noteUndos(), 0); assert.equal(field.value, 'Typing');
-    const pen = f.doc.querySelector<HTMLButtonElement>('[aria-label="Pen"]')!; pen.focus();
-    assert.equal(shortcut(pen, { isComposing: true }).defaultPrevented, false); assert.equal(f.session.snapshot.fields.length, 1);
-    assert.equal(shortcut(pen).defaultPrevented, true); assert.equal(f.session.snapshot.fields.length, 0); assert.equal(f.noteUndos(), 0);
-    const toolbar = f.doc.querySelector<HTMLElement>('.pdf-form-studio-toolbar')!; f.doc.body.append(toolbar);
-    pen.focus(); shortcut(pen, { shiftKey: true }); assert.equal(f.session.snapshot.fields.length, 1);
-  } finally { f.dispose(); assert.equal(f.scopes.length, 0); }
+    assert.equal(shortcut(input).defaultPrevented, false);
+    assert.equal(f.noteUndos(), 0);
+    assert.equal(field.value, 'Typing');
+    const pen = f.doc.querySelector<HTMLButtonElement>('[aria-label="Pen"]')!;
+    pen.focus();
+    assert.equal(shortcut(pen, { isComposing: true }).defaultPrevented, false);
+    assert.equal(f.session.snapshot.fields.length, 1);
+    assert.equal(shortcut(pen).defaultPrevented, true);
+    assert.equal(f.session.snapshot.fields.length, 0);
+    assert.equal(f.noteUndos(), 0);
+    const toolbar = f.doc.querySelector<HTMLElement>('.pdf-form-studio-toolbar')!;
+    f.doc.body.append(toolbar);
+    pen.focus();
+    shortcut(pen, { shiftKey: true });
+    assert.equal(f.session.snapshot.fields.length, 1);
+  } finally {
+    f.dispose();
+    assert.equal(f.scopes.length, 0);
+  }
 });
 
 test('Live Preview note keyboard targets undo the selected PDF, and typing in the note releases ownership', async () => {
   const f = await fixture(1, true);
   try {
-    const field = f.session.add(1, [80, 580, 240, 610], 12, true); f.session.setValue(field.name, 'Selected');
+    const field = f.session.add(1, [80, 580, 240, 610], 12, true);
+    f.session.setValue(field.name, 'Selected');
     f.session.moveObjects([{ kind: 'text', id: field.name }], [10, 0]);
     f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!.focus();
-    const note = f.doc.createElement('div'); note.contentEditable = 'true'; note.tabIndex = 0; f.doc.body.append(note);
-    const undo = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true, cancelable: true }); note.dispatchEvent(undo);
-    assert.equal(undo.defaultPrevented, true); assert.equal(f.session.snapshot.fields[0]!.widgets[0]!.rect[0], 80);
-    note.focus(); const own = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true, cancelable: true }); note.dispatchEvent(own);
+    const note = f.doc.createElement('div');
+    note.contentEditable = 'true';
+    note.tabIndex = 0;
+    f.doc.body.append(note);
+    const undo = f.key('z', { metaKey: true });
+    note.dispatchEvent(undo);
+    assert.equal(undo.defaultPrevented, true);
+    assert.equal(f.session.snapshot.fields[0]!.widgets[0]!.rect[0], 80);
+    note.focus();
+    const own = f.key('z', { metaKey: true });
+    note.dispatchEvent(own);
     assert.equal(own.defaultPrevented, false);
-  } finally { f.dispose(); }
+  } finally {
+    f.dispose();
+  }
 });
 
 test('undoing the focused drawing or text box retains PDF focus for a real subsequent redo', async () => {
@@ -1626,136 +1830,250 @@ test('undoing the focused drawing or text box retains PDF focus for a real subse
     const f = await fixture(1, true);
     try {
       if (kind === 'ink') {
-        f.session.addStroke(1, 'scribble', [[80, 500], [120, 520]], 2); f.editor.refresh();
+        f.session.addStroke(
+          1,
+          'scribble',
+          [
+            [80, 500],
+            [120, 520],
+          ],
+          2,
+        );
+        f.editor.refresh();
         const layer = f.doc.querySelector<HTMLElement>('.pdf-form-studio-layer')!;
-        f.pointer(f.doc.querySelector('[data-pdf-stroke]')!, 'pointerdown', 100, 290); f.pointer(layer, 'pointerup', 100, 290);
+        f.pointer(f.doc.querySelector('[data-pdf-stroke]')!, 'pointerdown', 100, 290);
+        f.pointer(layer, 'pointerup', 100, 290);
       } else {
-        const field = f.session.add(1, [80, 580, 240, 610], 12, true); f.session.setValue(field.name, 'Undo creation');
+        const field = f.session.add(1, [80, 580, 240, 610], 12, true);
+        f.session.setValue(field.name, 'Undo creation');
         f.doc.querySelector<HTMLElement>('.pdf-form-studio-box')!.focus();
       }
       const shortcut = (redo: boolean) => {
-        const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'z', metaKey: true, shiftKey: redo, bubbles: true, cancelable: true });
-        f.doc.activeElement!.dispatchEvent(event); assert.equal(event.defaultPrevented, true);
+        const event = f.key('z', { metaKey: true, shiftKey: redo });
+        f.doc.activeElement!.dispatchEvent(event);
+        assert.equal(event.defaultPrevented, true);
       };
-      shortcut(false); assert.equal(f.session.snapshot[kind === 'ink' ? 'strokes' : 'fields'].length, 0);
+      shortcut(false);
+      assert.equal(f.session.snapshot[kind === 'ink' ? 'strokes' : 'fields'].length, 0);
       assert.equal(f.doc.activeElement!.classList.contains('pdf-form-studio-layer'), true);
-      shortcut(true); assert.equal(f.session.snapshot[kind === 'ink' ? 'strokes' : 'fields'].length, 1);
-    } finally { f.dispose(); }
+      shortcut(true);
+      assert.equal(f.session.snapshot[kind === 'ink' ? 'strokes' : 'fields'].length, 1);
+    } finally {
+      f.dispose();
+    }
   }
-});
-
-test('history shortcuts consume empty stacks and repeats, preserve text undo, and reject other windows', async () => {
-  const f = await fixture(1, true);
-  try {
-    const layer = f.doc.querySelector<HTMLElement>('.pdf-form-studio-layer')!; layer.focus();
-    const key = (target: Element, options: KeyboardEventInit = {}) => {
-      const event = new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true, cancelable: true, ...options }); target.dispatchEvent(event); return event;
-    };
-    assert.equal(key(layer).defaultPrevented, true); assert.equal(key(layer, { shiftKey: true }).defaultPrevented, true);
-    const stroke = f.session.addStroke(1, 'scribble', [[50, 500], [80, 550]], 2);
-    assert.equal(key(layer, { repeat: true }).defaultPrevented, true); assert.equal(f.session.snapshot.strokes.length, 1);
-    assert.equal(key(layer).defaultPrevented, true); assert.equal(f.session.snapshot.strokes.length, 0);
-    assert.equal(key(layer, { shiftKey: true }).defaultPrevented, true); assert.equal(f.session.snapshot.strokes[0]!.id, stroke.id);
-    const field = f.session.add(1, [80, 580, 240, 610], 12, true); f.session.setValue(field.name, 'Typing');
-    const input = f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!; input.focus();
-    assert.equal(key(input).defaultPrevented, false); assert.equal(field.value, 'Typing');
-    f.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); assert.equal(key(f.doc.activeElement!).defaultPrevented, false);
-  } finally { f.dispose(); }
 });
 
 test('selected ink resize previews cancel cleanly and a completed gesture is one undoable saved edit', async () => {
   const f = await fixture();
   try {
-    const stroke = f.session.addStroke(1, 'scribble', [[100, 500], [160, 550], [200, 500]], 2); await f.session.save();
-    const before = structuredClone(stroke), group = f.doc.querySelector<SVGGElement>('[data-pdf-stroke]')!;
+    const stroke = f.session.addStroke(
+      1,
+      'scribble',
+      [
+        [100, 500],
+        [160, 550],
+        [200, 500],
+      ],
+      2,
+    );
+    await f.session.save();
+    const before = structuredClone(stroke);
+    const group = f.doc.querySelector<SVGGElement>('[data-pdf-stroke]')!;
     const layer = f.doc.querySelector<HTMLElement>('.pdf-form-studio-layer')!;
-    f.pointer(group, 'pointerdown', 150, 300); f.pointer(layer, 'pointerup', 150, 300);
-    const handle = group.querySelector<SVGRectElement>('[data-ink-resize="se"]')!; assert(handle.classList.contains('is-selected'));
-    f.pointer(handle, 'pointerdown', 201, 301); f.pointer(layer, 'pointermove', 250, 330);
-    assert.deepEqual(f.session.snapshot.strokes[0]!.points, before.points, 'preview never changes the document');
-    f.pointer(layer, 'pointercancel'); assert.deepEqual(f.session.snapshot.strokes[0]!.points, before.points);
-    f.pointer(handle, 'pointerdown', 201, 301); f.pointer(layer, 'pointermove', 250, 330); f.pointer(layer, 'pointerup', 250, 330);
+    f.pointer(group, 'pointerdown', 150, 300);
+    f.pointer(layer, 'pointerup', 150, 300);
+    const handle = group.querySelector<SVGRectElement>('[data-ink-resize="se"]')!;
+    assert(handle.classList.contains('is-selected'));
+    f.pointer(handle, 'pointerdown', 201, 301);
+    f.pointer(layer, 'pointermove', 250, 330);
+    assert.deepEqual(
+      f.session.snapshot.strokes[0]!.points,
+      before.points,
+      'preview never changes the document',
+    );
+    f.pointer(layer, 'pointercancel');
+    assert.deepEqual(f.session.snapshot.strokes[0]!.points, before.points);
+    f.pointer(handle, 'pointerdown', 201, 301);
+    f.pointer(layer, 'pointermove', 250, 330);
+    f.pointer(layer, 'pointerup', 250, 330);
     assert.notDeepEqual(f.session.snapshot.strokes[0]!.points, before.points);
-    assert.equal(f.session.snapshot.strokes[0]!.width, before.width); assert.equal(f.session.snapshot.strokes[0]!.id, before.id);
-    f.session.undoStroke(); assert.deepEqual(f.session.snapshot.strokes[0]!.points, before.points);
-    f.session.redoStroke(); await f.session.save(); assert.equal((await readTextPdf(f.bytes())).strokes[0]!.id, before.id);
-  } finally { f.dispose(); }
+    assert.equal(f.session.snapshot.strokes[0]!.width, before.width);
+    assert.equal(f.session.snapshot.strokes[0]!.id, before.id);
+    f.session.undoStroke();
+    assert.deepEqual(f.session.snapshot.strokes[0]!.points, before.points);
+    f.session.redoStroke();
+    await f.session.save();
+    assert.equal((await readTextPdf(f.bytes())).strokes[0]!.id, before.id);
+  } finally {
+    f.dispose();
+  }
 });
 
 test('snap-to-text creates separate editable marks per row with one shared history entry and freehand fallback', async () => {
   const f = await fixture();
   try {
     let measurements = 0;
-    const pages = f.native.pages(); pages[0]!.getTextWords = () => { measurements++; return [
-      { start: [50, 600], end: [150, 600], height: 14, order: 0 }, { start: [50, 575], end: [150, 575], height: 14, order: 1 }
-    ]; }; f.native.pages = () => pages; f.editor.refresh();
+    const pages = f.native.pages();
+    pages[0]!.getTextWords = () => {
+      measurements++;
+      return [
+        { start: [50, 600], end: [150, 600], height: 14, order: 0 },
+        { start: [50, 575], end: [150, 575], height: 14, order: 1 },
+      ];
+    };
+    f.native.pages = () => pages;
+    f.editor.refresh();
     f.tool('Highlighter');
     f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
     f.doc.querySelector<HTMLButtonElement>('[aria-label="Snap to text"]')!.click();
     f.doc.querySelector<HTMLButtonElement>('[aria-label="Close tool settings"]')!.click();
     const layer = f.doc.querySelector<HTMLElement>('.pdf-form-studio-layer')!;
-    f.pointer(layer, 'pointerdown', 60, 200); f.pointer(layer, 'pointermove', 140, 200); f.pointer(layer, 'pointermove', 140, 225); f.pointer(layer, 'pointerup', 60, 225);
+    f.pointer(layer, 'pointerdown', 60, 200);
+    f.pointer(layer, 'pointermove', 140, 200);
+    f.pointer(layer, 'pointermove', 140, 225);
+    f.pointer(layer, 'pointerup', 60, 225);
     assert.equal(measurements, 1, 'geometry is captured once for a complete gesture');
-    assert.equal(f.session.snapshot.strokes.length, 2); assert(f.session.snapshot.strokes.every(stroke => stroke.points.length === 2));
-    f.session.undoStroke(); assert.equal(f.session.snapshot.strokes.length, 0); f.session.redoStroke(); assert.equal(f.session.snapshot.strokes.length, 2);
-    f.pointer(layer, 'pointerdown', 20, 500); f.pointer(layer, 'pointerup', 100, 500); assert.equal(f.session.snapshot.strokes.length, 3);
-    assert.deepEqual(f.session.snapshot.strokes[2]!.points, [[20, 300], [100, 300]]);
-  } finally { f.dispose(); }
+    assert.equal(f.session.snapshot.strokes.length, 2);
+    assert(f.session.snapshot.strokes.every((stroke) => stroke.points.length === 2));
+    f.session.undoStroke();
+    assert.equal(f.session.snapshot.strokes.length, 0);
+    f.session.redoStroke();
+    assert.equal(f.session.snapshot.strokes.length, 2);
+    f.pointer(layer, 'pointerdown', 20, 500);
+    f.pointer(layer, 'pointerup', 100, 500);
+    assert.equal(f.session.snapshot.strokes.length, 3);
+    assert.deepEqual(f.session.snapshot.strokes[2]!.points, [
+      [20, 300],
+      [100, 300],
+    ]);
+  } finally {
+    f.dispose();
+  }
 });
-
 
 test('resize interruptions preserve redo and release autosave without partial geometry', async () => {
   const f = await fixture();
   try {
-    const stroke = f.session.addStroke(1, 'scribble', [[100, 500], [200, 550]], 2); await f.session.save();
-    f.session.moveStroke(stroke.id, [10, 0]); f.session.undoStroke(); assert(f.session.canRedoStroke);
+    const stroke = f.session.addStroke(
+      1,
+      'scribble',
+      [
+        [100, 500],
+        [200, 550],
+      ],
+      2,
+    );
+    await f.session.save();
+    f.session.moveStroke(stroke.id, [10, 0]);
+    f.session.undoStroke();
+    assert(f.session.canRedoStroke);
     const points = structuredClone(f.session.snapshot.strokes[0]!.points);
     const layer = f.doc.querySelector<HTMLElement>('.pdf-form-studio-layer')!;
-    const select = () => { const group = f.doc.querySelector<SVGGElement>('[data-pdf-stroke]')!; f.pointer(group, 'pointerdown', 150, 275); f.pointer(layer, 'pointerup', 150, 275); return group.querySelector<SVGRectElement>('[data-ink-resize="se"]')!; };
+    const select = () => {
+      const group = f.doc.querySelector<SVGGElement>('[data-pdf-stroke]')!;
+      f.pointer(group, 'pointerdown', 150, 275);
+      f.pointer(layer, 'pointerup', 150, 275);
+      return group.querySelector<SVGRectElement>('[data-ink-resize="se"]')!;
+    };
     for (const cancel of ['escape', 'blur', 'capture', 'focus', 'tool', 'viewport']) {
-      const handle = select(); f.pointer(handle, 'pointerdown', 202, 302); f.pointer(layer, 'pointermove', 250, 330);
-      if (cancel === 'escape') layer.dispatchEvent(new f.doc.defaultView!.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-      if (cancel === 'blur') f.doc.defaultView!.dispatchEvent(new f.doc.defaultView!.Event('blur'));
-      if (cancel === 'capture') { layer.releasePointerCapture(1); layer.dispatchEvent(new f.doc.defaultView!.Event('lostpointercapture')); }
-      if (cancel === 'focus') f.doc.querySelector<HTMLButtonElement>('#outside')!.focus();
-      if (cancel === 'tool') f.tool('Add text box');
-      if (cancel === 'viewport') { f.viewports[0]!.width += 1; f.pointer(layer, 'pointerup', 250, 330); f.viewports[0]!.width -= 1; }
-      assert.deepEqual(f.session.snapshot.strokes[0]!.points, points, cancel); assert(f.session.canRedoStroke, cancel);
-      f.doc.querySelector<HTMLButtonElement>('#outside')!.focus(); f.doc.defaultView!.dispatchEvent(new f.doc.defaultView!.Event('focus'));
-      await f.session.saveWhenIdle(); f.tool('Select');
+      const handle = select();
+      f.pointer(handle, 'pointerdown', 202, 302);
+      f.pointer(layer, 'pointermove', 250, 330);
+      if (cancel === 'escape') {
+        layer.dispatchEvent(f.key('Escape'));
+      }
+      if (cancel === 'blur') {
+        f.doc.defaultView!.dispatchEvent(new f.doc.defaultView!.Event('blur'));
+      }
+      if (cancel === 'capture') {
+        layer.releasePointerCapture(1);
+        layer.dispatchEvent(new f.doc.defaultView!.Event('lostpointercapture'));
+      }
+      if (cancel === 'focus') {
+        f.doc.querySelector<HTMLButtonElement>('#outside')!.focus();
+      }
+      if (cancel === 'tool') {
+        f.tool('Add text box');
+      }
+      if (cancel === 'viewport') {
+        f.viewports[0]!.width += 1;
+        f.pointer(layer, 'pointerup', 250, 330);
+        f.viewports[0]!.width -= 1;
+      }
+      assert.deepEqual(f.session.snapshot.strokes[0]!.points, points, cancel);
+      assert(f.session.canRedoStroke, cancel);
+      f.doc.querySelector<HTMLButtonElement>('#outside')!.focus();
+      f.doc.defaultView!.dispatchEvent(new f.doc.defaultView!.Event('focus'));
+      await f.session.saveWhenIdle();
+      f.tool('Select');
     }
-  } finally { f.dispose(); }
+  } finally {
+    f.dispose();
+  }
 });
 
 test('snapped marker preview and saved PDF use the selected thickness as a minimum', async () => {
   for (const width of [8, 22]) {
     const f = await fixture();
     try {
-      const pages = f.native.pages(); pages[0]!.getTextWords = () => [
-        { start: [50, 600], end: [150, 600], height: 18, order: 0 }, { start: [50, 570], end: [150, 570], height: 18, order: 1 }
-      ]; f.native.pages = () => pages; f.editor.refresh(); f.tool('Highlighter');
+      const pages = f.native.pages();
+      pages[0]!.getTextWords = () => [
+        { start: [50, 600], end: [150, 600], height: 18, order: 0 },
+        { start: [50, 570], end: [150, 570], height: 18, order: 1 },
+      ];
+      f.native.pages = () => pages;
+      f.editor.refresh();
+      f.tool('Highlighter');
       f.doc.querySelector<HTMLButtonElement>('.pfs-properties-button')!.click();
       f.doc.querySelector<HTMLButtonElement>(`[aria-label="${width} point line"]`)!.click();
       f.doc.querySelector<HTMLButtonElement>('[aria-label="Snap to text"]')!.click();
       f.doc.querySelector<HTMLButtonElement>('[aria-label="Close tool settings"]')!.click();
       const layer = f.doc.querySelector<HTMLElement>('.pdf-form-studio-layer')!;
-      f.pointer(layer, 'pointerdown', 60, 200); f.pointer(layer, 'pointermove', 140, 200); f.pointer(layer, 'pointermove', 140, 230);
+      f.pointer(layer, 'pointerdown', 60, 200);
+      f.pointer(layer, 'pointermove', 140, 200);
+      f.pointer(layer, 'pointermove', 140, 230);
       await pause(30);
-      const previews = [...f.doc.querySelectorAll<SVGPathElement>('.pdf-form-studio-stroke-preview')].filter(path => path.hasAttribute('d'));
-      assert.equal(previews.length, 2); assert(previews.every(path => Number(path.getAttribute('stroke-width')) === Math.max(18, width)));
-      f.pointer(layer, 'pointerup', 60, 230); await f.session.saveWhenIdle();
-      const snapshot = await readTextPdf(f.bytes()); assert.equal(snapshot.strokes.length, 2);
-      assert(snapshot.strokes.every(stroke => stroke.width === Math.max(18, width)));
+      const previews = [
+        ...f.doc.querySelectorAll<SVGPathElement>('.pdf-form-studio-stroke-preview'),
+      ].filter((path) => path.hasAttribute('d'));
+      assert.equal(previews.length, 2);
+      assert(
+        previews.every((path) => Number(path.getAttribute('stroke-width')) === Math.max(18, width)),
+      );
+      f.pointer(layer, 'pointerup', 60, 230);
+      await f.session.saveWhenIdle();
+      const snapshot = await readTextPdf(f.bytes());
+      assert.equal(snapshot.strokes.length, 2);
+      assert(snapshot.strokes.every((stroke) => stroke.width === Math.max(18, width)));
       const task = getDocument({ data: f.bytes().slice() });
       try {
-        const page = await (await task.promise).getPage(1), annotations = await page.getAnnotations();
-        const ink = annotations.filter(annotation => annotation.subtype === 'Ink'); assert.equal(ink.length, 2);
-        assert(ink.every(annotation => annotation.hasAppearance && annotation.borderStyle.width === Math.max(18, width)));
-      } finally { await task.destroy(); }
-      f.session.undoStroke(); assert.equal(f.session.snapshot.strokes.length, 0);
-      f.session.redoStroke(); assert.equal(f.session.snapshot.strokes.length, 2);
-      f.pointer(layer, 'pointerdown', 20, 500); f.pointer(layer, 'pointerup', 100, 500);
-      assert.equal(f.session.snapshot.strokes[2]!.width, width, 'freehand fallback keeps the chosen thickness');
-    } finally { f.dispose(); }
+        const page = await (await task.promise).getPage(1);
+        const annotations = await page.getAnnotations();
+        const ink = annotations.filter((annotation) => annotation.subtype === 'Ink');
+        assert.equal(ink.length, 2);
+        assert(
+          ink.every(
+            (annotation) =>
+              annotation.hasAppearance && annotation.borderStyle.width === Math.max(18, width),
+          ),
+        );
+      } finally {
+        await task.destroy();
+      }
+      f.session.undoStroke();
+      assert.equal(f.session.snapshot.strokes.length, 0);
+      f.session.redoStroke();
+      assert.equal(f.session.snapshot.strokes.length, 2);
+      f.pointer(layer, 'pointerdown', 20, 500);
+      f.pointer(layer, 'pointerup', 100, 500);
+      assert.equal(
+        f.session.snapshot.strokes[2]!.width,
+        width,
+        'freehand fallback keeps the chosen thickness',
+      );
+    } finally {
+      f.dispose();
+    }
   }
 });
