@@ -31,10 +31,10 @@ export class DraftJournal {
     const entries: Entry[] = [];
     let failure: Error | undefined;
     for (const path of [base, base + '.previous']) {
-      if (!(await this.store.exists(path))) {
-        continue;
-      }
       try {
+        if (!(await this.store.exists(path))) {
+          continue;
+        }
         const value: unknown = JSON.parse(await this.store.read(path));
         if (
           !value ||

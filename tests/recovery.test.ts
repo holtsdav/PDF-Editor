@@ -309,7 +309,7 @@ test('journal read failures become Error objects even when stores throw falsy va
   }
 });
 
-test('a valid alternate journal survives a non-Error failure reading the other slot', async () => {
+test('a valid alternate journal survives failed probes or reads of the other slot', async () => {
   const bytes = new Uint8Array([1, 2, 3]);
   const baselineHash = await hash(new Uint8Array([4]));
   const saved = JSON.stringify({
@@ -318,16 +318,25 @@ test('a valid alternate journal survives a non-Error failure reading the other s
     pdfHash: await hash(bytes),
     sequence: 1,
   });
-  const journal = new DraftJournal({
-    exists: async () => true,
-    read: async (path) => {
-      if (path === 'draft') {
-        throw 'Unavailable';
-      }
-      return saved;
-    },
-    write: async () => {},
-    remove: async () => {},
-  });
-  assert.deepEqual(await journal.read('draft'), { baselineHash, bytes });
+  for (const failure of ['exists', 'read']) {
+    for (const unavailable of ['draft', 'draft.previous']) {
+      const journal = new DraftJournal({
+        exists: async (path) => {
+          if (failure === 'exists' && path === unavailable) {
+            throw 'Unavailable';
+          }
+          return true;
+        },
+        read: async (path) => {
+          if (failure === 'read' && path === unavailable) {
+            throw 'Unavailable';
+          }
+          return saved;
+        },
+        write: async () => {},
+        remove: async () => {},
+      });
+      assert.deepEqual(await journal.read('draft'), { baselineHash, bytes });
+    }
+  }
 });
