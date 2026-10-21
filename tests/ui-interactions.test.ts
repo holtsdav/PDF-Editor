@@ -106,7 +106,7 @@ async function fixture(
       font,
     ));
   const dom = new JSDOM(
-    `<body><div id="editor"><div id="tools"></div>${Array.from({ length: pageCount }, (_, i) => `<div id="${i ? 'page' + (i + 1) : 'page'}"></div>`).join('')}</div><button id="outside">Outside</button></body>`,
+    `<body>${hostFirst ? '<div contenteditable="true"><div contenteditable="false">' : ''}<div id="editor"><div id="tools"></div>${Array.from({ length: pageCount }, (_, i) => `<div id="${i ? 'page' + (i + 1) : 'page'}"></div>`).join('')}</div>${hostFirst ? '</div></div>' : ''}<button id="outside">Outside</button></body>`,
     { pretendToBeVisual: true },
   );
   const doc = dom.window.document;

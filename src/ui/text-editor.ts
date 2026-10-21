@@ -919,11 +919,23 @@ export class TextEditor extends Component {
   private isTextTarget(target: EventTarget | null): boolean {
     const element =
       target instanceof this.native.element.ownerDocument.defaultView!.Element ? target : undefined;
-    return (
-      !!element &&
-      !element.classList.contains('pdf-form-studio-shortcut-proxy') &&
-      !!element.closest('input, textarea, [contenteditable="true"]')
-    );
+    if (!element || element.classList.contains('pdf-form-studio-shortcut-proxy')) {
+      return false;
+    }
+    if (element.closest('input, textarea')) {
+      return true;
+    }
+    // Live Preview embeds are non-editable widgets inside CodeMirror's editable note.
+    for (let ancestor: Element | null = element; ancestor; ancestor = ancestor.parentElement) {
+      const editable = ancestor.getAttribute('contenteditable')?.toLowerCase();
+      if (editable === 'false') {
+        return false;
+      }
+      if (editable === '' || editable === 'true' || editable === 'plaintext-only') {
+        return true;
+      }
+    }
+    return false;
   }
   /** A caret in an owned PDF answer selects the box; highlighted text keeps native clipboard behavior. */
   private shortcutField(target: EventTarget | null): string | undefined {
