@@ -1801,6 +1801,71 @@ test('host-first preview routing preserves typing undo and guards toolbar, compo
   }
 });
 
+test('forwarded redo uses native text history only in the focused editable PDF field', async () => {
+  const pdf = await PDFDocument.create();
+  const page = pdf.addPage([600, 800]);
+  pdf
+    .getForm()
+    .createTextField('Authored')
+    .addToPage(page, { x: 80, y: 580, width: 160, height: 30 });
+  const f = await fixture(1, true, 0, await pdf.save(), undefined, undefined, true);
+  try {
+    const added = f.session.add(1, [80, 480, 240, 510], 12, true);
+    f.session.setValue(added.name, 'Added');
+    const commands: string[] = [];
+    let result: boolean | Error = true;
+    Object.defineProperty(f.doc, 'execCommand', {
+      value: (command: string) => {
+        commands.push(command);
+        if (result instanceof Error) {
+          throw result;
+        }
+        return result;
+      },
+    });
+    const redo = (target: Element, options: KeyboardEventInit = {}) => {
+      const event = f.key('z', { metaKey: true, shiftKey: true, ...options });
+      target.dispatchEvent(event);
+      return event;
+    };
+    const inputs = Array.from(
+      f.doc.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('[data-pdf-field]'),
+    );
+    for (const input of inputs) {
+      input.focus();
+      const snapshot = JSON.stringify(f.session.snapshot);
+      assert.equal(redo(input).defaultPrevented, true);
+      assert.equal(commands.at(-1), 'redo');
+      assert.equal(JSON.stringify(f.session.snapshot), snapshot, 'never apply PDF object history');
+      const calls = commands.length;
+      assert.equal(redo(input, { shiftKey: false }).defaultPrevented, false);
+      assert.equal(redo(input, { isComposing: true }).defaultPrevented, false);
+      input.dispatchEvent(new f.doc.defaultView!.CompositionEvent('compositionstart'));
+      assert.equal(redo(input).defaultPrevented, false);
+      input.dispatchEvent(new f.doc.defaultView!.CompositionEvent('compositionend'));
+      input.readOnly = true;
+      assert.equal(redo(input).defaultPrevented, false);
+      input.readOnly = false;
+      input.disabled = true;
+      assert.equal(redo(input).defaultPrevented, false);
+      input.disabled = false;
+      inputs.find((other) => other !== input)!.focus();
+      assert.equal(redo(input).defaultPrevented, false);
+      assert.equal(commands.length, calls);
+      input.focus();
+      for (result of [false, new Error('Native redo unavailable')]) {
+        const before = JSON.stringify(f.session.snapshot);
+        assert.equal(redo(input).defaultPrevented, false);
+        assert.equal(JSON.stringify(f.session.snapshot), before);
+      }
+      result = true;
+    }
+    assert.equal(f.noteUndos(), 0);
+  } finally {
+    f.dispose();
+  }
+});
+
 test('Live Preview note keyboard targets undo the selected PDF, and typing in the note releases ownership', async () => {
   const f = await fixture(1, true);
   try {

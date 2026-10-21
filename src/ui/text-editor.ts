@@ -121,6 +121,7 @@ export class TextEditor extends Component {
   private unsubscribe?: () => void;
   private focusInteraction?: { input: HTMLElement; release: () => void };
   private composing = new Set<HTMLInputElement | HTMLTextAreaElement>();
+  private nativeRedoActive = false;
   private editing?: string;
   private selection?: ObjectSelection;
   private objectScope?: Scope;
@@ -1036,6 +1037,35 @@ export class TextEditor extends Component {
     if (this.isTextTarget(target) && (this.shortcutTarget(target) || ownControl)) {
       // Preserve the browser's text-edit history, while keeping the note's keymap out.
       event.stopImmediatePropagation();
+      const doc = this.native.element.ownerDocument;
+      // Obsidian's native Redo menu (and pop-out forwarding) can send a synthetic
+      // key, which has no browser editing default. Execute the native text stack.
+      if (
+        !event.isTrusted &&
+        !event.defaultPrevented &&
+        event.shiftKey &&
+        !this.nativeRedoActive &&
+        doc.hasFocus() &&
+        target === doc.activeElement &&
+        (target instanceof view.HTMLInputElement || target instanceof view.HTMLTextAreaElement) &&
+        this.native.element.contains(target) &&
+        !!target.dataset.pdfField &&
+        !target.readOnly &&
+        !target.disabled &&
+        !this.composing.has(target)
+      ) {
+        this.nativeRedoActive = true;
+        try {
+          if (doc.execCommand?.('redo')) {
+            event.preventDefault();
+            return true;
+          }
+        } catch {
+          // An unavailable native command must never fall back to PDF object history.
+        } finally {
+          this.nativeRedoActive = false;
+        }
+      }
       return false;
     }
     event.preventDefault();
