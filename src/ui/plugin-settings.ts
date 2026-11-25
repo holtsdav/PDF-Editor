@@ -33,6 +33,11 @@ export class PdfSettingsTab extends PluginSettingTab {
     // Definitions are also requested for search indexing. Read storage only
     // while rendering, and keep saves routed through the shared preferences.
     return [
+      this.toggle(
+        'openInEditor',
+        'Open every PDF in PDF Editor',
+        "Off: PDFs open in Obsidian's own viewer, so viewer plugins such as PDF++ keep working. Switch editing on for one PDF with the pencil button in its tab header, the file menu or the command palette. On: every PDF opens in the editor.",
+      ),
       this.slider(
         'toolbarTopOffset',
         'PDF toolbar top offset',
@@ -212,7 +217,8 @@ export class PdfSettingsTab extends PluginSettingTab {
       | 'floatingToolbar'
       | 'autoDetectLines'
       | 'flowAnswerLines'
-      | 'keepOriginalBackups',
+      | 'keepOriginalBackups'
+      | 'openInEditor',
     name: string,
     desc: string,
   ): SettingDefinition {
@@ -257,6 +263,7 @@ export class PdfSettingsTab extends PluginSettingTab {
       | 'autoDetectLines'
       | 'flowAnswerLines'
       | 'keepOriginalBackups'
+      | 'openInEditor'
       | 'toolbarTopOffset'
       | 'autoDetectPageLimit',
     value: boolean | number,
