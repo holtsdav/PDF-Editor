@@ -5,7 +5,7 @@ import { PDFDocument, PDFName, PDFDict, PDFHexString, StandardFonts } from 'pdf-
 import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { readTextPdf, renderTextPdf } from '../src/pdf/text-engine.ts';
 import { TextSession } from '../src/pdf/text-session.ts';
-import { lineQuads } from '../src/pdf/mark-engine.ts';
+import { lineQuads, subtractQuads } from '../src/pdf/mark-engine.ts';
 import type { Rect } from '../src/pdf/text-engine.ts';
 
 const font = new Uint8Array(
@@ -179,4 +179,49 @@ test('invalid highlights are rejected and the display copy omits our marks only'
     .asArray()
     .map((ref) => display.context.lookup(ref, PDFDict).get(PDFName.of('Subtype'))?.toString());
   assert.deepEqual(left, ['/Highlight']);
+});
+
+test('removing part of a highlight keeps the rest of the line and the comment', async () => {
+  assert.deepEqual(
+    subtractQuads(
+      [
+        [40, 338, 200, 352],
+        [40, 318, 140, 332],
+      ],
+      [[90, 338.5, 130, 351.5]],
+    ),
+    [
+      [40, 338, 90, 352],
+      [130, 338, 200, 352],
+      [40, 318, 140, 332],
+    ],
+  );
+  // Removing the whole highlighted text leaves nothing, not slivers.
+  assert.deepEqual(subtractQuads([[40, 338, 200, 352]], [[39.2, 338, 200.8, 352]]), []);
+
+  const file = memory(await textPdf());
+  const session = await TextSession.open(file.store, font);
+  const mark = session.addMark({
+    page: 1,
+    kind: 'highlight',
+    quads: [[40, 338, 200, 352]],
+    color: [1, 0.85, 0.1],
+    comment: 'bleibt',
+  });
+  assert.equal(session.eraseHighlights(1, [[150, 338, 200, 352]]), 1);
+  assert.deepEqual(session.snapshot.marks![0]!.quads, [[40, 338, 150, 352]]);
+  assert.equal(session.snapshot.marks![0]!.comment, 'bleibt');
+  assert.equal(session.eraseHighlights(1, [[300, 100, 350, 112]]), 0, 'no overlap, no change');
+  session.eraseHighlights(1, [[40, 338, 150, 352]]);
+  assert.equal(session.snapshot.marks!.length, 0);
+  session.undoStroke();
+  assert.deepEqual(session.snapshot.marks![0]!.quads, [[40, 338, 150, 352]]);
+  session.undoStroke();
+  assert.deepEqual(session.snapshot.marks![0]!.quads, [[40, 338, 200, 352]]);
+  session.eraseHighlights(1, [[40, 338, 120, 352]]);
+  await session.save();
+  const saved = (await readTextPdf(file.bytes())).marks!;
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0]!.id, mark.id);
+  assert.deepEqual(saved[0]!.quads, [[120, 338, 200, 352]]);
 });

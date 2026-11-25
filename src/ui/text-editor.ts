@@ -32,6 +32,7 @@ const MARK_COLORS: { name: string; color: PdfColor }[] = [
   { name: 'Pink', color: [1, 0.55, 0.75] },
 ];
 const MARK_UI = '.pfs-mark-ui';
+type HighlightMode = 'toggle' | 'color' | 'comment';
 
 interface AnswerLine {
   page: number;
@@ -282,14 +283,14 @@ export class TextEditor extends Component {
     highlightGroup.setAttribute('aria-label', 'Highlight selected text');
     this.toolbar.append(highlightGroup);
     this.highlightButton = button(highlightGroup, 'Highlight selected text', 'baseline', () =>
-      this.highlightSelection(false),
+      this.highlightSelection('toggle'),
     );
     this.highlightButton.classList.add('pfs-highlight-button');
     this.highlightCommentButton = button(
       highlightGroup,
       'Highlight selected text and comment',
       'message-square-text',
-      () => this.highlightSelection(true),
+      () => this.highlightSelection('comment'),
     );
     const colorButton = button(highlightGroup, 'Highlight colour', 'chevron-down', () =>
       this.toggleHighlightColors(highlightGroup),
@@ -2611,6 +2612,9 @@ export class TextEditor extends Component {
       return;
     }
     const ready = this.hasTextSelection();
+    if (!ready) {
+      this.highlightButton.setAttribute('aria-pressed', 'false');
+    }
     if (
       this.highlightButton.disabled === !ready &&
       this.highlightButton.dataset.color === String(this.markColor)
@@ -2635,7 +2639,7 @@ export class TextEditor extends Component {
     }
   }
 
-  private highlightSelection(comment: boolean): void {
+  private highlightSelection(mode: HighlightMode): void {
     const pressed =
       this.pressedSelection && Date.now() - this.pressedSelection.time < 30000
         ? this.pressedSelection.found
@@ -2643,7 +2647,7 @@ export class TextEditor extends Component {
     const found = this.selectionQuads() ?? pressed;
     this.pressedSelection = undefined;
     if (found) {
-      this.createHighlights(found.quads, comment);
+      this.createHighlights(found.quads, mode);
     }
     this.updateHighlightButton();
   }
@@ -2676,7 +2680,7 @@ export class TextEditor extends Component {
         this.markColor = color;
         menu.remove();
         this.highlightColors = undefined;
-        this.highlightSelection(false);
+        this.highlightSelection('color');
       });
       menu.append(swatch);
     }
@@ -2766,6 +2770,14 @@ export class TextEditor extends Component {
       return;
     }
     const { quads, last } = found;
+    const highlighted = [...quads].some(
+      ([entry, rects]) => this.session!.highlightsAt(entry.page.number, rects).length,
+    );
+    this.highlightButton.setAttribute('aria-pressed', String(highlighted));
+    setTooltip(
+      this.highlightButton,
+      highlighted ? 'Remove highlight from selected text' : 'Highlight selected text',
+    );
     this.hideSelectionBar();
     const bar = doc.createElement('div');
     bar.className = 'pfs-selection-bar pfs-mark-ui';
@@ -2783,7 +2795,7 @@ export class TextEditor extends Component {
       setTooltip(swatch, `Highlight (${name.toLowerCase()})`);
       swatch.addEventListener('click', () => {
         this.markColor = color;
-        this.createHighlights(quads, false);
+        this.createHighlights(quads, 'color');
       });
       bar.append(swatch);
     }
@@ -2792,8 +2804,22 @@ export class TextEditor extends Component {
     comment.className = 'clickable-icon pfs-mark-comment-button';
     setIcon(comment, 'message-square-plus');
     setTooltip(comment, 'Highlight and comment');
-    comment.addEventListener('click', () => this.createHighlights(quads, true));
+    comment.addEventListener('click', () => this.createHighlights(quads, 'comment'));
     bar.append(comment);
+    // Already highlighted text: offer removing just the selected part.
+    if (
+      [...quads].some(
+        ([entry, rects]) => this.session!.highlightsAt(entry.page.number, rects).length,
+      )
+    ) {
+      const remove = doc.createElement('button');
+      remove.type = 'button';
+      remove.className = 'clickable-icon pfs-mark-remove-button';
+      setIcon(remove, 'eraser');
+      setTooltip(remove, 'Remove highlight');
+      remove.addEventListener('click', () => this.createHighlights(quads, 'toggle'));
+      bar.append(remove);
+    }
     // Keep the text selection while pressing the bar.
     for (const type of ['pointerdown', 'mousedown'] as const) {
       bar.addEventListener(type, (event) => {
@@ -2808,19 +2834,38 @@ export class TextEditor extends Component {
     this.selectionBar = { element: bar, quads };
   }
 
-  private createHighlights(quads: Map<PageLayer, Rect[]>, comment: boolean): void {
-    const created: { entry: PageLayer; mark: PdfMark }[] = [];
+  /**
+   * toggle: highlight, or remove the selected part if it is already highlighted.
+   * color: highlight in the chosen colour; already highlighted text in the same colour
+   * is removed, in another colour it is re-coloured.
+   * comment: highlight and open the comment (or open the existing highlight's comment).
+   */
+  private createHighlights(quads: Map<PageLayer, Rect[]>, mode: HighlightMode): void {
+    const session = this.session!;
+    let opened: { entry: PageLayer; id: string } | undefined;
     try {
       for (const [entry, rects] of quads) {
-        created.push({
-          entry,
-          mark: this.session!.addMark({
-            page: entry.page.number,
-            kind: 'highlight',
-            quads: rects,
-            color: this.markColor,
-          }),
+        const existing = session.highlightsAt(entry.page.number, rects);
+        if (mode === 'comment' && existing.length) {
+          opened = { entry, id: existing[0]!.id };
+          continue;
+        }
+        if (existing.length) {
+          const sameColour = existing.every((mark) =>
+            mark.color.every((value, i) => Math.abs(value - this.markColor[i]!) < 0.001),
+          );
+          session.eraseHighlights(entry.page.number, rects);
+          if (mode === 'toggle' || sameColour) {
+            continue;
+          }
+        }
+        const mark = session.addMark({
+          page: entry.page.number,
+          kind: 'highlight',
+          quads: rects,
+          color: this.markColor,
         });
+        opened = { entry, id: mark.id };
       }
     } catch (error) {
       this.showError(error);
@@ -2830,9 +2875,8 @@ export class TextEditor extends Component {
     this.updateHighlightButton();
     this.refresh();
     this.scheduleSave();
-    const last = created.at(-1);
-    if (comment && last) {
-      this.openMarkPopover(last.entry, last.mark.id, false);
+    if (mode === 'comment' && opened) {
+      this.openMarkPopover(opened.entry, opened.id, false);
     }
   }
 

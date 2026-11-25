@@ -416,3 +416,42 @@ export function stripMarks(pdf: PDFDocument): void {
     }
   }
 }
+
+/** Same text line: the rectangles overlap vertically by more than half the smaller height. */
+function sameLine(a: Rect, b: Rect): boolean {
+  const overlap = Math.min(a[3], b[3]) - Math.max(a[1], b[1]);
+  return overlap > 0.5 * Math.min(a[3] - a[1], b[3] - b[1]);
+}
+
+/** Whether a selection touches a highlight: same line and horizontally overlapping. */
+export function quadsOverlap(quads: Rect[], cuts: Rect[]): boolean {
+  return quads.some((quad) =>
+    cuts.some(
+      (cut) => sameLine(quad, cut) && Math.min(quad[2], cut[2]) - Math.max(quad[0], cut[0]) > 0.5,
+    ),
+  );
+}
+
+/**
+ * Remove the selected parts from highlight quads, keeping what is left on each line.
+ * Leftover slivers narrower than 1.5 pt (part of a space or glyph edge) are dropped.
+ */
+export function subtractQuads(quads: Rect[], cuts: Rect[]): Rect[] {
+  let result = quads.map((quad) => [...quad] as Rect);
+  for (const cut of cuts) {
+    result = result.flatMap((quad) => {
+      if (!sameLine(quad, cut) || Math.min(quad[2], cut[2]) - Math.max(quad[0], cut[0]) <= 0.5) {
+        return [quad];
+      }
+      const pieces: Rect[] = [];
+      if (cut[0] - quad[0] >= 1.5) {
+        pieces.push([quad[0], quad[1], cut[0], quad[3]]);
+      }
+      if (quad[2] - cut[2] >= 1.5) {
+        pieces.push([cut[2], quad[1], quad[2], quad[3]]);
+      }
+      return pieces;
+    });
+  }
+  return result;
+}

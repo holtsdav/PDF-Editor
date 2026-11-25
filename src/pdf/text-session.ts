@@ -23,7 +23,15 @@ import { wrapText } from './wrap-text.ts';
 import { readInk } from './ink-engine.ts';
 import { loadPdfDocument } from './pdf-load.ts';
 import type { ChoiceField } from './choice-engine.ts';
-import { MARK_PREFIX, NOTE_SIZE, pdfDate, unionRect, validateMark } from './mark-engine.ts';
+import {
+  MARK_PREFIX,
+  NOTE_SIZE,
+  pdfDate,
+  quadsOverlap,
+  subtractQuads,
+  unionRect,
+  validateMark,
+} from './mark-engine.ts';
 import type { MarkKind, PdfMark } from './mark-engine.ts';
 
 const MAX_HISTORY_ENTRIES = 50;
@@ -367,6 +375,43 @@ export class TextSession {
     mark.modified = pdfDate();
     (this.changes.marks ??= new Map()).set(id, structuredClone(mark));
     this.changed();
+  }
+
+  /** Highlights on this page that the selection touches. */
+  highlightsAt(page: number, cuts: Rect[]): PdfMark[] {
+    return (this.snapshot.marks ?? []).filter(
+      (mark) => mark.page === page && mark.kind === 'highlight' && quadsOverlap(mark.quads, cuts),
+    );
+  }
+
+  /**
+   * Remove the selected parts of highlights on a page as one undo step. Marks left
+   * without any highlighted text are deleted; the rest keep their colour and comment.
+   */
+  eraseHighlights(page: number, cuts: Rect[]): number {
+    this.assertEditable();
+    const touched = this.highlightsAt(page, cuts);
+    if (!touched.length) {
+      return 0;
+    }
+    this.rememberText(`mark-erase:${page}`, false);
+    const bounds = this.snapshot.pages[page - 1]!;
+    for (const mark of touched) {
+      const quads = subtractQuads(mark.quads, cuts);
+      if (!quads.length) {
+        this.snapshot.marks = this.snapshot.marks!.filter((item) => item.id !== mark.id);
+        this.changes.marks?.delete(mark.id);
+        (this.changes.deletedMarks ??= new Set()).add(mark.id);
+        continue;
+      }
+      mark.quads = quads;
+      mark.rect = unionRect(quads);
+      mark.modified = pdfDate();
+      validateMark(mark, bounds);
+      (this.changes.marks ??= new Map()).set(mark.id, structuredClone(mark));
+    }
+    this.changed();
+    return touched.length;
   }
 
   deleteMark(id: string): void {

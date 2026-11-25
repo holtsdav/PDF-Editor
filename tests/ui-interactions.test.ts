@@ -2365,18 +2365,104 @@ test('the toolbar highlight button highlights selected PDF text in the chosen co
       f.session.snapshot.marks!.map((mark) => mark.color),
       [[0.45, 0.75, 1]],
     );
-    // The main button reuses that colour, through the real pointerdown → click sequence.
+    // Pressing the main button on that text again removes the highlight (toggle).
+    const press = (element: HTMLElement) => {
+      f.pointer(element, 'pointerdown');
+      element.focus();
+      element.click();
+    };
     select();
     await ready();
-    f.tool('Highlight selected text');
-    assert.equal(f.session.snapshot.marks!.length, 2);
-    assert.deepEqual(f.session.snapshot.marks![1]!.color, [0.45, 0.75, 1]);
+    press(button);
+    assert.equal(f.session.snapshot.marks!.length, 0);
     assert.equal(f.doc.getSelection()!.isCollapsed, true);
-    // Highlight + comment opens the comment box.
+    // The main button reuses the chosen colour on unhighlighted text.
     select();
     await ready();
-    f.tool('Highlight selected text and comment');
+    press(button);
+    assert.deepEqual(
+      f.session.snapshot.marks!.map((mark) => mark.color),
+      [[0.45, 0.75, 1]],
+    );
+    // Highlight + comment on highlighted text opens its comment box.
+    select();
+    await ready();
+    press(
+      f.doc.querySelector<HTMLButtonElement>(
+        'button[aria-label="Highlight selected text and comment"]',
+      )!,
+    );
     assert.ok(f.doc.querySelector('.pfs-mark-popover textarea'));
+    assert.equal(f.session.snapshot.marks!.length, 1);
+  } finally {
+    f.dispose();
+  }
+});
+
+test('pressing highlight again on highlighted text removes that highlight', async () => {
+  const f = await fixture();
+  try {
+    const page = f.doc.querySelector<HTMLElement>('#page')!;
+    const textLayer = f.doc.createElement('div');
+    textLayer.className = 'textLayer pfs-text-layer';
+    const span = f.doc.createElement('span');
+    span.textContent = 'Printed sentence';
+    textLayer.append(span);
+    page.prepend(textLayer);
+    let rects = [{ left: 50, right: 200, top: 100, bottom: 114, width: 150, height: 14 }];
+    Object.assign(f.doc.defaultView!.Range.prototype, { getClientRects: () => rects });
+    const button = f.doc.querySelector<HTMLButtonElement>('.pfs-highlight-button')!;
+    const select = async () => {
+      const range = f.doc.createRange();
+      range.selectNodeContents(span);
+      f.doc.getSelection()!.removeAllRanges();
+      f.doc.getSelection()!.addRange(range);
+      f.pointer(span, 'pointerup');
+      for (let i = 0; i < 100 && button.disabled; i++) {
+        await pause(5);
+      }
+      await pause(5);
+    };
+    const press = (element: HTMLElement) => {
+      f.pointer(element, 'pointerdown');
+      element.focus();
+      element.click();
+    };
+    await select();
+    assert.equal(button.getAttribute('aria-pressed'), 'false');
+    press(button);
+    assert.equal(f.session.snapshot.marks!.length, 1);
+
+    // Same text again: the button shows pressed, the bar offers removing, pressing removes.
+    await select();
+    assert.equal(button.getAttribute('aria-pressed'), 'true');
+    assert.ok(f.doc.querySelector('.pfs-selection-bar .pfs-mark-remove-button'));
+    press(button);
+    assert.equal(f.session.snapshot.marks!.length, 0);
+
+    // Partial removal keeps the rest; undo brings the removed part back.
+    await select();
+    press(button);
+    rects = [{ left: 120, right: 200, top: 100, bottom: 114, width: 80, height: 14 }];
+    await select();
+    press(f.doc.querySelector<HTMLButtonElement>('.pfs-selection-bar .pfs-mark-remove-button')!);
+    assert.deepEqual(f.session.snapshot.marks![0]!.quads, [[50, 686, 120, 700]]);
+    f.session.undoStroke();
+    assert.deepEqual(f.session.snapshot.marks![0]!.quads, [[50, 686, 200, 700]]);
+
+    // A different colour from the bar re-colours instead of removing.
+    rects = [{ left: 50, right: 200, top: 100, bottom: 114, width: 150, height: 14 }];
+    await select();
+    press(f.doc.querySelectorAll<HTMLButtonElement>('.pfs-selection-bar .pfs-mark-swatch')[1]!);
+    assert.deepEqual(
+      f.session.snapshot.marks!.map((mark) => mark.color),
+      [[0.45, 0.9, 0.45]],
+    );
+    // "Highlight and comment" on highlighted text opens the existing comment.
+    await select();
+    press(f.doc.querySelector<HTMLButtonElement>('.pfs-selection-bar .pfs-mark-comment-button')!);
+    assert.equal(f.session.snapshot.marks!.length, 1);
+    assert.ok(f.doc.querySelector('.pfs-mark-popover'));
   } finally {
     f.dispose();
   }
