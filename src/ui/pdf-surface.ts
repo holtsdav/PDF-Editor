@@ -50,6 +50,11 @@ const FLOAT_EXIT_MS = 110;
 const FLOAT_SCROLL_BUFFER = 6;
 
 /** Owns the visible page lifecycle. Native reloads never replace this surface. */
+/** Stack width that allows anchored zooming beyond page edges, or undefined to centre pages. */
+export function zoomPanWidth(contentWidth: number, viewWidth: number): number | undefined {
+  return contentWidth > viewWidth ? contentWidth + 2 * viewWidth : undefined;
+}
+
 export class PdfSurface extends Component {
   private native: NativePdf;
   private sessions: VaultSessions;
@@ -641,13 +646,24 @@ export class PdfSurface extends Component {
     if (this.scale === 'width') {
       this.panSpace = false;
     }
+    // Sideways room for anchored zooming only while pages are wider than the view;
+    // narrower pages stay centred instead of drifting into one side of the margin.
+    const panWidth = this.panSpace
+      ? zoomPanWidth(
+          Math.max(...this.entries.map((entry) => entry.native.viewport.width + 32)),
+          this.scroller.clientWidth,
+        )
+      : undefined;
+    if (panWidth) {
+      this.stack.style.minWidth = `${panWidth}px`;
+    } else {
+      this.stack.style.removeProperty('min-width');
+    }
     if (this.panSpace) {
-      // Room around the canvas lets a smaller-than-viewport page retain the pointer anchor.
-      this.stack.style.minWidth = `${Math.max(this.scroller.clientWidth, ...this.entries.map((entry) => entry.native.viewport.width + 32)) + 2 * this.scroller.clientWidth}px`;
+      // Room above and below lets a page shorter than the view keep the pointer anchor.
       this.stack.style.paddingTop =
         this.stack.style.paddingBottom = `${16 + this.scroller.clientHeight}px`;
     } else {
-      this.stack.style.removeProperty('min-width');
       this.stack.style.removeProperty('padding-top');
       this.stack.style.removeProperty('padding-bottom');
     }
@@ -799,17 +815,20 @@ export class PdfSurface extends Component {
     }
     this.floatingHost.classList.add('is-visible');
   }
+  /** Zoom buttons: zoom about the centre of the view, so what is in the middle stays there. */
   private zoom(delta: number): void {
-    this.scale = Math.max(
-      0.35,
-      Math.min(
-        3,
-        (typeof this.scale === 'number'
-          ? this.scale
-          : (this.entries[this.currentPage - 1]?.native.viewport.scale ?? 1)) + delta,
-      ),
-    );
-    this.layout();
+    const current =
+      typeof this.scale === 'number'
+        ? this.scale
+        : (this.entries[this.currentPage - 1]?.native.viewport.scale ?? 1);
+    const next = Math.max(0.35, Math.min(3, current + delta));
+    const box = this.scroller.getBoundingClientRect();
+    if (!box.width || !box.height || !current) {
+      this.scale = next;
+      this.layout();
+      return;
+    }
+    this.zoomAt(next / current, box.left + box.width / 2, box.top + box.height / 2);
   }
   /** Zoom within the existing bounds and keep the pointer's PDF point fixed using scrollable margins. */
   private zoomAt(factor: number, x: number, y: number): void {

@@ -173,8 +173,13 @@ test('gesture zoom anchors the actual PDF point through quarter turns, app scale
           surface.zoomAt(0.8, x, y);
           assert.equal(surface.zoomButton.textContent, '100%');
           surface.zoomAt(0.5, x, y);
+          // Narrower than the view: centred sideways (no side margin), still anchored vertically.
           const smaller = point();
-          assert(Math.hypot(before[0]! - smaller[0]!, before[1]! - smaller[1]!) < 1e-8);
+          const screenVertical = rotation % 180 === 90 ? 0 : 1;
+          assert(Math.abs(before[screenVertical]! - smaller[screenVertical]!) < 1e-8);
+          assert.equal(stack.style.minWidth, '');
+          const page = div.getBoundingClientRect();
+          assert(Math.abs(page.left + page.width / 2 - (40 + 320 * hostScale)) < 1e-6);
           // Fit width can keep the viewport unchanged while removing the gesture's anchor margins.
           const fitScale = 608 / proxy.getViewport({ scale: 1, rotation }).width;
           surface.zoomAt(fitScale / surface.scale, x, y);
@@ -196,6 +201,20 @@ test('gesture zoom anchors the actual PDF point through quarter turns, app scale
           surface.scale = 'width';
           surface.layout();
           assert.equal(surface.zoomButton.textContent, 'Fit width');
+          // The + button zooms about the centre of the view: what was in the middle stays there.
+          const centre = () => {
+            const r = div.getBoundingClientRect();
+            const v = entry.native.viewport;
+            return v.convertToPdfPoint(
+              ((40 + 320 * hostScale - r.left) * v.width) / r.width,
+              ((80 + 200 * hostScale - r.top) * v.height) / r.height,
+            );
+          };
+          scroller.scrollTop = topPadding() + 100;
+          const middle = centre();
+          (surface as { zoom(delta: number): void }).zoom(0.5);
+          const zoomed = centre();
+          assert(Math.hypot(middle[0]! - zoomed[0]!, middle[1]! - zoomed[1]!) < 1e-6);
         } finally {
           f.dom.window.close();
         }
