@@ -141,3 +141,47 @@ test('shapes must stay inside the page and lines cannot be filled', async () => 
   session.updateShape(line.id, { fill: [1, 0, 0] });
   assert.equal(session.snapshot.shapes![0]!.fill, undefined, 'fill is ignored for lines');
 });
+
+test('rotated rectangles and ellipses keep their angle and draw turned in other readers', async () => {
+  const { session, bytes } = await open();
+  const rectangle = session.addShape({
+    page: 1,
+    kind: 'rectangle',
+    box: [100, 200, 220, 260],
+    color: [0.85, 0.15, 0.15],
+    fill: [1, 0.85, 0.1],
+    width: 2,
+  });
+  session.updateShape(rectangle.id, { rotation: 30 });
+  const ellipse = session.addShape({
+    page: 1,
+    kind: 'ellipse',
+    box: [240, 200, 360, 260],
+    color: [0.15, 0.4, 0.85],
+    width: 2,
+  });
+  session.updateShape(ellipse.id, { rotation: -405 });
+  assert.equal(session.snapshot.shapes![1]!.rotation, -45, 'angles wrap to (-180, 180]');
+  // Turning out of the page is refused.
+  assert.throws(() => session.updateShape(ellipse.id, { box: [300, 200, 400, 260] }), /inside/);
+  await session.save();
+  const saved = (await readTextPdf(bytes())).shapes!;
+  assert.deepEqual(
+    saved.map((shape) => [shape.box, shape.rotation]),
+    [
+      [[100, 200, 220, 260], 30],
+      [[240, 200, 360, 260], -45],
+    ],
+  );
+  // The annotation rectangle is the turned outline's bounds, so readers can draw it.
+  const document = await getDocument({ data: bytes().slice() }).promise;
+  const [square] = await (await document.getPage(1)).getAnnotations();
+  assert.equal(square!.subtype, 'Square');
+  const [l, b, r, t] = square!.rect as [number, number, number, number];
+  assert.ok(l < 100 && r > 220 && b < 200 && t > 260, 'rect covers the turned box');
+  await document.destroy();
+  await writeFile(new URL('../tmp/rotated.pdf', import.meta.url), bytes());
+  // Turning back to 0° stores a plain, unrotated shape again.
+  session.updateShape(rectangle.id, { rotation: 0 });
+  assert.equal(session.snapshot.shapes![0]!.rotation, undefined);
+});

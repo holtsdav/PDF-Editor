@@ -2510,7 +2510,7 @@ test('shapes are drawn by dragging, then selected, moved, resized, restyled and 
     );
     // Like Word: the new shape is selected, with handles, and the select tool is back.
     assert.equal(layer.dataset.tool, 'select');
-    assert.equal(f.doc.querySelectorAll('.pfs-shape-handle').length, 4);
+    assert.equal(f.doc.querySelectorAll('.pfs-shape-handle:not(.pfs-shape-rotate)').length, 4);
 
     // Drag the shape by 20/10 px.
     const hit = f.doc.querySelector('.pfs-shape-hit')!;
@@ -2589,6 +2589,52 @@ test('a dash pasted from Word (U+F02D) is replaced in place and the text box sav
     // An unknown special-font symbol still stops the save, with a clear explanation.
     f.session.setValue(field.name, 'Symbol ');
     await assert.rejects(f.session.save(), /special-font symbol \(U\+F0FC/);
+  } finally {
+    f.dispose();
+  }
+});
+
+test('a selected rectangle turns with its rotation handle, snapping with Shift', async () => {
+  const f = await fixture();
+  try {
+    const shape = f.session.addShape({
+      page: 1,
+      kind: 'rectangle',
+      box: [100, 640, 200, 700],
+      color: [0.85, 0.15, 0.15],
+      width: 2,
+    });
+    f.editor.refresh();
+    // Select it, then drag the round handle above the top edge to the right of the centre.
+    f.pointer(f.doc.querySelector('.pfs-shape-hit')!, 'pointerdown', 101, 130);
+    f.pointer(f.doc.body, 'pointerup', 101, 130);
+    const knob = f.doc.querySelector('.pfs-shape-rotate')!;
+    assert.ok(knob, 'rotation handle shown');
+    f.pointer(knob, 'pointerdown', 150, 76);
+    f.pointer(f.doc.body, 'pointermove', 250, 131);
+    assert.match(
+      f.doc.querySelector('.pfs-shape')!.getAttribute('transform') ?? '',
+      /rotate\(/,
+      'live preview while turning',
+    );
+    f.pointer(f.doc.body, 'pointerup', 250, 131);
+    // Pointer right of the centre on screen: turned a quarter clockwise, about -90° in PDF terms.
+    const turned = f.session.snapshot.shapes![0]!.rotation!;
+    assert.ok(Math.abs(turned + 90) < 1, String(turned));
+    // Shift snaps to 15° steps.
+    const again = f.doc.querySelector('.pfs-shape-rotate')!;
+    f.pointer(again, 'pointerdown', 0, 0);
+    f.pointer(f.doc.body, 'pointermove', 236, 175, true);
+    f.pointer(f.doc.body, 'pointerup', 236, 175, true);
+    assert.ok(Number.isInteger(f.session.snapshot.shapes![0]!.rotation! / 15), 'snapped to 15°');
+    // The box itself is unchanged by turning, undo restores the angle, and it saves.
+    assert.deepEqual(f.session.snapshot.shapes![0]!.box, [100, 640, 200, 700]);
+    f.session.undoStroke();
+    assert.ok(Math.abs(f.session.snapshot.shapes![0]!.rotation! + 90) < 1);
+    await f.session.save();
+    const saved = (await readTextPdf(f.bytes())).shapes!;
+    assert.equal(saved[0]!.id, shape.id);
+    assert.ok(Math.abs(saved[0]!.rotation! + 90) < 1);
   } finally {
     f.dispose();
   }

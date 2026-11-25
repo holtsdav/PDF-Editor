@@ -2,7 +2,7 @@ import type { NativePage } from '../compat/native-pdf';
 import { screenRectangle } from '../compat/native-pdf';
 import type { Rect } from '../pdf/text-engine';
 import type { TextSession } from '../pdf/text-session';
-import { arrowSize } from '../pdf/shape-engine';
+import { arrowSize, rotatedCorners, shapeRect } from '../pdf/shape-engine';
 import type { PdfShape, Point, ShapeKind } from '../pdf/shape-engine';
 import { cssColor } from '../pdf/text-format';
 import type { PdfColor } from '../pdf/text-format';
@@ -26,7 +26,7 @@ export interface ShapeOptions {
 }
 
 const NS = 'http://www.w3.org/2000/svg';
-type Handle = 'nw' | 'ne' | 'sw' | 'se' | 'start' | 'end';
+type Handle = 'nw' | 'ne' | 'sw' | 'se' | 'start' | 'end' | 'rotate';
 type Gesture =
   | { type: 'draw'; pointer: number; start: Point; end: Point; shift: boolean }
   | { type: 'move'; pointer: number; id: string; from: Point; to: Point }
@@ -204,7 +204,7 @@ export class ShapeLayer {
     if (gesture.type === 'move') {
       const [fx, fy] = this.pdf(gesture.from);
       const [tx, ty] = this.pdf(gesture.to);
-      const extent = shapeExtent(shape);
+      const extent = shape.box ? shapeRect(shape) : shapeExtent(shape);
       const dx = Math.max(bounds[0] - extent[0], Math.min(bounds[2] - extent[2], tx - fx));
       const dy = Math.max(bounds[1] - extent[1], Math.min(bounds[3] - extent[3], ty - fy));
       if (next.box) {
@@ -225,15 +225,58 @@ export class ShapeLayer {
     const to = clamp(this.pdf(gesture.to));
     if (next.box) {
       const [l, b, r, t] = next.box;
-      const fixed: Point =
-        gesture.handle === 'nw'
-          ? [r, b]
-          : gesture.handle === 'ne'
-            ? [l, b]
-            : gesture.handle === 'sw'
-              ? [r, t]
-              : [l, t];
-      next.box = boxFrom(fixed, to, gesture.shift);
+      const cx = (l + r) / 2;
+      const cy = (b + t) / 2;
+      if (gesture.handle === 'rotate') {
+        // The handle sits above the top edge: pointing straight up means no turn.
+        let angle = (Math.atan2(to[1] - cy, to[0] - cx) * 180) / Math.PI - 90;
+        if (gesture.shift) {
+          angle = Math.round(angle / 15) * 15;
+        }
+        next.rotation = Math.round(angle * 100) / 100;
+      } else {
+        // Resize in the shape's own (unrotated) frame, keeping the opposite corner fixed.
+        const angle = ((shape.rotation ?? 0) * Math.PI) / 180;
+        const cos = Math.cos(angle);
+        const sin = Math.sin(angle);
+        const local: Point = [
+          (to[0] - cx) * cos + (to[1] - cy) * sin,
+          -(to[0] - cx) * sin + (to[1] - cy) * cos,
+        ];
+        const hw = (r - l) / 2;
+        const hh = (t - b) / 2;
+        const fixed: Point =
+          gesture.handle === 'nw'
+            ? [hw, -hh]
+            : gesture.handle === 'ne'
+              ? [-hw, -hh]
+              : gesture.handle === 'sw'
+                ? [hw, hh]
+                : [-hw, hh];
+        const [x0, y0, x1, y1] = boxFrom(fixed, local, gesture.shift);
+        const mx = (x0 + x1) / 2;
+        const my = (y0 + y1) / 2;
+        const ncx = cx + mx * cos - my * sin;
+        const ncy = cy + mx * sin + my * cos;
+        const w = (x1 - x0) / 2;
+        const h = (y1 - y0) / 2;
+        next.box = [ncx - w, ncy - h, ncx + w, ncy + h];
+      }
+      if (!next.rotation) {
+        delete next.rotation;
+      }
+      // A turn or resize that would leave the page keeps the last valid geometry.
+      const rect = shapeRect(next);
+      if (
+        rect[0] < bounds[0] - 0.01 ||
+        rect[1] < bounds[1] - 0.01 ||
+        rect[2] > bounds[2] + 0.01 ||
+        rect[3] > bounds[3] + 0.01 ||
+        next.box[2] - next.box[0] < 1 ||
+        next.box[3] - next.box[1] < 1
+      ) {
+        return structuredClone(shape);
+      }
     } else if (gesture.handle === 'start') {
       next.start = gesture.shift ? snap(next.end!, to) : to;
     } else {
@@ -284,14 +327,16 @@ export class ShapeLayer {
     }
     const next = this.transformed(shape, gesture);
     if (
-      JSON.stringify([next.box, next.start, next.end]) ===
-      JSON.stringify([shape.box, shape.start, shape.end])
+      JSON.stringify([next.box, next.start, next.end, next.rotation ?? 0]) ===
+      JSON.stringify([shape.box, shape.start, shape.end, shape.rotation ?? 0])
     ) {
       return;
     }
     this.session.updateShape(
       shape.id,
-      next.box ? { box: next.box } : { start: next.start!, end: next.end! },
+      next.box
+        ? { box: next.box, rotation: next.rotation ?? 0 }
+        : { start: next.start!, end: next.end! },
     );
     this.options.changed();
   }
@@ -413,6 +458,10 @@ export class ShapeLayer {
             };
       group.append(this.element(geometry.tag, { ...geometry.attrs, ...paint }));
       group.append(this.element(geometry.tag, { ...geometry.attrs, ...hit }));
+      if (shape.rotation) {
+        // PDF turns counter-clockwise with y up; on screen (y down) that is a negative SVG angle.
+        group.setAttribute('transform', `rotate(${-shape.rotation} ${(l + r) / 2} ${(t + b) / 2})`);
+      }
       return group;
     }
     const [sx, sy] = this.view(shape.start!);
@@ -456,22 +505,44 @@ export class ShapeLayer {
       group.append(element);
     };
     if (shape.box) {
-      const [l, t, r, b] = screenRectangle(this.page.viewport, shape.box);
+      // Corners in PDF order (lower left, lower right, upper right, upper left), turned.
+      const corners = rotatedCorners(shape.box, shape.rotation).map((p) => this.view(p));
       group.append(
-        this.element('rect', {
+        this.element('polygon', {
           class: 'pfs-shape-outline',
-          x: l,
-          y: t,
-          width: r - l,
-          height: b - t,
+          points: corners.map(([x, y]) => `${x},${y}`).join(' '),
         }),
       );
-      // Map PDF corners to handles so resizing follows page rotation.
-      const [x0, y0, x1, y1] = shape.box;
-      handle('nw', this.view([x0, y1]));
-      handle('ne', this.view([x1, y1]));
-      handle('sw', this.view([x0, y0]));
-      handle('se', this.view([x1, y0]));
+      const [sw, se, ne, nw] = corners as [Point, Point, Point, Point];
+      handle('sw', sw);
+      handle('se', se);
+      handle('ne', ne);
+      handle('nw', nw);
+      // Rotation handle, a short stem above the middle of the (turned) top edge.
+      const top: Point = [(nw[0] + ne[0]) / 2, (nw[1] + ne[1]) / 2];
+      const centre: Point = [(sw[0] + ne[0]) / 2, (sw[1] + ne[1]) / 2];
+      const length = Math.hypot(top[0] - centre[0], top[1] - centre[1]) || 1;
+      const knob: Point = [
+        top[0] + ((top[0] - centre[0]) / length) * 24,
+        top[1] + ((top[1] - centre[1]) / length) * 24,
+      ];
+      group.append(
+        this.element('line', {
+          class: 'pfs-shape-outline',
+          x1: top[0],
+          y1: top[1],
+          x2: knob[0],
+          y2: knob[1],
+        }),
+      );
+      const rotate = this.element('circle', {
+        class: 'pfs-shape-handle pfs-shape-rotate',
+        cx: knob[0],
+        cy: knob[1],
+        r: 6,
+      });
+      rotate.dataset.handle = 'rotate';
+      group.append(rotate);
     } else {
       handle('start', this.view(shape.start!));
       handle('end', this.view(shape.end!));

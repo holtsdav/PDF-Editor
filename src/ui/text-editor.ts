@@ -26,6 +26,7 @@ import type { TextEdit } from '../pdf/list-format';
 import { ShapeLayer } from './shape-layer';
 import type { ShapeStyle } from './shape-layer';
 import type { ShapeKind } from '../pdf/shape-engine';
+import { shapeRect } from '../pdf/shape-engine';
 
 const SHAPE_KINDS: { kind: ShapeKind; label: string; icon: string }[] = [
   { kind: 'rectangle', label: 'Rectangle', icon: 'square' },
@@ -521,12 +522,14 @@ export class TextEditor extends Component {
           } else if (delta[event.key]) {
             const [dx, dy] = delta[event.key]!;
             const bounds = this.session.snapshot.pages[shape.page - 1]!;
-            const extent = shape.box ?? [
-              Math.min(shape.start![0], shape.end![0]),
-              Math.min(shape.start![1], shape.end![1]),
-              Math.max(shape.start![0], shape.end![0]),
-              Math.max(shape.start![1], shape.end![1]),
-            ];
+            const extent: Rect = shape.box
+              ? shapeRect(shape)
+              : [
+                  Math.min(shape.start![0], shape.end![0]),
+                  Math.min(shape.start![1], shape.end![1]),
+                  Math.max(shape.start![0], shape.end![0]),
+                  Math.max(shape.start![1], shape.end![1]),
+                ];
             const x = Math.max(bounds[0] - extent[0], Math.min(bounds[2] - extent[2], dx));
             const y = Math.max(bounds[1] - extent[1], Math.min(bounds[3] - extent[3], dy));
             this.session.updateShape(

@@ -432,7 +432,7 @@ export class TextSession {
   /** Move, resize or restyle a shape (one undo step each). */
   updateShape(
     id: string,
-    update: Partial<Pick<PdfShape, 'box' | 'start' | 'end' | 'color' | 'width'>> & {
+    update: Partial<Pick<PdfShape, 'box' | 'start' | 'end' | 'color' | 'width' | 'rotation'>> & {
       fill?: PdfColor | null;
     },
   ): void {
@@ -457,6 +457,15 @@ export class TextSession {
     if (update.width !== undefined) {
       next.width = update.width;
     }
+    if (update.rotation !== undefined && next.box) {
+      // Keep angles in (-180, 180]; an unrotated shape stores no angle.
+      const turn = ((((update.rotation + 180) % 360) + 360) % 360) - 180;
+      if (Math.abs(turn) < 0.01) {
+        delete next.rotation;
+      } else {
+        next.rotation = turn === -180 ? 180 : Math.round(turn * 100) / 100;
+      }
+    }
     if (update.fill === null) {
       delete next.fill;
     } else if (update.fill && (next.kind === 'rectangle' || next.kind === 'ellipse')) {
@@ -471,6 +480,9 @@ export class TextSession {
     Object.assign(shape, next);
     if (!next.fill) {
       delete shape.fill;
+    }
+    if (!next.rotation) {
+      delete shape.rotation;
     }
     (this.changes.shapes ??= new Map()).set(id, structuredClone(shape));
     this.changed();

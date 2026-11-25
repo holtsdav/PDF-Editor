@@ -1502,3 +1502,6 @@ button.pfs-choice.is-round {
   width: 18px;
   min-width: 18px;
 }
+.pfs-shapes[data-tool='select'] .pfs-shape-rotate {
+  cursor: grab;
+}

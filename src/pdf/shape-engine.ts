@@ -26,6 +26,29 @@ export interface PdfShape {
   width: number;
   opacity: number;
   modified: string;
+  /**
+   * Rectangles and ellipses: counter-clockwise turn in degrees around the box centre.
+   * Standard /Square and /Circle cannot rotate, so the box and angle are kept in
+   * PFSBox/PFSRotation and the appearance draws the turned shape inside /Rect.
+   */
+  rotation?: number;
+}
+
+/** Box corners after rotation, counter-clockwise from lower left. */
+export function rotatedCorners(box: Rect, rotation = 0): [number, number][] {
+  const cx = (box[0] + box[2]) / 2;
+  const cy = (box[1] + box[3]) / 2;
+  const angle = (rotation * Math.PI) / 180;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  return (
+    [
+      [box[0], box[1]],
+      [box[2], box[1]],
+      [box[2], box[3]],
+      [box[0], box[3]],
+    ] as [number, number][]
+  ).map(([x, y]) => [cx + (x - cx) * cos - (y - cy) * sin, cy + (x - cx) * sin + (y - cy) * cos]);
 }
 
 const SUBTYPES: Record<ShapeKind, string> = {
@@ -42,7 +65,16 @@ export function arrowSize(width: number): number {
 /** Annotation rectangle: the box, or the line's bounds plus room for its stroke and head. */
 export function shapeRect(shape: PdfShape): Rect {
   if (shape.kind === 'rectangle' || shape.kind === 'ellipse') {
-    return [...shape.box!] as Rect;
+    if (!shape.rotation) {
+      return [...shape.box!] as Rect;
+    }
+    const corners = rotatedCorners(shape.box!, shape.rotation);
+    return [
+      Math.min(...corners.map((p) => p[0])),
+      Math.min(...corners.map((p) => p[1])),
+      Math.max(...corners.map((p) => p[0])),
+      Math.max(...corners.map((p) => p[1])),
+    ];
   }
   const pad = shape.width + (shape.kind === 'arrow' ? arrowSize(shape.width) : 0) + 1;
   const [a, b] = [shape.start!, shape.end!];
@@ -72,8 +104,10 @@ export function validateShape(shape: PdfShape, bounds: Rect): void {
         !finite(shape.box) ||
         shape.box[2] - shape.box[0] < 1 ||
         shape.box[3] - shape.box[1] < 1 ||
-        !inside(shape.box[0], shape.box[1]) ||
-        !inside(shape.box[2], shape.box[3])
+        (shape.rotation !== undefined &&
+          (!Number.isFinite(shape.rotation) || Math.abs(shape.rotation) > 360)) ||
+        !inside(shapeRect(shape)[0], shapeRect(shape)[1]) ||
+        !inside(shapeRect(shape)[2], shapeRect(shape)[3])
       : !shape.start ||
         !shape.end ||
         !finite([...shape.start, ...shape.end]) ||
@@ -170,7 +204,13 @@ export function readShapes(pdf: PDFDocument): PdfShape[] {
         page: index + 1,
         kind,
         ...(kind === 'rectangle' || kind === 'ellipse'
-          ? { box: [rect[0]!, rect[1]!, rect[2]!, rect[3]!] as Rect }
+          ? (() => {
+              const stored = numbers(dict, 'PFSBox');
+              const turn = dict.lookup(PDFName.of('PFSRotation'));
+              return stored?.length === 4 && turn instanceof PDFNumber && turn.asNumber()
+                ? { box: stored as Rect, rotation: turn.asNumber() }
+                : { box: [rect[0]!, rect[1]!, rect[2]!, rect[3]!] as Rect };
+            })()
           : { start: [line![0]!, line![1]!] as Point, end: [line![2]!, line![3]!] as Point }),
         color: color as PdfColor,
         ...((kind === 'rectangle' || kind === 'ellipse') && fill?.length === 3
@@ -200,10 +240,26 @@ function appearance(shape: PdfShape): string {
   const w = shape.width;
   const ops = ['q', '/GS0 gs', `${decimal(w)} w 1 j 1 J`, `${rgb(shape.color)} RG`];
   if (shape.kind === 'rectangle' || shape.kind === 'ellipse') {
+    const box = shape.box!;
+    if (shape.rotation) {
+      // Draw the unrotated box in its own frame, turned about its centre.
+      const angle = (shape.rotation * Math.PI) / 180;
+      const cos = Math.cos(angle);
+      const sin = Math.sin(angle);
+      const hw = (box[2] - box[0]) / 2;
+      const hh = (box[3] - box[1]) / 2;
+      const cx = (box[0] + box[2]) / 2 - x0;
+      const cy = (box[1] + box[3]) / 2 - y0;
+      const e = cx - cos * hw + sin * hh;
+      const f = cy - sin * hw - cos * hh;
+      ops.push(`${[cos, sin, -sin, cos, e, f].map(decimal).join(' ')} cm`);
+    } else {
+      ops.push(`1 0 0 1 ${decimal(box[0] - x0)} ${decimal(box[1] - y0)} cm`);
+    }
     const left = w / 2;
     const bottom = w / 2;
-    const width = rect[2] - rect[0] - w;
-    const height = rect[3] - rect[1] - w;
+    const width = box[2] - box[0] - w;
+    const height = box[3] - box[1] - w;
     if (shape.fill) {
       ops.push(`${rgb(shape.fill)} rg`);
     }
@@ -329,6 +385,10 @@ export function writeShapes(
     if (shape.fill) {
       dict.set(PDFName.of('IC'), context.obj(shape.fill));
     }
+    if (shape.rotation && shape.box) {
+      dict.set(PDFName.of('PFSBox'), context.obj(shape.box));
+      dict.set(PDFName.of('PFSRotation'), PDFNumber.of(shape.rotation));
+    }
     if (shape.kind === 'line' || shape.kind === 'arrow') {
       dict.set(PDFName.of('L'), context.obj([...shape.start!, ...shape.end!]));
       dict.set(
@@ -375,6 +435,7 @@ export function verifyShapes(
       !near(output.end, shape.end) ||
       !near(output.color, shape.color) ||
       !near(output.fill, shape.fill) ||
+      Math.abs((output.rotation ?? 0) - (shape.rotation ?? 0)) > 0.001 ||
       Math.abs(output.width - shape.width) > 0.001
     ) {
       throw new Error('PDF shape verification failed.');
