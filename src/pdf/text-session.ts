@@ -20,6 +20,7 @@ import fontkit from '@pdf-lib/fontkit';
 import type { Font } from '@pdf-lib/fontkit';
 import type { FontFamily } from './text-format.ts';
 import { wrapText } from './wrap-text.ts';
+import type { ChoiceField } from './choice-engine.ts';
 
 const MAX_HISTORY_ENTRIES = 50;
 
@@ -35,6 +36,8 @@ export interface PdfStore {
 }
 type TextState = {
   fields: TextField[];
+  choiceFields?: ChoiceField[];
+  choices?: Map<string, string>;
   values: TextChanges['values'];
   added: TextChanges['added'];
   boxes: TextChanges['boxes'];
@@ -92,6 +95,7 @@ const emptyChanges = (): TextChanges => ({
   strokes: new Map(),
   deletedStrokes: new Set(),
   formats: new Map(),
+  choices: new Map(),
 });
 
 /** One session per vault PDF; every view shares its model and serialized writer. */
@@ -242,6 +246,33 @@ export class TextSession {
   }
   private get conflicted(): boolean {
     return this.status === 'conflict';
+  }
+
+  /** Set a checkbox/radio on-state or a dropdown/list export value ('' turns it off or clears it). */
+  setChoice(name: string, value: string): void {
+    this.assertAvailable();
+    if (this.status === 'conflict') {
+      throw new Error('Reload the PDF before editing after an external change.');
+    }
+    const field = this.snapshot.choices?.find((field) => field.name === name);
+    if (!field || field.readOnly) {
+      throw new Error('This form field is not editable.');
+    }
+    const valid =
+      value === '' ||
+      (field.kind === 'checkbox' || field.kind === 'radio'
+        ? field.widgets.some((widget) => widget.onValue === value)
+        : field.options.some((option) => option.value === value));
+    if (!valid) {
+      throw new Error(`"${value}" is not an option of this field.`);
+    }
+    if (field.value === value) {
+      return;
+    }
+    this.rememberText(`choice:${name}`, false);
+    field.value = value;
+    (this.changes.choices ??= new Map()).set(name, value);
+    this.changed();
   }
 
   setValue(name: string, value: string): void {
@@ -614,9 +645,11 @@ export class TextSession {
   }
 
   private textState(): TextState {
-    const { values, added, boxes, deleted, formats } = this.changes;
+    const { values, added, boxes, deleted, formats, choices } = this.changes;
     return structuredClone({
       fields: this.snapshot.fields,
+      choiceFields: this.snapshot.choices,
+      choices,
       values,
       added,
       boxes,
@@ -646,8 +679,11 @@ export class TextSession {
       this.restoreInk(entry.strokes);
       return;
     }
-    const { fields, ...changes } = structuredClone(entry.state);
+    const { fields, choiceFields, ...changes } = structuredClone(entry.state);
     this.snapshot.fields = fields;
+    if (choiceFields) {
+      this.snapshot.choices = choiceFields;
+    }
     Object.assign(this.changes, changes);
     if (entry.kind === 'objects') {
       this.restoreInk(entry.strokes);

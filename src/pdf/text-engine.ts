@@ -25,6 +25,14 @@ import type { FontFamily, PdfColor, PdfFonts, TextFormat } from './text-format.t
 import { referencedObjects, pruneReplacedObjects } from './object-references.ts';
 import { loadPdfDocument, pdfSaveOptions } from './pdf-load.ts';
 import { validRuledLayout } from './ruled-text.ts';
+import {
+  editableChoiceWidgets,
+  readChoices,
+  replacedChoiceAppearances,
+  verifyChoices,
+  writeChoices,
+} from './choice-engine.ts';
+import type { ChoiceField } from './choice-engine.ts';
 import type { RuledLayout } from './ruled-text';
 
 export const FIELD_PREFIX = 'pdf-form-studio-';
@@ -63,6 +71,8 @@ export interface TextSnapshot {
   pages: Rect[];
   fields: TextField[];
   strokes: InkStroke[];
+  /** Checkboxes, radio groups, dropdowns and list boxes. */
+  choices?: ChoiceField[];
 }
 export interface AddedField {
   name: string;
@@ -87,6 +97,8 @@ export interface TextChanges {
   strokes: Map<string, InkStroke>;
   deletedStrokes: Set<string>;
   formats: Map<string, TextFormat>;
+  /** Choice field name to on-state/export value, or '' for off/none. */
+  choices?: Map<string, string>;
 }
 
 async function loadWritable(bytes: Uint8Array): Promise<PDFDocument> {
@@ -496,6 +508,7 @@ export async function readTextPdf(bytes: Uint8Array): Promise<TextSnapshot> {
     }),
     fields,
     strokes: readInk(pdf),
+    choices: readChoices(pdf),
   };
 }
 
@@ -522,7 +535,8 @@ export async function writeTextPdf(
                 (widget) => widget.dict.lookupMaybe(PDFName.of('AP'), PDFDict)?.values() ?? [],
               )
           : [],
-      ),
+      )
+      .concat(replacedChoiceAppearances(pdf, changes.choices ?? new Map())),
   );
   const embedded = new Map<FontFamily, PDFFont>();
   const getFont = async (family: FontFamily): Promise<PDFFont> => {
@@ -784,6 +798,9 @@ export async function writeTextPdf(
         .forEach((widget, index) => widget.setDefaultAppearance(widgetDas[index]!));
     }
   }
+  if (changes.choices?.size) {
+    await writeChoices(pdf, changes.choices, () => getFont('sans'));
+  }
   writeInk(pdf, changes.strokes, changes.deletedStrokes);
   await pdf.flush();
   // Embedded fonts may only resolve after flush; expand the captured refs then.
@@ -795,6 +812,7 @@ export async function writeTextPdf(
     throw new Error('PDF page verification failed.');
   }
   verifyInk(verified, changes.strokes, changes.deletedStrokes);
+  verifyChoices(verified, changes.choices ?? new Map());
   for (const [name, value] of changes.values) {
     if (changes.deleted.has(name)) {
       continue;
@@ -907,6 +925,10 @@ export async function renderTextPdf(seed: Uint8Array): Promise<Uint8Array> {
           : [],
       ),
   );
+  // Editable choice controls are painted live by the editor layer as well.
+  for (const widget of editableChoiceWidgets(pdf)) {
+    textWidgets.add(widget);
+  }
   for (const page of pdf.getPages()) {
     const annotations = page.node.Annots();
     if (!annotations) {
