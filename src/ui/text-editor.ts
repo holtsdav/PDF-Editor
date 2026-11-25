@@ -25,6 +25,9 @@ import { continueList, indent, toggleList } from '../pdf/list-format';
 import type { TextEdit } from '../pdf/list-format';
 import { ShapeLayer, shapeExtent } from './shape-layer';
 import { hitsStroke } from '../pdf/ink-geometry';
+import { ImageLayer } from './image-layer';
+import { imageMime, imageSize, storedImage } from '../pdf/image-engine';
+import type { PdfImage, QuarterTurn } from '../pdf/image-engine';
 import type { ShapeStyle } from './shape-layer';
 import type { PdfShape, ShapeKind } from '../pdf/shape-engine';
 import { shapeRect } from '../pdf/shape-engine';
@@ -73,8 +76,11 @@ interface ObjectCopy {
 let copiedObjects: ObjectCopy | undefined;
 /** A shape copied with the context menu or Ctrl+C; cleared when objects are copied. */
 let copiedShape: PdfShape | undefined;
+/** The last picture copied here: a matching clipboard picture keeps its size and turn. */
+let copiedImage: PdfImage | undefined;
 type ContextTarget =
   | { kind: 'shape'; shape: PdfShape }
+  | { kind: 'image'; image: PdfImage }
   | { kind: 'mark'; mark: PdfMark }
   | { kind: 'objects'; objects: PdfObject[] }
   | { kind: 'page' };
@@ -114,6 +120,7 @@ interface PageLayer {
   /** Comment badges of highlights (above the page, clickable). */
   badges?: Map<string, HTMLElement>;
   shapes?: ShapeLayer;
+  images?: ImageLayer;
   ink: InkLayer;
   cancelPlacement?: () => void;
   placing?: () => boolean;
@@ -206,6 +213,12 @@ export class TextEditor extends Component {
     width: 2,
   };
   private selectedShape?: string;
+  private selectedImage?: string;
+  private imageUrls = new Map<string, string>();
+  /** Page and PDF point under the pointer, for placing pasted pictures. */
+  private hover?: { div: HTMLElement; at: Point };
+  private pasteSeen = 0;
+  private objectPasteAt = 0;
   private shapeMenu?: HTMLElement;
   private closeShapeMenuListeners?: () => void;
   private listGroup!: HTMLElement;
@@ -326,6 +339,9 @@ export class TextEditor extends Component {
         );
         options.classList.add('pfs-shape-options-button');
         this.register(() => this.closeShapeMenu());
+        button(this.toolbar, 'Insert picture (or paste one with Ctrl+V)', 'image-plus', () =>
+          this.chooseImageFile(),
+        );
       }
     }
     // Highlight the PDF text selected on the page, with a colour menu.
@@ -479,20 +495,23 @@ export class TextEditor extends Component {
       'pointerdown',
       (event) => {
         const target = event.target;
-        if (
-          this.selectedShape &&
-          !(
-            target instanceof doc.defaultView!.Element &&
-            (target.closest('.pfs-shape-hit, .pfs-shape-handle, .pfs-shape-menu') ||
-              this.toolbar.contains(target))
-          )
-        ) {
+        const inside = (selector: string) =>
+          target instanceof doc.defaultView!.Element &&
+          (!!target.closest(selector) || this.toolbar.contains(target));
+        if (this.selectedShape && !inside('.pfs-shape-hit, .pfs-shape-handle, .pfs-shape-menu')) {
           this.selectedShape = undefined;
+          this.refresh();
+        }
+        if (this.selectedImage && !inside('.pfs-image')) {
+          this.selectedImage = undefined;
           this.refresh();
         }
       },
       true,
     );
+    this.registerDomEvent(doc, 'keydown', (event) => this.imageKey(event), true);
+    // Pictures from the system clipboard (screenshots, copied images).
+    this.registerDomEvent(doc, 'paste', (event) => this.pasteEvent(event), true);
     this.registerDomEvent(
       doc,
       'keydown',
@@ -508,6 +527,7 @@ export class TextEditor extends Component {
           !event.altKey &&
           !event.shiftKey &&
           ['c', 'x', 'v', 'd'].includes(clip) &&
+          (clip !== 'v' || !!copiedShape || !!copiedObjects) &&
           !(
             target instanceof doc.defaultView!.Element &&
             target.closest('input, textarea, select, [contenteditable="true"]')
@@ -526,6 +546,7 @@ export class TextEditor extends Component {
             } else if (clip === 'd') {
               this.duplicateShape(id);
             } else {
+              this.objectPasteAt = Date.now();
               const shape = this.session.snapshot.shapes?.find((item) => item.id === id);
               this.pasteCopied(shape?.page ?? 1);
             }
@@ -1395,6 +1416,9 @@ export class TextEditor extends Component {
     if (key === 'v' && !copiedObjects) {
       return false;
     }
+    if (key === 'v') {
+      this.objectPasteAt = Date.now();
+    }
     const view = this.native.element.ownerDocument.defaultView!;
     const answer =
       key === 'v' &&
@@ -1754,6 +1778,8 @@ export class TextEditor extends Component {
     this.clearBrowserSelection();
     this.selected = undefined;
     this.selectedStroke = undefined;
+    this.selectedShape = undefined;
+    this.selectedImage = undefined;
     if (objects.length > 1) {
       this.selection?.selectObjects(objects);
     } else {
@@ -2475,6 +2501,7 @@ export class TextEditor extends Component {
         }
         entry.cancelPlacement?.();
         entry.shapes?.dispose();
+        entry.images?.dispose();
         this.removeChild(entry.ink);
         for (const control of entry.controls.values()) {
           control.dispose?.();
@@ -2545,6 +2572,7 @@ export class TextEditor extends Component {
         this.bindPlacement(entry);
         this.bindMarks(page.div, layer);
         entry.shapes = this.shapeLayer(page, layer);
+        entry.images = this.imageLayer(page, layer);
       }
       entry.page = page;
       entry.layer.dataset.tool = this.tool;
@@ -2617,6 +2645,7 @@ export class TextEditor extends Component {
       this.refreshChoices(entry);
       this.refreshMarks(entry);
       (entry.shapes ??= this.shapeLayer(entry.page, entry.layer)).update(entry.page, this.session);
+      (entry.images ??= this.imageLayer(entry.page, entry.layer)).update(entry.page, this.session);
       // Explicit reload/recovery can replace pages. Restore focus only when
       // the user has not deliberately moved it elsewhere.
       const active = page.div.ownerDocument.activeElement;
@@ -3147,6 +3176,17 @@ export class TextEditor extends Component {
 
   /** Right-click menu for shapes, highlights, notes, text boxes, drawings and the page. */
   private bindContextMenu(div: HTMLElement): void {
+    this.registerDomEvent(div, 'pointermove', (event) => {
+      const entry = this.layers.get(div);
+      if (entry) {
+        this.hover = { div, at: this.pdfPoint(entry, event.clientX, event.clientY) };
+      }
+    });
+    this.registerDomEvent(div, 'pointerleave', () => {
+      if (this.hover?.div === div) {
+        this.hover = undefined;
+      }
+    });
     this.registerDomEvent(div, 'contextmenu', (event) => {
       const entry = this.layers.get(div);
       const target = event.target as Element;
@@ -3185,6 +3225,11 @@ export class TextEditor extends Component {
     const shape = shapeId && snapshot.shapes?.find((item) => item.id === shapeId);
     if (shape) {
       return { kind: 'shape', shape };
+    }
+    const imageId = target.closest<HTMLElement>('[data-image-id]')?.dataset.imageId;
+    const image = imageId && snapshot.images?.find((item) => item.id === imageId);
+    if (image) {
+      return { kind: 'image', image };
     }
     const markId = target.closest<HTMLElement>('[data-mark-id]')?.dataset.markId;
     const note = markId && snapshot.marks?.find((item) => item.id === markId);
@@ -3295,6 +3340,28 @@ export class TextEditor extends Component {
       add(locked ? 'Unlock' : 'Lock', locked ? 'unlock' : 'lock', () =>
         session.updateShape(shape.id, { locked: !locked }),
       );
+    } else if (target.kind === 'image') {
+      const { image } = target;
+      const locked = !!image.locked;
+      this.selectImage(image.id);
+      add('Cut', 'scissors', () => this.cutImage(image.id), { disabled: locked });
+      add('Copy', 'copy', () => this.copyImage(image.id));
+      add('Paste picture', 'clipboard-paste', () => this.pasteClipboardImage(), {
+        disabled: !this.clipboardReadable(),
+      });
+      add('Duplicate', 'copy-plus', () => this.duplicateImage(image.id));
+      add('Delete', 'trash-2', () => this.deleteImageSelection(image.id), { disabled: locked });
+      menu.addSeparator();
+      add('Rotate 90° right', 'rotate-cw', () => this.turnImage(image.id, -90), {
+        disabled: locked,
+      });
+      add('Rotate 90° left', 'rotate-ccw', () => this.turnImage(image.id, 90), {
+        disabled: locked,
+      });
+      menu.addSeparator();
+      add(locked ? 'Unlock' : 'Lock', locked ? 'unlock' : 'lock', () =>
+        session.updateImage(image.id, { locked: !locked }),
+      );
     } else if (target.kind === 'mark') {
       const { mark } = target;
       add(mark.comment ? 'Edit comment…' : 'Add comment…', 'message-square', () =>
@@ -3326,6 +3393,15 @@ export class TextEditor extends Component {
       add('Select all on page', 'box-select', () => this.selectPage(entry.page.number));
     } else {
       add('Paste here', 'clipboard-paste', paste, { disabled: !canPaste });
+      add(
+        'Paste picture here',
+        'image',
+        () => this.pasteClipboardImage({ page: entry.page.number, at }),
+        { disabled: !this.clipboardReadable() },
+      );
+      add('Insert picture…', 'image-plus', () =>
+        this.chooseImageFile({ page: entry.page.number, at }),
+      );
       menu.addSeparator();
       add('Add text box here', 'type', () => this.addTextBoxAt(entry, at));
       add('Add note here', 'sticky-note', () => {
@@ -3540,6 +3616,406 @@ export class TextEditor extends Component {
     entry.controls.get(`${field.name}:0`)?.input.focus({ preventScroll: true });
   }
 
+  private imageLayer(page: NativePage, layer: HTMLElement): ImageLayer {
+    return new ImageLayer(page, layer, this.session!, {
+      tool: () => this.tool,
+      selected: () => this.selectedImage,
+      select: (id) => this.selectImage(id),
+      url: (source) => this.imageUrl(source),
+      changed: () => this.scheduleSave(),
+      error: (error) => this.showError(error),
+    });
+  }
+
+  private selectImage(id: string | undefined): void {
+    this.selectedImage = id;
+    if (id) {
+      this.selectedShape = undefined;
+      this.selected = undefined;
+      this.selectedStroke = undefined;
+      this.selection?.clear();
+    }
+    this.refresh();
+  }
+
+  private imageUrl(source: string): string {
+    let url = this.imageUrls.get(source);
+    const stored = storedImage(source);
+    if (!url && stored) {
+      const view = this.native.element.ownerDocument.defaultView!;
+      try {
+        url = view.URL.createObjectURL(
+          new view.Blob([stored.bytes as Uint8Array<ArrayBuffer>], { type: stored.mime }),
+        );
+        this.imageUrls.set(source, url);
+      } catch {
+        return '';
+      }
+    }
+    return url ?? '';
+  }
+
+  private clipboardReadable(): boolean {
+    return (
+      typeof this.native.element.ownerDocument.defaultView?.navigator.clipboard?.read === 'function'
+    );
+  }
+
+  /** Is this PDF where a paste should go (focused, or under the pointer without a note caret)? */
+  private ownsPaste(target: EventTarget | null): boolean {
+    const doc = this.native.element.ownerDocument;
+    const view = doc.defaultView!;
+    if (!this.loaded || !this.session || !this.session.canEditObjects) {
+      return false;
+    }
+    if (
+      target instanceof view.Element &&
+      target.closest('input, textarea, select, [contenteditable="true"]') &&
+      !(target instanceof view.HTMLInputElement && target.readOnly)
+    ) {
+      return false;
+    }
+    if (target instanceof view.Node && this.native.element.contains(target)) {
+      return true;
+    }
+    return !!this.hover && (doc.activeElement === doc.body || !doc.activeElement);
+  }
+
+  private pasteEvent(event: ClipboardEvent): void {
+    this.pasteSeen = Date.now();
+    if (!this.ownsPaste(event.target)) {
+      return;
+    }
+    const file = [...(event.clipboardData?.files ?? [])].find((item) =>
+      item.type.startsWith('image/'),
+    );
+    if (!file) {
+      return;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    void this.placeImageBlob(file);
+  }
+
+  /** Keys for a selected picture, and Ctrl+V when the host swallows the paste event. */
+  private imageKey(event: KeyboardEvent): void {
+    const doc = this.native.element.ownerDocument;
+    const view = doc.defaultView!;
+    const mod = event.ctrlKey || event.metaKey;
+    const key = event.key.toLowerCase();
+    if (mod && key === 'v' && !event.altKey && !event.shiftKey && this.ownsPaste(event.target)) {
+      const pressed = Date.now();
+      view.setTimeout(() => {
+        if (
+          this.pasteSeen >= pressed ||
+          this.objectPasteAt >= pressed ||
+          !this.clipboardReadable()
+        ) {
+          return;
+        }
+        void this.pasteClipboardImage(undefined, true);
+      }, 120);
+    }
+    const id = this.selectedImage;
+    const image = id && this.session?.snapshot.images?.find((item) => item.id === id);
+    if (
+      !image ||
+      event.altKey ||
+      (event.target instanceof view.Element &&
+        event.target.closest('input, textarea, select, [contenteditable="true"]'))
+    ) {
+      return;
+    }
+    const step = event.shiftKey ? 10 : 1;
+    const delta: Record<string, Point> = {
+      ArrowLeft: [-step, 0],
+      ArrowRight: [step, 0],
+      ArrowUp: [0, step],
+      ArrowDown: [0, -step],
+    };
+    const claim = () => {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+    try {
+      if (mod && ['c', 'x', 'd'].includes(key) && !event.shiftKey) {
+        claim();
+        if (!event.repeat) {
+          if (key === 'c') {
+            this.copyImage(image.id);
+          } else if (key === 'x') {
+            this.cutImage(image.id);
+          } else {
+            this.duplicateImage(image.id);
+          }
+        }
+      } else if (mod) {
+        return;
+      } else if (event.key === 'Delete' || event.key === 'Backspace') {
+        claim();
+        this.deleteImageSelection(image.id);
+      } else if (event.key === 'Escape') {
+        claim();
+        this.selectedImage = undefined;
+      } else if (delta[event.key]) {
+        claim();
+        const [dx, dy] = delta[event.key]!;
+        const bounds = this.session!.snapshot.pages[image.page - 1]!;
+        const box = image.box;
+        const x = Math.max(bounds[0] - box[0], Math.min(bounds[2] - box[2], dx));
+        const y = Math.max(bounds[1] - box[1], Math.min(bounds[3] - box[3], dy));
+        this.session!.updateImage(image.id, {
+          box: [box[0] + x, box[1] + y, box[2] + x, box[3] + y],
+        });
+      } else {
+        return;
+      }
+      this.scheduleSave();
+    } catch (error) {
+      this.showError(error);
+    }
+    this.refresh();
+  }
+
+  private copyImage(id: string): void {
+    const image = this.session?.snapshot.images?.find((item) => item.id === id);
+    const stored = image && storedImage(image.source);
+    if (!image || !stored) {
+      return;
+    }
+    copiedImage = structuredClone(image);
+    copiedObjects = undefined;
+    copiedShape = undefined;
+    // Other apps receive a PNG; pasting it back here keeps size and turn.
+    const view = this.native.element.ownerDocument.defaultView!;
+    const clipboard = view.navigator.clipboard;
+    if (clipboard?.write && typeof view.ClipboardItem === 'function') {
+      void this.pngBlob(
+        new view.Blob([stored.bytes as Uint8Array<ArrayBuffer>], { type: stored.mime }),
+      )
+        .then((png) => clipboard.write([new view.ClipboardItem({ 'image/png': png })]))
+        .catch(() => undefined);
+    }
+  }
+
+  private cutImage(id: string): void {
+    this.copyImage(id);
+    this.deleteImageSelection(id);
+  }
+
+  private deleteImageSelection(id: string): void {
+    this.session!.deleteImage(id);
+    if (this.selectedImage === id) {
+      this.selectedImage = undefined;
+    }
+  }
+
+  private duplicateImage(id: string): void {
+    const session = this.session!;
+    const image = session.snapshot.images?.find((item) => item.id === id);
+    if (!image) {
+      return;
+    }
+    const bounds = session.snapshot.pages[image.page - 1]!;
+    const [x0, y0, x1, y1] = image.box;
+    const dx = Math.max(bounds[0] - x0, Math.min(bounds[2] - x1, 12));
+    const dy = Math.max(bounds[1] - y0, Math.min(bounds[3] - y1, -12));
+    const created = session.addImage({
+      page: image.page,
+      box: [x0 + dx, y0 + dy, x1 + dx, y1 + dy],
+      source: image.source,
+      ...(image.rotation ? { rotation: image.rotation } : {}),
+    });
+    this.selectImage(created.id);
+  }
+
+  /** Quarter turn about the centre; the box swaps width and height. */
+  private turnImage(id: string, degrees: 90 | -90): void {
+    const session = this.session!;
+    const image = session.snapshot.images?.find((item) => item.id === id);
+    if (!image) {
+      return;
+    }
+    const [x0, y0, x1, y1] = image.box;
+    const cx = (x0 + x1) / 2;
+    const cy = (y0 + y1) / 2;
+    const hw = (y1 - y0) / 2;
+    const hh = (x1 - x0) / 2;
+    session.updateImage(id, {
+      box: [cx - hw, cy - hh, cx + hw, cy + hh],
+      rotation: (((((image.rotation ?? 0) + degrees) % 360) + 360) % 360) as QuarterTurn,
+    });
+  }
+
+  /** PNG or JPEG bytes for a picture of any format the browser can draw. */
+  private async pictureBytes(blob: Blob): Promise<Uint8Array> {
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    return imageMime(bytes)
+      ? bytes
+      : new Uint8Array(await (await this.pngBlob(blob)).arrayBuffer());
+  }
+
+  private async pngBlob(blob: Blob): Promise<Blob> {
+    if (blob.type === 'image/png') {
+      return blob;
+    }
+    const view = this.native.element.ownerDocument.defaultView!;
+    const bitmap = await view.createImageBitmap(blob);
+    const canvas = this.native.element.ownerDocument.createElement('canvas');
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    canvas.getContext('2d')!.drawImage(bitmap, 0, 0);
+    bitmap.close();
+    return new Promise((resolve, reject) =>
+      canvas.toBlob(
+        (png) => (png ? resolve(png) : reject(new Error('This picture cannot be read.'))),
+        'image/png',
+      ),
+    );
+  }
+
+  private async pasteClipboardImage(
+    target?: { page: number; at: Point },
+    quiet = false,
+  ): Promise<void> {
+    const clipboard = this.native.element.ownerDocument.defaultView?.navigator.clipboard;
+    try {
+      for (const item of (await clipboard?.read()) ?? []) {
+        const type = item.types.find((entry) => entry.startsWith('image/'));
+        if (type) {
+          await this.placeImageBlob(await item.getType(type), target);
+          return;
+        }
+      }
+      if (!quiet) {
+        this.showError(new Error('There is no picture in the clipboard.'));
+      }
+    } catch (error) {
+      if (!quiet) {
+        this.showError(error);
+      }
+    }
+  }
+
+  private chooseImageFile(target?: { page: number; at: Point }): void {
+    const input = this.native.element.ownerDocument.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.addEventListener('change', () => {
+      const file = input.files?.[0];
+      if (file) {
+        void this.placeImageBlob(file, target);
+      }
+    });
+    input.click();
+  }
+
+  private async placeImageBlob(blob: Blob, target?: { page: number; at: Point }): Promise<void> {
+    try {
+      this.placeImage(await this.pictureBytes(blob), target);
+    } catch (error) {
+      this.showError(error);
+    }
+  }
+
+  /**
+   * Add a picture centred on the clicked point, the pointer, or the visible part of
+   * the page in view. A picture copied here comes back at its size and turn.
+   */
+  placeImage(bytes: Uint8Array, target?: { page: number; at: Point }): PdfImage | undefined {
+    const session = this.session;
+    if (!session || !this.loaded) {
+      return undefined;
+    }
+    const hovered = this.hover && this.layers.get(this.hover.div);
+    const entry =
+      (target && [...this.layers.values()].find((item) => item.page.number === target.page)) ??
+      hovered ??
+      this.visiblePage();
+    if (!entry) {
+      return undefined;
+    }
+    const page = entry.page.number;
+    const bounds = session.snapshot.pages[page - 1]!;
+    const copy =
+      copiedImage && storedImage(copiedImage.source)?.bytes.length === bytes.length
+        ? copiedImage
+        : undefined;
+    const same =
+      copy && storedImage(copy.source)!.bytes.every((value, index) => value === bytes[index]);
+    let width: number;
+    let height: number;
+    if (same) {
+      width = copy.box[2] - copy.box[0];
+      height = copy.box[3] - copy.box[1];
+    } else {
+      const [w, h] = imageSize(bytes) ?? [200, 150];
+      // Screen pixels to points (96 → 72 dpi), at most 60 % of the page.
+      const scale = Math.min(
+        0.75,
+        ((bounds[2] - bounds[0]) * 0.6) / w,
+        ((bounds[3] - bounds[1]) * 0.6) / h,
+      );
+      width = Math.max(4, w * scale);
+      height = Math.max(4, h * scale);
+    }
+    const centre: Point =
+      target?.at ??
+      (hovered ? this.hover!.at : undefined) ??
+      (same && copy.page === page
+        ? [(copy.box[0] + copy.box[2]) / 2 + 12, (copy.box[1] + copy.box[3]) / 2 - 12]
+        : this.visibleCentre(entry));
+    const left = Math.max(bounds[0], Math.min(bounds[2] - width, centre[0] - width / 2));
+    const bottom = Math.max(bounds[1], Math.min(bounds[3] - height, centre[1] - height / 2));
+    const image = session.addImage({
+      page,
+      box: [
+        left,
+        bottom,
+        left + Math.min(width, bounds[2] - bounds[0]),
+        bottom + Math.min(height, bounds[3] - bounds[1]),
+      ],
+      bytes,
+      ...(same && copy.rotation ? { rotation: copy.rotation } : {}),
+    });
+    this.setTool('select');
+    this.selectImage(image.id);
+    this.scheduleSave();
+    return image;
+  }
+
+  /** The page with the largest visible area. */
+  private visiblePage(): PageLayer | undefined {
+    const view = this.native.element.getBoundingClientRect();
+    let best: PageLayer | undefined;
+    let area = -1;
+    for (const entry of this.layers.values()) {
+      const box = entry.layer.getBoundingClientRect();
+      const visible =
+        Math.max(0, Math.min(box.right, view.right) - Math.max(box.left, view.left)) *
+        Math.max(0, Math.min(box.bottom, view.bottom) - Math.max(box.top, view.top));
+      if (visible > area || (visible === area && best && entry.page.number < best.page.number)) {
+        best = entry;
+        area = visible;
+      }
+    }
+    return best;
+  }
+
+  private visibleCentre(entry: PageLayer): Point {
+    const view = this.native.element.getBoundingClientRect();
+    const box = entry.layer.getBoundingClientRect();
+    const left = Math.max(box.left, view.left);
+    const right = Math.min(box.right, view.right);
+    const top = Math.max(box.top, view.top);
+    const bottom = Math.min(box.bottom, view.bottom);
+    if (right <= left || bottom <= top) {
+      const bounds = this.session!.snapshot.pages[entry.page.number - 1]!;
+      return [(bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2];
+    }
+    return this.pdfPoint(entry, (left + right) / 2, (top + bottom) / 2);
+  }
+
   private shapeLayer(page: NativePage, layer: HTMLElement): ShapeLayer {
     return new ShapeLayer(page, layer, this.session!, {
       tool: () => this.tool,
@@ -3547,6 +4023,7 @@ export class TextEditor extends Component {
       selected: () => this.selectedShape,
       select: (id) => {
         this.selectedShape = id;
+        this.selectedImage = undefined;
         this.selected = undefined;
         this.selectedStroke = undefined;
         this.refresh();
@@ -4911,8 +5388,14 @@ export class TextEditor extends Component {
         .then(() => this.session?.saveWhenIdle())
         .catch(() => {});
     }
+    for (const url of this.imageUrls.values()) {
+      this.native.element.ownerDocument.defaultView?.URL.revokeObjectURL(url);
+    }
+    this.imageUrls.clear();
     for (const entry of this.layers.values()) {
       entry.cancelPlacement?.();
+      entry.shapes?.dispose();
+      entry.images?.dispose();
       this.removeChild(entry.ink);
       for (const control of entry.controls.values()) {
         control.dispose?.();

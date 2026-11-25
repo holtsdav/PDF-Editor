@@ -41,6 +41,8 @@ import {
 import type { MarkKind, PdfMark } from './mark-engine.ts';
 import { SHAPE_PREFIX, validateShape } from './shape-engine.ts';
 import type { PdfShape, Point as ShapePoint, ShapeKind } from './shape-engine.ts';
+import { IMAGE_PREFIX, storeImage, validateImage } from './image-engine.ts';
+import type { PdfImage, QuarterTurn } from './image-engine.ts';
 
 const MAX_HISTORY_ENTRIES = 50;
 
@@ -64,6 +66,9 @@ type TextState = {
   shapeList?: PdfShape[];
   shapes?: Map<string, PdfShape>;
   deletedShapes?: Set<string>;
+  imageList?: PdfImage[];
+  images?: Map<string, PdfImage>;
+  deletedImages?: Set<string>;
   values: TextChanges['values'];
   added: TextChanges['added'];
   boxes: TextChanges['boxes'];
@@ -126,6 +131,8 @@ const emptyChanges = (): TextChanges => ({
   deletedMarks: new Set(),
   shapes: new Map(),
   deletedShapes: new Set(),
+  images: new Map(),
+  deletedImages: new Set(),
 });
 
 /** One session per vault PDF; every view shares its model and serialized writer. */
@@ -519,6 +526,91 @@ export class TextSession {
     this.snapshot.shapes = (this.snapshot.shapes ?? []).filter((item) => item.id !== id);
     this.changes.shapes?.delete(id);
     (this.changes.deletedShapes ??= new Set()).add(id);
+    this.changed();
+  }
+
+  /** Place a PNG or JPEG picture (one undo step). */
+  addImage(input: {
+    page: number;
+    box: Rect;
+    bytes?: Uint8Array;
+    source?: string;
+    rotation?: QuarterTurn;
+  }): PdfImage {
+    this.assertEditable();
+    const bounds = this.snapshot.pages[input.page - 1];
+    if (!bounds) {
+      throw new Error('The page no longer exists.');
+    }
+    const image: PdfImage = {
+      id: `${IMAGE_PREFIX}${crypto.randomUUID()}`,
+      page: input.page,
+      box: [...input.box] as Rect,
+      ...(input.rotation ? { rotation: input.rotation } : {}),
+      source: input.bytes ? storeImage(input.bytes) : input.source!,
+      modified: pdfDate(),
+    };
+    validateImage(image, bounds);
+    this.rememberText(`image:${image.id}`, false);
+    (this.snapshot.images ??= []).push(image);
+    (this.changes.images ??= new Map()).set(image.id, structuredClone(image));
+    this.changed();
+    return image;
+  }
+
+  /** Move, resize, turn or lock a picture (one undo step each). */
+  updateImage(id: string, update: { box?: Rect; rotation?: QuarterTurn; locked?: boolean }): void {
+    this.assertEditable();
+    const image = this.snapshot.images?.find((item) => item.id === id);
+    if (!image) {
+      throw new Error('This picture no longer exists.');
+    }
+    if (image.locked && update.locked !== false && (update.box || update.rotation !== undefined)) {
+      throw new Error('This picture is locked. Unlock it to move, resize or turn it.');
+    }
+    const next: PdfImage = structuredClone(image);
+    if (update.box) {
+      next.box = [...update.box] as Rect;
+    }
+    if (update.rotation !== undefined) {
+      next.rotation = (((update.rotation % 360) + 360) % 360) as QuarterTurn;
+    }
+    if (update.locked !== undefined) {
+      next.locked = update.locked || undefined;
+    }
+    if (!next.rotation) {
+      delete next.rotation;
+    }
+    if (!next.locked) {
+      delete next.locked;
+    }
+    if (JSON.stringify({ ...next, modified: '' }) === JSON.stringify({ ...image, modified: '' })) {
+      return;
+    }
+    next.modified = pdfDate();
+    validateImage(next, this.snapshot.pages[image.page - 1]!);
+    this.rememberText(`image:${id}`, false);
+    for (const key of ['rotation', 'locked'] as const) {
+      delete image[key];
+    }
+    Object.assign(image, next);
+    (this.changes.images ??= new Map()).set(id, structuredClone(image));
+    this.changed();
+  }
+
+  deleteImage(id: string): void {
+    this.assertEditable();
+    const image = this.snapshot.images?.find((item) => item.id === id);
+    if (!image) {
+      return;
+    }
+    if (image.locked) {
+      throw new Error('This picture is locked. Unlock it before deleting it.');
+    }
+    this.rememberText(`image:${id}`, false);
+    this.snapshot.images = (this.snapshot.images ?? []).filter((item) => item.id !== id);
+    this.changes.images?.delete(id);
+    (this.changes.deletedImages ??= new Set()).add(id);
     this.changed();
   }
 
@@ -962,6 +1054,8 @@ export class TextSession {
       deletedMarks,
       shapes,
       deletedShapes,
+      images,
+      deletedImages,
     } = this.changes;
     return structuredClone({
       fields: this.snapshot.fields,
@@ -973,6 +1067,9 @@ export class TextSession {
       shapeList: this.snapshot.shapes,
       shapes,
       deletedShapes,
+      imageList: this.snapshot.images,
+      images,
+      deletedImages,
       values,
       added,
       boxes,
@@ -1002,7 +1099,9 @@ export class TextSession {
       this.restoreInk(entry.strokes);
       return;
     }
-    const { fields, choiceFields, markList, shapeList, ...changes } = structuredClone(entry.state);
+    const { fields, choiceFields, markList, shapeList, imageList, ...changes } = structuredClone(
+      entry.state,
+    );
     this.snapshot.fields = fields;
     if (choiceFields) {
       this.snapshot.choices = choiceFields;
@@ -1012,6 +1111,9 @@ export class TextSession {
     }
     if (shapeList) {
       this.snapshot.shapes = shapeList;
+    }
+    if (imageList) {
+      this.snapshot.images = imageList;
     }
     Object.assign(this.changes, changes);
     if (entry.kind === 'objects') {

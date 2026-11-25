@@ -14,6 +14,7 @@ import type { VaultSessions } from '../src/pdf/vault-sessions.ts';
 import type { App } from 'obsidian';
 import { authoredForms, prefixBlank } from './fixtures/authored-forms.ts';
 import { orphanForms } from './fixtures/orphan-forms.ts';
+import { png } from './fixtures/pictures.ts';
 import { getDocument, OPS } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { bindSurfaceInput } from '../src/ui/surface-input.ts';
 
@@ -2811,6 +2812,60 @@ test('the right-click menu copies a text box to the clicked spot and Ctrl+D dupl
     const shapes = f.session.snapshot.shapes!;
     assert.equal(shapes.length, 2);
     assert.deepEqual(shapes[1]!.box, [112, 88, 172, 128]);
+  } finally {
+    f.dispose();
+  }
+});
+
+test('pasted pictures are placed, moved, resized, turned, locked and saved', async () => {
+  const f = await fixture();
+  try {
+    const layer = f.doc.querySelector<HTMLElement>('#page .pdf-form-studio-layer')!;
+    // A 200 × 100 px screenshot pasted onto the page becomes a 150 × 75 pt picture.
+    const paste = new f.doc.defaultView!.Event('paste', { bubbles: true, cancelable: true });
+    const file = new f.doc.defaultView!.File([png(200, 100)], 'shot.png', { type: 'image/png' });
+    Object.defineProperty(paste, 'clipboardData', { value: { files: [file] } });
+    layer.dispatchEvent(paste);
+    assert.equal(paste.defaultPrevented, true);
+    await pause(20);
+    const [image] = f.session.snapshot.images!;
+    assert.deepEqual(image!.box, [225, 362.5, 375, 437.5], 'centred on the page');
+    assert.equal(f.doc.querySelectorAll('.pfs-image.is-selected .pfs-image-handle').length, 4);
+    // Drag it; then the south-east handle resizes in proportion (Shift frees it).
+    f.pointer(f.doc.querySelector('.pfs-image')!, 'pointerdown', 300, 400);
+    f.pointer(f.doc.body, 'pointermove', 280, 380);
+    f.pointer(f.doc.body, 'pointerup', 280, 380);
+    assert.deepEqual(f.session.snapshot.images![0]!.box, [205, 382.5, 355, 457.5]);
+    f.pointer(f.doc.querySelector('.pfs-image-handle.is-se')!, 'pointerdown', 355, 417.5);
+    f.pointer(f.doc.body, 'pointerup', 505, 492.5);
+    assert.deepEqual(f.session.snapshot.images![0]!.box, [205, 307.5, 505, 457.5]);
+    // Ctrl+D duplicates; Delete removes the selected copy.
+    f.doc.body.dispatchEvent(f.key('d', { ctrlKey: true }));
+    assert.equal(f.session.snapshot.images!.length, 2);
+    f.doc.body.dispatchEvent(f.key('Delete'));
+    assert.equal(f.session.snapshot.images!.length, 1);
+    // The right-click menu turns it a quarter clockwise about its centre, then locks it.
+    const menu = (title: string) => {
+      f.doc
+        .querySelector('.pfs-image')!
+        .dispatchEvent(
+          new f.doc.defaultView!.MouseEvent('contextmenu', { bubbles: true, cancelable: true }),
+        );
+      const items = (globalThis as { lastMenu?: { items: { title: string; click(): void }[] } })
+        .lastMenu!.items;
+      items.find((item) => item.title === title)!.click();
+    };
+    menu('Rotate 90° right');
+    const turned = f.session.snapshot.images![0]!;
+    assert.deepEqual([turned.box, turned.rotation], [[280, 232.5, 430, 532.5], 270]);
+    assert.match(f.doc.querySelector<HTMLElement>('.pfs-image img')!.style.transform, /90deg/);
+    menu('Lock');
+    f.pointer(f.doc.querySelector('.pfs-image')!, 'pointerdown', 350, 400);
+    f.pointer(f.doc.body, 'pointerup', 300, 300);
+    assert.deepEqual(f.session.snapshot.images![0]!.box, turned.box, 'locked pictures stay put');
+    await f.session.save();
+    const saved = (await readTextPdf(f.bytes())).images!;
+    assert.deepEqual([saved.length, saved[0]!.rotation, saved[0]!.locked], [1, 270, true]);
   } finally {
     f.dispose();
   }

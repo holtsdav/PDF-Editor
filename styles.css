@@ -1509,3 +1509,61 @@ button.pfs-choice.is-round {
 .pfs-shape-selection.is-locked .pfs-shape-outline {
   stroke-dasharray: 2 3;
 }
+
+/* Pasted pictures: below text boxes and shapes; movable with the select tool. */
+.pfs-images {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.pfs-image {
+  position: absolute;
+  pointer-events: none;
+}
+.pfs-image img {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  max-width: none;
+  user-select: none;
+  pointer-events: none;
+}
+.pdf-form-studio-layer[data-tool='select'] .pfs-image {
+  pointer-events: auto;
+  cursor: move;
+}
+.pfs-image.is-selected {
+  outline: 1px solid var(--interactive-accent, #1476e5);
+}
+.pfs-image.is-selected.is-locked {
+  outline-style: dashed;
+  cursor: default;
+}
+.pfs-image-handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  margin: -5px;
+  background: var(--background-primary, #fff);
+  border: 1px solid var(--interactive-accent, #1476e5);
+}
+.pfs-image-handle.is-nw {
+  left: 0;
+  top: 0;
+  cursor: nwse-resize;
+}
+.pfs-image-handle.is-se {
+  left: 100%;
+  top: 100%;
+  cursor: nwse-resize;
+}
+.pfs-image-handle.is-ne {
+  left: 100%;
+  top: 0;
+  cursor: nesw-resize;
+}
+.pfs-image-handle.is-sw {
+  left: 0;
+  top: 100%;
+  cursor: nesw-resize;
+}

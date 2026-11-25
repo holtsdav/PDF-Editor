@@ -37,6 +37,8 @@ import { readMarks, stripMarks, verifyMarks, writeMarks } from './mark-engine.ts
 import { fieldIndex } from './field-index.ts';
 import { readShapes, stripShapes, verifyShapes, writeShapes } from './shape-engine.ts';
 import type { PdfShape } from './shape-engine.ts';
+import { readImages, stripImages, verifyImages, writeImages } from './image-engine.ts';
+import type { PdfImage } from './image-engine.ts';
 import type { PdfMark } from './mark-engine.ts';
 import type { RuledLayout } from './ruled-text';
 
@@ -82,6 +84,7 @@ export interface TextSnapshot {
   marks?: PdfMark[];
   /** Rectangles, ellipses, lines and arrows made by this plugin. */
   shapes?: PdfShape[];
+  images?: PdfImage[];
 }
 export interface AddedField {
   name: string;
@@ -113,6 +116,8 @@ export interface TextChanges {
   deletedMarks?: Set<string>;
   shapes?: Map<string, PdfShape>;
   deletedShapes?: Set<string>;
+  images?: Map<string, PdfImage>;
+  deletedImages?: Set<string>;
 }
 
 async function loadWritable(bytes: Uint8Array): Promise<PDFDocument> {
@@ -525,6 +530,7 @@ export async function readTextPdf(bytes: Uint8Array): Promise<TextSnapshot> {
     choices: readChoices(pdf),
     marks: readMarks(pdf),
     shapes: readShapes(pdf),
+    images: readImages(pdf),
   };
 }
 
@@ -829,6 +835,9 @@ export async function writeTextPdf(
   if (changes.shapes?.size || changes.deletedShapes?.size) {
     writeShapes(pdf, changes.shapes ?? new Map(), changes.deletedShapes ?? new Set());
   }
+  if (changes.images?.size || changes.deletedImages?.size) {
+    await writeImages(pdf, changes.images ?? new Map(), changes.deletedImages ?? new Set());
+  }
   await pdf.flush();
   // Embedded fonts may only resolve after flush; expand the captured refs then.
   pruneReplacedObjects(pdf, referencedObjects(pdf, [...replaced]));
@@ -843,6 +852,7 @@ export async function writeTextPdf(
   verifyChoices(saved, changes.choices ?? new Map());
   verifyMarks(verified, changes.marks ?? new Map(), changes.deletedMarks ?? new Set());
   verifyShapes(verified, changes.shapes ?? new Map(), changes.deletedShapes ?? new Set());
+  verifyImages(verified, changes.images ?? new Map(), changes.deletedImages ?? new Set());
   for (const [name, value] of changes.values) {
     if (changes.deleted.has(name)) {
       continue;
@@ -979,6 +989,7 @@ export async function renderTextPdf(seed: Uint8Array): Promise<Uint8Array> {
   }
   stripMarks(pdf);
   stripShapes(pdf);
+  stripImages(pdf);
   return pdf.save(pdfSaveOptions(pdf));
 }
 function readInkId(dict: PDFDict): string | undefined {

@@ -274,7 +274,7 @@ export class ObjectSelection extends Component {
       }
       if (
         target.closest(
-          'a, button, select, .pfs-choice, .pfs-shape-hit, .pfs-shape-handle, .pfs-text-layer span, .textLayer span, .annotationLayer, .pfs-answer-suggestions',
+          'a, button, select, .pfs-choice, .pfs-shape-hit, .pfs-shape-handle, .pfs-image, .pfs-text-layer span, .textLayer span, .annotationLayer, .pfs-answer-suggestions',
         ) ||
         target.closest('.is-editing')
       ) {
