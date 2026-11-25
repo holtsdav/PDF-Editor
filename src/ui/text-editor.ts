@@ -23,9 +23,10 @@ import type { ChoiceField, ChoiceWidget } from '../pdf/choice-engine';
 import { lineQuads } from '../pdf/mark-engine';
 import { continueList, indent, toggleList } from '../pdf/list-format';
 import type { TextEdit } from '../pdf/list-format';
-import { ShapeLayer } from './shape-layer';
+import { ShapeLayer, shapeExtent } from './shape-layer';
+import { hitsStroke } from '../pdf/ink-geometry';
 import type { ShapeStyle } from './shape-layer';
-import type { ShapeKind } from '../pdf/shape-engine';
+import type { PdfShape, ShapeKind } from '../pdf/shape-engine';
 import { shapeRect } from '../pdf/shape-engine';
 
 const SHAPE_KINDS: { kind: ShapeKind; label: string; icon: string }[] = [
@@ -52,6 +53,7 @@ const MARK_COLORS: { name: string; color: PdfColor }[] = [
   { name: 'Pink', color: [1, 0.55, 0.75] },
 ];
 const MARK_UI = '.pfs-mark-ui';
+type Point = [number, number];
 type HighlightMode = 'toggle' | 'color' | 'comment';
 
 interface AnswerLine {
@@ -69,6 +71,13 @@ interface ObjectCopy {
   write?: Promise<void>;
 }
 let copiedObjects: ObjectCopy | undefined;
+/** A shape copied with the context menu or Ctrl+C; cleared when objects are copied. */
+let copiedShape: PdfShape | undefined;
+type ContextTarget =
+  | { kind: 'shape'; shape: PdfShape }
+  | { kind: 'mark'; mark: PdfMark }
+  | { kind: 'objects'; objects: PdfObject[] }
+  | { kind: 'page' };
 function objectClipboardHtml(doc: Document, text: string, token: string): string {
   const span = doc.createElement('span');
   span.dataset.pdfEditorObjects = token;
@@ -490,6 +499,43 @@ export class TextEditor extends Component {
       (event) => {
         const id = this.selectedShape;
         const target = event.target;
+        const mod = event.metaKey || event.ctrlKey;
+        const clip = event.key.toLowerCase();
+        if (
+          id &&
+          this.session &&
+          mod &&
+          !event.altKey &&
+          !event.shiftKey &&
+          ['c', 'x', 'v', 'd'].includes(clip) &&
+          !(
+            target instanceof doc.defaultView!.Element &&
+            target.closest('input, textarea, select, [contenteditable="true"]')
+          )
+        ) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          if (event.repeat && clip !== 'v') {
+            return;
+          }
+          try {
+            if (clip === 'c') {
+              this.copyShape(id);
+            } else if (clip === 'x') {
+              this.cutShape(id);
+            } else if (clip === 'd') {
+              this.duplicateShape(id);
+            } else {
+              const shape = this.session.snapshot.shapes?.find((item) => item.id === id);
+              this.pasteCopied(shape?.page ?? 1);
+            }
+            this.scheduleSave();
+          } catch (error) {
+            this.showError(error);
+          }
+          this.refresh();
+          return;
+        }
         if (
           !id ||
           !this.session ||
@@ -3074,6 +3120,7 @@ export class TextEditor extends Component {
       return;
     }
     this.markClickPages.add(div);
+    this.bindContextMenu(div);
     this.registerDomEvent(div, 'click', (event) => {
       const entry = this.layers.get(div);
       const target = event.target as Element;
@@ -3096,6 +3143,401 @@ export class TextEditor extends Component {
         this.openMarkPopover(entry, mark.id, false);
       }
     });
+  }
+
+  /** Right-click menu for shapes, highlights, notes, text boxes, drawings and the page. */
+  private bindContextMenu(div: HTMLElement): void {
+    this.registerDomEvent(div, 'contextmenu', (event) => {
+      const entry = this.layers.get(div);
+      const target = event.target as Element;
+      if (
+        !entry ||
+        !this.session ||
+        !this.loaded ||
+        !(target instanceof div.ownerDocument.defaultView!.Element)
+      ) {
+        return;
+      }
+      // Typing keeps the native spelling/clipboard menu; selected PDF text keeps
+      // Obsidian's (and PDF++'s) menu for copying text and links.
+      const typing = target.closest(
+        'input, textarea, [contenteditable="true"]',
+      ) as HTMLInputElement | null;
+      if (
+        (typing && !typing.readOnly) ||
+        target.closest('.pfs-choice') ||
+        (target.closest('.pfs-mark-ui') && !target.closest('[data-mark-id]')) ||
+        (div.ownerDocument.getSelection()?.isCollapsed === false && target.closest('.textLayer'))
+      ) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      const at = this.pdfPoint(entry, event.clientX, event.clientY);
+      this.openContextMenu(entry, this.contextTarget(entry, target, at), at, event);
+    });
+  }
+
+  private contextTarget(entry: PageLayer, target: Element, [x, y]: Point): ContextTarget {
+    const snapshot = this.session!.snapshot;
+    const page = entry.page.number;
+    const shapeId = target.closest<HTMLElement | SVGElement>('[data-shape-id]')?.dataset.shapeId;
+    const shape = shapeId && snapshot.shapes?.find((item) => item.id === shapeId);
+    if (shape) {
+      return { kind: 'shape', shape };
+    }
+    const markId = target.closest<HTMLElement>('[data-mark-id]')?.dataset.markId;
+    const note = markId && snapshot.marks?.find((item) => item.id === markId);
+    if (note) {
+      return { kind: 'mark', mark: note };
+    }
+    const fieldName = target
+      .closest('.pdf-form-studio-box')
+      ?.querySelector<HTMLElement>('[data-pdf-field]')?.dataset.pdfField;
+    const field =
+      fieldName &&
+      snapshot.fields.find((item) => item.name === fieldName && item.owned && !item.readOnly);
+    const scale = entry.page.viewport.scale || 1;
+    const stroke = field
+      ? undefined
+      : [...snapshot.strokes]
+          .reverse()
+          .find(
+            (item) =>
+              item.page === page &&
+              !item.readOnly &&
+              !item.hidden &&
+              hitsStroke(item.points, [x, y], [x, y], item.width / 2 + 6 / scale),
+          );
+    if (field || stroke) {
+      const object: PdfObject = field
+        ? { kind: 'text', id: field.name }
+        : { kind: 'ink', id: stroke!.id };
+      const selected = this.selectedObjects();
+      if (selected.some((item) => item.kind === object.kind && item.id === object.id)) {
+        return { kind: 'objects', objects: selected };
+      }
+      this.selectCreated([object]);
+      return { kind: 'objects', objects: [object] };
+    }
+    const highlight = [...(snapshot.marks ?? [])]
+      .reverse()
+      .find(
+        (item) =>
+          item.page === page &&
+          item.kind === 'highlight' &&
+          item.quads.some((q) => x >= q[0] && x <= q[2] && y >= q[1] && y <= q[3]),
+      );
+    return highlight ? { kind: 'mark', mark: highlight } : { kind: 'page' };
+  }
+
+  private openContextMenu(
+    entry: PageLayer,
+    target: ContextTarget,
+    at: Point,
+    event: MouseEvent,
+  ): void {
+    this.menu?.hide();
+    const menu = (this.menu = new Menu());
+    const session = this.session!;
+    const add = (
+      title: string,
+      icon: string,
+      run: () => void,
+      options: { disabled?: boolean; checked?: boolean } = {},
+    ) =>
+      menu.addItem((item) => {
+        item.setTitle(title).setIcon(icon);
+        if (options.disabled) {
+          item.setDisabled(true);
+        }
+        if (options.checked !== undefined) {
+          item.setChecked(options.checked);
+        }
+        item.onClick(() => {
+          try {
+            run();
+          } catch (error) {
+            this.showError(error);
+          }
+          this.scheduleSave();
+          this.refresh();
+        });
+      });
+    const canPaste = !!copiedObjects || !!copiedShape;
+    const paste = () => this.pasteCopied(entry.page.number, at);
+    if (target.kind === 'shape') {
+      const { shape } = target;
+      const locked = !!shape.locked;
+      this.selectedShape = shape.id;
+      this.selected = undefined;
+      this.selectedStroke = undefined;
+      this.refresh();
+      add('Cut', 'scissors', () => this.cutShape(shape.id), { disabled: locked });
+      add('Copy', 'copy', () => this.copyShape(shape.id));
+      add('Paste', 'clipboard-paste', paste, { disabled: !canPaste });
+      add('Duplicate', 'copy-plus', () => this.duplicateShape(shape.id));
+      add('Delete', 'trash-2', () => this.deleteShapeSelection(shape.id), { disabled: locked });
+      menu.addSeparator();
+      add('Rotate 90° right', 'rotate-cw', () => this.turnShape(shape.id, -90), {
+        disabled: locked,
+      });
+      add('Rotate 90° left', 'rotate-ccw', () => this.turnShape(shape.id, 90), {
+        disabled: locked,
+      });
+      add('Flip horizontally', 'flip-horizontal-2', () => this.flipShape(shape.id, 'x'), {
+        disabled: locked,
+      });
+      add('Flip vertically', 'flip-vertical-2', () => this.flipShape(shape.id, 'y'), {
+        disabled: locked,
+      });
+      menu.addSeparator();
+      add(locked ? 'Unlock' : 'Lock', locked ? 'unlock' : 'lock', () =>
+        session.updateShape(shape.id, { locked: !locked }),
+      );
+    } else if (target.kind === 'mark') {
+      const { mark } = target;
+      add(mark.comment ? 'Edit comment…' : 'Add comment…', 'message-square', () =>
+        this.openMarkPopover(entry, mark.id, false),
+      );
+      menu.addSeparator();
+      for (const { name, color } of MARK_COLORS) {
+        add(name, 'palette', () => session.updateMark(mark.id, { color }), {
+          checked: color.every((value, index) => Math.abs(value - mark.color[index]!) < 0.01),
+        });
+      }
+      menu.addSeparator();
+      add(mark.kind === 'note' ? 'Delete note' : 'Delete highlight', 'trash-2', () =>
+        session.deleteMark(mark.id),
+      );
+    } else if (target.kind === 'objects') {
+      const { objects } = target;
+      add('Cut', 'scissors', () => {
+        this.copyObjectsFromMenu(objects);
+        this.removeSelection();
+      });
+      add('Copy', 'copy', () => this.copyObjectsFromMenu(objects));
+      add('Paste', 'clipboard-paste', paste, { disabled: !canPaste });
+      add('Duplicate', 'copy-plus', () =>
+        this.selectCreated(session.pasteObjects(session.copyObjects(objects))),
+      );
+      add('Delete', 'trash-2', () => this.removeSelection());
+      menu.addSeparator();
+      add('Select all on page', 'box-select', () => this.selectPage(entry.page.number));
+    } else {
+      add('Paste here', 'clipboard-paste', paste, { disabled: !canPaste });
+      menu.addSeparator();
+      add('Add text box here', 'type', () => this.addTextBoxAt(entry, at));
+      add('Add note here', 'sticky-note', () => {
+        const mark = session.addMark({
+          page: entry.page.number,
+          kind: 'note',
+          at,
+          color: MARK_COLORS[0]!.color,
+        });
+        this.openMarkPopover(entry, mark.id, true);
+      });
+      menu.addSeparator();
+      add('Select all on page', 'box-select', () => this.selectPage(entry.page.number));
+    }
+    menu.showAtMouseEvent(event);
+  }
+
+  private copyObjectsFromMenu(objects: PdfObject[]): void {
+    const data = this.session!.copyObjects(objects);
+    const text =
+      data
+        .filter((item) => item.kind === 'text')
+        .map((item) => item.value)
+        .join('\n') || 'PDF Editor elements';
+    copiedShape = undefined;
+    const copy: ObjectCopy = {
+      token: globalThis.crypto.randomUUID(),
+      objects: data,
+      text,
+      custom: false,
+    };
+    copiedObjects = copy;
+    // Ctrl+V compares the clipboard text with this copy before pasting objects.
+    copy.write = Promise.resolve(
+      this.native.element.ownerDocument.defaultView?.navigator.clipboard?.writeText?.(text),
+    ).catch(() => undefined);
+  }
+
+  private copyShape(id: string): void {
+    const shape = this.session?.snapshot.shapes?.find((item) => item.id === id);
+    if (shape) {
+      copiedShape = structuredClone(shape);
+      delete copiedShape.locked;
+      copiedObjects = undefined;
+    }
+  }
+
+  private cutShape(id: string): void {
+    this.copyShape(id);
+    this.deleteShapeSelection(id);
+  }
+
+  private deleteShapeSelection(id: string): void {
+    this.session!.deleteShape(id);
+    if (this.selectedShape === id) {
+      this.selectedShape = undefined;
+    }
+  }
+
+  private duplicateShape(id: string): void {
+    const shape = this.session?.snapshot.shapes?.find((item) => item.id === id);
+    if (shape) {
+      this.placeShape(shape, shape.page);
+    }
+  }
+
+  /** Paste the last copy at a PDF point (context menu) or offset from the original. */
+  private pasteCopied(page: number, at?: Point): void {
+    const session = this.session!;
+    if (copiedShape) {
+      this.placeShape(copiedShape, page, at);
+      return;
+    }
+    const copy = copiedObjects;
+    if (!copy?.objects.length) {
+      return;
+    }
+    if (!at) {
+      this.selectCreated(session.pasteObjects(copy.objects));
+      return;
+    }
+    // Move the group so its top-left corner sits at the clicked point on this page.
+    const left = Math.min(...copy.objects.map((item) => item.rect[0]));
+    const top = Math.max(...copy.objects.map((item) => item.rect[3]));
+    const bounds = session.snapshot.pages[page - 1]!;
+    const right = Math.max(...copy.objects.map((item) => item.rect[2]));
+    const bottom = Math.min(...copy.objects.map((item) => item.rect[1]));
+    const dx = Math.max(bounds[0] - left, Math.min(bounds[2] - right, at[0] - left));
+    const dy = Math.max(bounds[1] - bottom, Math.min(bounds[3] - top, at[1] - top));
+    const moved = copy.objects.map((item): CopiedPdfObject => {
+      const rect: Rect = [
+        item.rect[0] + dx,
+        item.rect[1] + dy,
+        item.rect[2] + dx,
+        item.rect[3] + dy,
+      ];
+      return item.kind === 'ink'
+        ? { ...item, page, rect, points: item.points.map(([x, y]) => [x + dx, y + dy]) }
+        : { ...item, page, rect };
+    });
+    this.selectCreated(session.pasteObjects(moved, [0, 0]));
+  }
+
+  private placeShape(shape: PdfShape, page: number, at?: Point): void {
+    const session = this.session!;
+    const bounds = session.snapshot.pages[page - 1];
+    if (!bounds) {
+      return;
+    }
+    const extent = shape.box ? shapeRect(shape) : shapeExtent(shape);
+    const want: Point = at ? [at[0] - extent[0], at[1] - extent[3]] : [12, -12];
+    const dx = Math.max(bounds[0] - extent[0], Math.min(bounds[2] - extent[2], want[0]));
+    const dy = Math.max(bounds[1] - extent[1], Math.min(bounds[3] - extent[3], want[1]));
+    const shift = ([x, y]: [number, number]): [number, number] => [x + dx, y + dy];
+    const created = session.addShape({
+      page,
+      kind: shape.kind,
+      ...(shape.box
+        ? {
+            box: [shape.box[0] + dx, shape.box[1] + dy, shape.box[2] + dx, shape.box[3] + dy],
+          }
+        : { start: shift(shape.start!), end: shift(shape.end!) }),
+      color: shape.color,
+      ...(shape.fill ? { fill: shape.fill } : {}),
+      width: shape.width,
+      opacity: shape.opacity,
+      ...(shape.rotation ? { rotation: shape.rotation } : {}),
+    });
+    this.selectedShape = created.id;
+    this.selected = undefined;
+    this.selectedStroke = undefined;
+  }
+
+  /** Turn a shape by 90° steps (positive is counter-clockwise, as in PDF space). */
+  private turnShape(id: string, degrees: number): void {
+    const session = this.session!;
+    const shape = session.snapshot.shapes?.find((item) => item.id === id);
+    if (!shape) {
+      return;
+    }
+    if (shape.box) {
+      session.updateShape(id, { rotation: (shape.rotation ?? 0) + degrees });
+      return;
+    }
+    const [cx, cy] = [(shape.start![0] + shape.end![0]) / 2, (shape.start![1] + shape.end![1]) / 2];
+    const sign = degrees > 0 ? 1 : -1;
+    const turn = ([x, y]: [number, number]): [number, number] => [
+      cx - sign * (y - cy),
+      cy + sign * (x - cx),
+    ];
+    session.updateShape(id, { start: turn(shape.start!), end: turn(shape.end!) });
+  }
+
+  private flipShape(id: string, axis: 'x' | 'y'): void {
+    const session = this.session!;
+    const shape = session.snapshot.shapes?.find((item) => item.id === id);
+    if (!shape) {
+      return;
+    }
+    if (shape.box) {
+      // Rectangles and ellipses are symmetric: mirroring only reverses the rotation.
+      if (shape.rotation) {
+        session.updateShape(id, { rotation: -shape.rotation });
+      }
+      return;
+    }
+    const [cx, cy] = [(shape.start![0] + shape.end![0]) / 2, (shape.start![1] + shape.end![1]) / 2];
+    const flip = ([x, y]: [number, number]): [number, number] =>
+      axis === 'x' ? [2 * cx - x, y] : [x, 2 * cy - y];
+    session.updateShape(id, { start: flip(shape.start!), end: flip(shape.end!) });
+  }
+
+  private selectPage(page: number): void {
+    const snapshot = this.session!.snapshot;
+    const objects: PdfObject[] = [
+      ...snapshot.fields
+        .filter((field) => field.owned && !field.readOnly && field.widgets[0]?.page === page)
+        .map((field): PdfObject => ({ kind: 'text', id: field.name })),
+      ...snapshot.strokes
+        .filter((stroke) => stroke.page === page && !stroke.readOnly && !stroke.hidden)
+        .map((stroke): PdfObject => ({ kind: 'ink', id: stroke.id })),
+    ];
+    this.selectedShape = undefined;
+    this.selectCreated(objects);
+  }
+
+  private addTextBoxAt(entry: PageLayer, [x, y]: Point): void {
+    const session = this.session!;
+    const bounds = session.snapshot.pages[entry.page.number - 1]!;
+    const width = Math.min(240, bounds[2] - bounds[0]);
+    const height = this.fontSize * 1.4 + 8;
+    const left = Math.max(bounds[0], Math.min(bounds[2] - width, x));
+    const top = Math.max(bounds[1] + height, Math.min(bounds[3], y + this.fontSize));
+    const field = session.add(
+      entry.page.number,
+      [left, top - height, left + width, top],
+      this.fontSize,
+      true,
+      entry.page.viewport.rotation,
+    );
+    session.formatField(field.name, {
+      fontFamily: this.textFamily,
+      color: this.textColor,
+      alignment: this.textAlignment,
+      letterSpacing: this.letterSpacing,
+      ...(field.ruled ? {} : { lineSpacing: this.lineSpacing }),
+    });
+    this.selected = field.name;
+    this.selectedStroke = undefined;
+    this.updateStatus();
+    this.refresh();
+    entry.controls.get(`${field.name}:0`)?.input.focus({ preventScroll: true });
   }
 
   private shapeLayer(page: NativePage, layer: HTMLElement): ShapeLayer {

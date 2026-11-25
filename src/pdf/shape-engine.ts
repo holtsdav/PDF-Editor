@@ -32,6 +32,8 @@ export interface PdfShape {
    * PFSBox/PFSRotation and the appearance draws the turned shape inside /Rect.
    */
   rotation?: number;
+  /** PDF "Locked" flag: cannot be moved, resized or deleted until unlocked. */
+  locked?: true;
 }
 
 /** Box corners after rotation, counter-clockwise from lower left. */
@@ -222,6 +224,9 @@ export function readShapes(pdf: PDFDocument): PdfShape[] {
             : 1,
         opacity: opacity instanceof PDFNumber ? opacity.asNumber() : 1,
         modified: text(dict, 'M') ?? pdfDate(new Date(0)),
+        ...((dict.lookupMaybe(PDFName.of('F'), PDFNumber)?.asNumber() ?? 0) & 128
+          ? { locked: true as const }
+          : {}),
       };
       validateShape(shape, bounds(page));
       shapes.push(shape);
@@ -371,7 +376,7 @@ export function writeShapes(
       Subtype: SUBTYPES[shape.kind],
       NM: PDFHexString.fromText(shape.id),
       P: page.ref,
-      F: 4,
+      F: shape.locked ? 4 | 128 : 4,
       Rect: rect,
       C: shape.color,
       CA: shape.opacity,
@@ -436,6 +441,7 @@ export function verifyShapes(
       !near(output.color, shape.color) ||
       !near(output.fill, shape.fill) ||
       Math.abs((output.rotation ?? 0) - (shape.rotation ?? 0)) > 0.001 ||
+      !!output.locked !== !!shape.locked ||
       Math.abs(output.width - shape.width) > 0.001
     ) {
       throw new Error('PDF shape verification failed.');

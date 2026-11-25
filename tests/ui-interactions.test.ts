@@ -45,7 +45,28 @@ const built = await build({
       unload() { this.onunload?.(); for (const child of this.children) child.unload(); for (const fn of this.cleanups.splice(0).reverse()) fn(); }
     }
     export class Scope { constructor(parent) { this.parent = parent; this.handlers = []; } register(modifiers, key, func) { const handler = { modifiers, key, func }; this.handlers.push(handler); return handler; } }
-    export class Menu { hide() {} }
+    export class Menu {
+      items = [];
+      hide() { this.hidden?.(); }
+      onHide(fn) { this.hidden = fn; return this; }
+      addSeparator() { return this; }
+      addItem(build) {
+        const item = { title: '', disabled: false, checked: undefined, click: () => {} };
+        const api = {
+          setTitle(t) { item.title = t; return api; },
+          setIcon() { return api; },
+          setSection() { return api; },
+          setDisabled(d) { item.disabled = d; return api; },
+          setChecked(c) { item.checked = c; return api; },
+          onClick(fn) { item.click = fn; return api; },
+        };
+        build(api);
+        this.items.push(item);
+        return this;
+      }
+      showAtMouseEvent() { globalThis.lastMenu = this; }
+      showAtPosition() { globalThis.lastMenu = this; }
+    }
     export class Modal extends Component {}
     export class Notice { constructor(text) { throw new Error(text); } }
     export function setTooltip(el, text, options = {}) { el.setAttribute('aria-label', text); el.setAttribute('data-tooltip-classes', (options.classes ?? []).join(' ')); }
@@ -2635,6 +2656,161 @@ test('a selected rectangle turns with its rotation handle, snapping with Shift',
     const saved = (await readTextPdf(f.bytes())).shapes!;
     assert.equal(saved[0]!.id, shape.id);
     assert.ok(Math.abs(saved[0]!.rotation! + 90) < 1);
+  } finally {
+    f.dispose();
+  }
+});
+
+test('the right-click menu copies, pastes, turns, flips, locks and deletes shapes', async () => {
+  const f = await fixture();
+  const menu = (target: Element, x: number, y: number) => {
+    target.dispatchEvent(
+      new f.doc.defaultView!.MouseEvent('contextmenu', {
+        bubbles: true,
+        cancelable: true,
+        clientX: x,
+        clientY: y,
+      }),
+    );
+    const items = (globalThis as { lastMenu?: { items: MenuItem[] } }).lastMenu!.items;
+    return (title: string) => {
+      const item = items.find((entry) => entry.title === title);
+      assert.ok(item, `${title} in ${items.map((entry) => entry.title).join(', ')}`);
+      return item;
+    };
+  };
+  type MenuItem = { title: string; disabled: boolean; checked?: boolean; click: () => void };
+  try {
+    f.session.addShape({
+      page: 1,
+      kind: 'rectangle',
+      box: [100, 640, 200, 700],
+      color: [0.85, 0.15, 0.15],
+      width: 2,
+    });
+    f.session.addShape({
+      page: 1,
+      kind: 'arrow',
+      start: [300, 500],
+      end: [400, 500],
+      color: [0.15, 0.4, 0.85],
+      width: 2,
+    });
+    f.editor.refresh();
+    const [rect, arrow] = f.session.snapshot.shapes!;
+    // Rotate right is a quarter turn clockwise (-90° in PDF terms); flipping mirrors it.
+    let pick = menu(f.doc.querySelector(`[data-shape-id="${rect!.id}"] .pfs-shape-hit`)!, 101, 130);
+    pick('Rotate 90° right').click();
+    assert.equal(f.session.snapshot.shapes![0]!.rotation, -90);
+    pick = menu(f.doc.querySelector(`[data-shape-id="${rect!.id}"] .pfs-shape-hit`)!, 150, 130);
+    pick('Flip horizontally').click();
+    assert.equal(f.session.snapshot.shapes![0]!.rotation, 90);
+    // Lines turn and mirror their end points around the middle.
+    pick = menu(f.doc.querySelector(`[data-shape-id="${arrow!.id}"] .pfs-shape-hit`)!, 350, 300);
+    pick('Rotate 90° left').click();
+    assert.deepEqual(f.session.snapshot.shapes![1]!.start, [350, 450]);
+    assert.deepEqual(f.session.snapshot.shapes![1]!.end, [350, 550]);
+    pick = menu(f.doc.querySelector(`[data-shape-id="${arrow!.id}"] .pfs-shape-hit`)!, 350, 300);
+    pick('Flip vertically').click();
+    assert.deepEqual(f.session.snapshot.shapes![1]!.start, [350, 550]);
+    // Copy, then paste on the empty page where the click was: the top-left lands there.
+    pick = menu(f.doc.querySelector(`[data-shape-id="${arrow!.id}"] .pfs-shape-hit`)!, 350, 300);
+    pick('Copy').click();
+    const layer = f.doc.querySelector<HTMLElement>('#page .pdf-form-studio-layer')!;
+    pick = menu(layer, 50, 700);
+    pick('Paste here').click();
+    const pasted = f.session.snapshot.shapes![2]!;
+    assert.deepEqual(
+      [pasted.start, pasted.end],
+      [
+        [50, 100],
+        [50, 0],
+      ],
+    );
+    // Locked shapes cannot be deleted or changed until unlocked; the lock is saved.
+    pick = menu(f.doc.querySelector(`[data-shape-id="${rect!.id}"] .pfs-shape-hit`)!, 150, 130);
+    pick('Lock').click();
+    pick = menu(f.doc.querySelector(`[data-shape-id="${rect!.id}"] .pfs-shape-hit`)!, 150, 130);
+    assert.equal(pick('Delete').disabled, true);
+    assert.throws(() => f.session.deleteShape(rect!.id), /locked/);
+    assert.equal(f.doc.querySelectorAll('.pfs-shape-handle').length, 0, 'no handles while locked');
+    await f.session.save();
+    const saved = (await readTextPdf(f.bytes())).shapes!;
+    assert.equal(saved.length, 3);
+    assert.equal(saved[0]!.locked, true);
+    pick = menu(f.doc.querySelector(`[data-shape-id="${rect!.id}"] .pfs-shape-hit`)!, 150, 130);
+    pick('Unlock').click();
+    pick = menu(f.doc.querySelector(`[data-shape-id="${rect!.id}"] .pfs-shape-hit`)!, 150, 130);
+    pick('Delete').click();
+    assert.equal(f.session.snapshot.shapes!.length, 2);
+    // On the empty page: add a note, then recolour it from its own menu.
+    pick = menu(layer, 500, 100);
+    pick('Add note here').click();
+    const note = f.session.snapshot.marks!.at(-1)!;
+    assert.equal(note.kind, 'note');
+    f.editor.refresh();
+    pick = menu(f.doc.querySelector(`button[data-mark-id="${note.id}"]`)!, 500, 100);
+    pick('Green').click();
+    assert.deepEqual(f.session.snapshot.marks!.at(-1)!.color, [0.45, 0.9, 0.45]);
+  } finally {
+    f.dispose();
+  }
+});
+
+test('the right-click menu copies a text box to the clicked spot and Ctrl+D duplicates shapes', async () => {
+  const f = await fixture();
+  const items = () =>
+    (globalThis as { lastMenu?: { items: { title: string; click: () => void }[] } }).lastMenu!
+      .items;
+  const open = (target: Element, x: number, y: number) =>
+    target.dispatchEvent(
+      new f.doc.defaultView!.MouseEvent('contextmenu', {
+        bubbles: true,
+        cancelable: true,
+        clientX: x,
+        clientY: y,
+      }),
+    );
+  try {
+    const field = f.session.add(1, [80, 500, 340, 540], 14, true);
+    f.session.setValue(field.name, 'Copy me');
+    f.editor.refresh();
+    open(f.doc.querySelector('.pdf-form-studio-box')!, 100, 280);
+    assert.deepEqual(
+      items().map((item) => item.title),
+      ['Cut', 'Copy', 'Paste', 'Duplicate', 'Delete', 'Select all on page'],
+    );
+    items()
+      .find((item) => item.title === 'Copy')!
+      .click();
+    open(f.doc.querySelector('#page .pdf-form-studio-layer')!, 200, 100);
+    items()
+      .find((item) => item.title === 'Paste here')!
+      .click();
+    const copy = f.session.snapshot.fields.at(-1)!;
+    assert.notEqual(copy.name, field.name);
+    assert.equal(copy.value, 'Copy me');
+    assert.deepEqual(copy.widgets[0]!.rect, [200, 660, 460, 700]);
+    // Ctrl+D on a selected shape duplicates it, slightly offset, and selects the copy.
+    const shape = f.session.addShape({
+      page: 1,
+      kind: 'ellipse',
+      box: [100, 100, 160, 140],
+      color: [0.1, 0.1, 0.1],
+      width: 1,
+    });
+    f.editor.refresh();
+    f.pointer(
+      f.doc.querySelector(`[data-shape-id="${shape.id}"] .pfs-shape-hit`)!,
+      'pointerdown',
+      130,
+      680,
+    );
+    f.pointer(f.doc.body, 'pointerup', 130, 680);
+    f.doc.body.dispatchEvent(f.key('d', { ctrlKey: true }));
+    const shapes = f.session.snapshot.shapes!;
+    assert.equal(shapes.length, 2);
+    assert.deepEqual(shapes[1]!.box, [112, 88, 172, 128]);
   } finally {
     f.dispose();
   }

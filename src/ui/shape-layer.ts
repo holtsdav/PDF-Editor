@@ -102,6 +102,9 @@ export class ShapeLayer {
       const handle = (target as SVGElement).dataset.handle as Handle | undefined;
       const point = this.viewportPoint(event);
       this.options.select(id);
+      if (this.session.snapshot.shapes?.find((shape) => shape.id === id)?.locked) {
+        return; // Locked shapes can be selected (for the context menu) but not changed.
+      }
       this.gesture = handle
         ? {
             type: 'resize',
@@ -491,9 +494,14 @@ export class ShapeLayer {
   }
 
   private selection(shape: PdfShape): SVGGElement {
-    const group = this.element('g', { class: 'pfs-shape-selection' });
+    const group = this.element('g', {
+      class: shape.locked ? 'pfs-shape-selection is-locked' : 'pfs-shape-selection',
+    });
     group.dataset.shapeId = shape.id;
     const handle = (name: Handle, [x, y]: Point) => {
+      if (shape.locked) {
+        return;
+      }
       const element = this.element('rect', {
         class: 'pfs-shape-handle',
         x: x - 5,
@@ -542,7 +550,9 @@ export class ShapeLayer {
         r: 6,
       });
       rotate.dataset.handle = 'rotate';
-      group.append(rotate);
+      if (!shape.locked) {
+        group.append(rotate);
+      }
     } else {
       handle('start', this.view(shape.start!));
       handle('end', this.view(shape.end!));

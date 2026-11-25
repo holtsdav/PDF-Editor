@@ -401,6 +401,7 @@ export class TextSession {
     fill?: PdfColor;
     width: number;
     opacity?: number;
+    rotation?: number;
   }): PdfShape {
     this.assertEditable();
     const bounds = this.snapshot.pages[input.page - 1];
@@ -420,6 +421,7 @@ export class TextSession {
       width: input.width,
       opacity: input.opacity ?? 1,
       modified: pdfDate(),
+      ...(boxed && input.rotation ? { rotation: input.rotation } : {}),
     };
     validateShape(shape, bounds);
     this.rememberText(`shape:${shape.id}`, false);
@@ -434,6 +436,7 @@ export class TextSession {
     id: string,
     update: Partial<Pick<PdfShape, 'box' | 'start' | 'end' | 'color' | 'width' | 'rotation'>> & {
       fill?: PdfColor | null;
+      locked?: boolean;
     },
   ): void {
     this.assertEditable();
@@ -456,6 +459,18 @@ export class TextSession {
     }
     if (update.width !== undefined) {
       next.width = update.width;
+    }
+    const geometry =
+      !!update.box || !!update.start || !!update.end || update.rotation !== undefined;
+    if (shape.locked && update.locked !== false && geometry) {
+      throw new Error('This shape is locked. Unlock it to move, resize or rotate it.');
+    }
+    if (update.locked !== undefined) {
+      if (update.locked) {
+        next.locked = true;
+      } else {
+        delete next.locked;
+      }
     }
     if (update.rotation !== undefined && next.box) {
       // Keep angles in (-180, 180]; an unrotated shape stores no angle.
@@ -484,17 +499,24 @@ export class TextSession {
     if (!next.rotation) {
       delete shape.rotation;
     }
+    if (!next.locked) {
+      delete shape.locked;
+    }
     (this.changes.shapes ??= new Map()).set(id, structuredClone(shape));
     this.changed();
   }
 
   deleteShape(id: string): void {
     this.assertEditable();
-    if (!this.snapshot.shapes?.some((item) => item.id === id)) {
+    const shape = this.snapshot.shapes?.find((item) => item.id === id);
+    if (!shape) {
       return;
     }
+    if (shape.locked) {
+      throw new Error('This shape is locked. Unlock it before deleting it.');
+    }
     this.rememberText(`shape:${id}`, false);
-    this.snapshot.shapes = this.snapshot.shapes.filter((item) => item.id !== id);
+    this.snapshot.shapes = (this.snapshot.shapes ?? []).filter((item) => item.id !== id);
     this.changes.shapes?.delete(id);
     (this.changes.deletedShapes ??= new Set()).add(id);
     this.changed();

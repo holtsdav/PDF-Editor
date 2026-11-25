@@ -1505,3 +1505,7 @@ button.pfs-choice.is-round {
 .pfs-shapes[data-tool='select'] .pfs-shape-rotate {
   cursor: grab;
 }
+
+.pfs-shape-selection.is-locked .pfs-shape-outline {
+  stroke-dasharray: 2 3;
+}
