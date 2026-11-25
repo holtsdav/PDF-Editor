@@ -73,3 +73,12 @@ test('the embedded fonts can draw every list marker', async () => {
     }
   }
 });
+
+test('bullets and dashes pasted from Word or PDFs (Symbol/Wingdings code points) are replaced', async () => {
+  const { normalizeSymbols } = await import('../src/pdf/text-format.ts');
+  assert.equal(
+    normalizeSymbols('\tErster Punkt\n Zweiter\n Pfeil'),
+    '•\tErster Punkt\n– Zweiter\n‣ Pfeil',
+  );
+  assert.equal(normalizeSymbols('Normaler Text – ohne Ä'), 'Normaler Text – ohne Ä');
+});

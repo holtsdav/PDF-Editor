@@ -20,7 +20,7 @@ import fontkit from '@pdf-lib/fontkit';
 import { multilineAppearance } from './text-appearance.ts';
 import { readInk, verifyInk, writeInk } from './ink-engine.ts';
 import type { InkStroke } from './ink-engine.ts';
-import { defaultColor, validColor, validSpacing } from './text-format.ts';
+import { defaultColor, isPrivateUse, validColor, validSpacing } from './text-format.ts';
 import type { FontFamily, PdfColor, PdfFonts, TextFormat } from './text-format.ts';
 import { referencedObjects, pruneReplacedObjects } from './object-references.ts';
 import { loadPdfDocument, pdfSaveOptions } from './pdf-load.ts';
@@ -730,7 +730,9 @@ export async function writeTextPdf(
       const code = character.codePointAt(0)!;
       if (code !== 10 && code !== 13 && code !== 9 && !supported.has(code)) {
         throw new Error(
-          `The PDF font cannot render U+${code.toString(16).toUpperCase()}. Your text is kept here; replace the unsupported character before saving.`,
+          isPrivateUse(code)
+            ? `The text contains a special-font symbol (U+${code.toString(16).toUpperCase()}, often a bullet copied from Word or another PDF) that cannot be saved. Your text is kept here; replace that character with a normal one such as • or – before saving.`
+            : `The PDF font cannot render U+${code.toString(16).toUpperCase()}. Your text is kept here; replace the unsupported character before saving.`,
         );
       }
     }

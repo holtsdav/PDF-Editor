@@ -12,7 +12,7 @@ import type { ResizeHandle } from '../pdf/box-geometry';
 import { ObjectSelection } from './object-selection';
 import { InkLayer } from './ink-layer';
 import type { EditorTool } from './ink-layer';
-import { cssColor, fontFaces } from '../pdf/text-format';
+import { cssColor, fontFaces, normalizeSymbols } from '../pdf/text-format';
 import type { FontFamily, PdfColor, TextFormat } from '../pdf/text-format';
 import { RecoveryInfo } from './recovery-info';
 import { RecoveryPreview } from './recovery-preview';
@@ -3775,6 +3775,13 @@ export class TextEditor extends Component {
     input.addEventListener('input', (event) => {
       if ((event as InputEvent).isComposing) {
         return;
+      }
+      // Bullets pasted from Word/PDFs arrive as special-font symbols; replace them in place.
+      const normalized = normalizeSymbols(input.value);
+      if (normalized !== input.value) {
+        const { selectionStart, selectionEnd } = input;
+        input.value = normalized;
+        input.setSelectionRange(selectionStart, selectionEnd);
       }
       try {
         this.session!.setValue(field.name, input.value, this.listEditing);

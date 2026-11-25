@@ -8,7 +8,13 @@ import type {
   TextSnapshot,
 } from './text-engine.ts';
 import { hash } from './recovery.ts';
-import { validColor, validSpacing, spacedWidth, textGraphemes } from './text-format.ts';
+import {
+  normalizeSymbols,
+  validColor,
+  validSpacing,
+  spacedWidth,
+  textGraphemes,
+} from './text-format.ts';
 import type { PdfColor, PdfFonts, TextFormat } from './text-format.ts';
 import type { BackupPurpose } from './recovery.ts';
 import { InteractionGate } from './interaction-gate.ts';
@@ -542,6 +548,7 @@ export class TextSession {
   /** `separate` starts a new undo step instead of merging with recent typing (list actions). */
   setValue(name: string, value: string, separate = false): void {
     this.assertAvailable();
+    value = normalizeSymbols(value);
     if (this.status === 'conflict') {
       throw new Error('Reload the PDF before editing after an external change.');
     }

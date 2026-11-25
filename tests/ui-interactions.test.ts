@@ -2569,3 +2569,27 @@ test('shapes are drawn by dragging, then selected, moved, resized, restyled and 
     f.dispose();
   }
 });
+
+test('a dash pasted from Word (U+F02D) is replaced in place and the text box saves', async () => {
+  const f = await fixture();
+  try {
+    const field = f.session.add(1, [80, 500, 400, 640], 14, true);
+    f.editor.refresh();
+    const input = f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!;
+    input.focus();
+    input.value = ' Punkt eins\n Punkt zwei';
+    input.setSelectionRange(5, 5);
+    input.dispatchEvent(new f.doc.defaultView!.Event('input'));
+    assert.equal(input.value, '– Punkt eins\n• Punkt zwei');
+    assert.equal(input.selectionStart, 5, 'caret stays where it was');
+    await f.session.save();
+    assert.equal(f.session.status, 'saved');
+    const saved = (await PDFDocument.load(f.bytes())).getForm().getTextField(field.name);
+    assert.equal(saved.getText(), '– Punkt eins\n• Punkt zwei');
+    // An unknown special-font symbol still stops the save, with a clear explanation.
+    f.session.setValue(field.name, 'Symbol ');
+    await assert.rejects(f.session.save(), /special-font symbol \(U\+F0FC/);
+  } finally {
+    f.dispose();
+  }
+});

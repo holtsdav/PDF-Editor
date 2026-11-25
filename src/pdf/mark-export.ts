@@ -1,5 +1,6 @@
 import type { Rect } from './text-engine.ts';
 import type { PdfMark } from './mark-engine.ts';
+import { normalizeSymbols } from './text-format.ts';
 
 /** The subset of a PDF.js text item used to recover highlighted text. */
 export interface TextItem {
@@ -56,7 +57,7 @@ export function textInQuads(items: TextItem[], quads: Rect[]): string {
       line += piece.text;
       previous = piece;
     }
-    lines.push(line.replace(/\s+/g, ' ').trim());
+    lines.push(normalizeSymbols(line).replace(/\s+/g, ' ').trim());
   }
   // Join lines, removing hyphenation at line breaks ("Hypo-" + "these").
   return lines
