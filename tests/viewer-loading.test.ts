@@ -846,3 +846,76 @@ test('released pages remain released after failed or stale renders and still can
     }
   }
 });
+
+test('left and right arrow keys turn whole pages without stealing typing or object nudging', () => {
+  const f = fixture();
+  const doc = f.doc;
+  const leaf = doc.createElement('div');
+  leaf.className = 'workspace-leaf mod-active';
+  const host = doc.createElement('div');
+  const root = doc.createElement('div');
+  const scroller = doc.createElement('div');
+  root.append(scroller);
+  host.append(root);
+  leaf.append(host);
+  doc.body.append(leaf);
+  const entries = Array.from({ length: 5 }, (_, index) => {
+    const div = doc.createElement('div');
+    Object.defineProperty(div, 'offsetTop', { value: index * 1000 });
+    return { native: { div, number: index + 1 } };
+  });
+  const surface = Object.assign(Object.create(PdfSurface.prototype), {
+    root,
+    scroller,
+    entries,
+    currentPage: 2,
+    native: { element: host },
+    pointerInside: false,
+    updateLineButton() {},
+  }) as { pageKey(event: KeyboardEvent): boolean; currentPage: number; pointerInside: boolean };
+  const key = (target: EventTarget, init: KeyboardEventInit) => {
+    const event = new f.dom.window.KeyboardEvent('keydown', {
+      bubbles: true,
+      cancelable: true,
+      ...init,
+    });
+    Object.defineProperty(event, 'target', { value: target });
+    return { handled: surface.pageKey(event), event };
+  };
+  // Focus on the page (body) in the active PDF tab: whole pages.
+  assert.equal(key(doc.body, { key: 'ArrowRight' }).handled, true);
+  assert.equal(surface.currentPage, 3);
+  assert.equal(scroller.scrollTop, 2000);
+  assert.equal(key(doc.body, { key: 'ArrowLeft' }).handled, true);
+  assert.equal(surface.currentPage, 2);
+  // Bounded at the first and last page.
+  key(doc.body, { key: 'ArrowLeft' });
+  key(doc.body, { key: 'ArrowLeft' });
+  assert.equal(surface.currentPage, 1);
+  // Typing in a text box, comment or select keeps the caret keys.
+  for (const tag of ['textarea', 'input', 'select']) {
+    const field = doc.createElement(tag);
+    root.append(field);
+    assert.equal(key(field, { key: 'ArrowRight' }).handled, false, tag);
+  }
+  // A selected box or drawing already moved by the key: not a page turn.
+  const nudged = new f.dom.window.KeyboardEvent('keydown', { key: 'ArrowRight', cancelable: true });
+  nudged.preventDefault();
+  Object.defineProperty(nudged, 'target', { value: doc.body });
+  assert.equal(surface.pageKey(nudged), false);
+  // Modified keys stay with Obsidian (Alt+Left is "back").
+  assert.equal(key(doc.body, { key: 'ArrowLeft', altKey: true }).handled, false);
+  assert.equal(key(doc.body, { key: 'ArrowRight', shiftKey: true }).handled, false);
+  assert.equal(surface.currentPage, 1);
+  // Another tab is active and nothing in this viewer was clicked: ignore.
+  leaf.classList.remove('mod-active');
+  assert.equal(key(doc.body, { key: 'ArrowRight' }).handled, false);
+  surface.pointerInside = true;
+  assert.equal(key(doc.body, { key: 'ArrowRight' }).handled, true);
+  // An embedded PDF in a note needs a click inside it first.
+  host.classList.add('pdf-embed');
+  leaf.classList.add('mod-active');
+  surface.pointerInside = false;
+  assert.equal(key(doc.body, { key: 'ArrowRight' }).handled, false);
+  f.dom.window.close();
+});

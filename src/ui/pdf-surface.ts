@@ -104,6 +104,8 @@ export class PdfSurface extends Component {
   private floatingFrame?: number;
   private toolbarSpacer: HTMLElement;
   private floatingHost?: HTMLElement;
+  /** The last pointer press was inside this viewer (keyboard page navigation target). */
+  private pointerInside = false;
   private floatingExitTimer?: number;
 
   constructor(
@@ -334,6 +336,21 @@ export class PdfSurface extends Component {
       },
       true,
     );
+    // Left/Right turn whole pages. Bubble phase: object nudging and typing handle the key first.
+    this.registerDomEvent(
+      doc,
+      'pointerdown',
+      (event) => {
+        const target = event.target;
+        this.pointerInside =
+          target instanceof doc.defaultView!.Node &&
+          (this.root.contains(target) || !!this.floatingHost?.contains(target));
+      },
+      true,
+    );
+    this.registerDomEvent(doc, 'keydown', (event) => {
+      this.pageKey(event);
+    });
     const resize = new doc.defaultView!.ResizeObserver(() => {
       this.layout();
       this.queueFloatingToolbar();
@@ -1469,6 +1486,46 @@ export class PdfSurface extends Component {
         : await this.pdf!.getPageIndex(ref as { num: number; gen: number });
     this.go(number + 1);
   }
+  /**
+   * Left/Right arrow keys move one whole page. Keys used for typing, for menus and sliders,
+   * or already handled (moving a selected box or drawing) are left alone, as are modified
+   * keys such as Alt+Left (back). An embedded PDF reacts only after a click inside it.
+   */
+  pageKey(event: KeyboardEvent): boolean {
+    if (
+      event.defaultPrevented ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.shiftKey ||
+      (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') ||
+      !this.entries.length
+    ) {
+      return false;
+    }
+    const doc = this.root.ownerDocument;
+    const target = event.target;
+    const element = target instanceof doc.defaultView!.Element ? target : undefined;
+    const inside =
+      !!element && (this.root.contains(element) || !!this.floatingHost?.contains(element));
+    const unfocused = target === doc.body || target === doc.documentElement;
+    const embedded = !!this.native.element.closest('.pdf-embed');
+    const activeLeaf = !embedded && !!this.root.closest('.workspace-leaf.mod-active');
+    if (!inside && !(unfocused && (this.pointerInside || activeLeaf))) {
+      return false;
+    }
+    if (
+      element?.closest(
+        'input, textarea, select, [contenteditable="true"], [contenteditable=""], [role="slider"], [role="menu"], [role="dialog"]',
+      )
+    ) {
+      return false;
+    }
+    event.preventDefault();
+    this.go(this.currentPage + (event.key === 'ArrowRight' ? 1 : -1));
+    return true;
+  }
+
   /** Scroll to a page (used by the highlights sidebar). */
   goToPage(number: number): void {
     this.go(number);
