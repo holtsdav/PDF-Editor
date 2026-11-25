@@ -3052,6 +3052,12 @@ export class TextEditor extends Component {
     element.className = 'pfs-mark-popover pfs-mark-ui';
     element.setAttribute('role', 'dialog');
     element.setAttribute('aria-label', mark.kind === 'note' ? 'Comment note' : 'Highlight comment');
+    if (mark.foreign) {
+      const meta = doc.createElement('div');
+      meta.className = 'pfs-mark-meta';
+      meta.textContent = mark.author ? `By ${mark.author}` : 'Made in another app';
+      element.append(meta);
+    }
     const textarea = doc.createElement('textarea');
     textarea.className = 'pfs-mark-text';
     textarea.placeholder = 'Add a comment…';

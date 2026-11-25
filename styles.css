@@ -1340,3 +1340,74 @@ button.pfs-choice.is-round {
   outline: 2px solid var(--interactive-accent);
   outline-offset: 1px;
 }
+.pfs-mark-meta {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+/* Highlights and comments sidebar. */
+.pfs-annotations {
+  padding: 8px 10px;
+}
+.pfs-annotations-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.pfs-annotations-title {
+  flex: 1;
+  font-weight: var(--font-semibold);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pfs-annotations-count,
+.pfs-annotations-empty {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+.pfs-annotations-empty {
+  margin-top: 12px;
+}
+.pfs-annotations-page {
+  margin: 14px 0 4px;
+  color: var(--text-muted);
+}
+.pfs-annotation {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin: 0 0 6px;
+  padding: 6px 8px;
+  text-align: left;
+  white-space: normal;
+  background: var(--background-secondary);
+  border: 0;
+  border-left: 4px solid var(--pfs-mark-color, #ffd91a);
+  border-radius: var(--radius-s);
+  box-shadow: none;
+  cursor: pointer;
+}
+.pfs-annotation:hover {
+  background: var(--background-modifier-hover);
+}
+.pfs-annotation-text {
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-style: italic;
+}
+.pfs-annotation-kind {
+  font-weight: var(--font-semibold);
+}
+.pfs-annotation-comment {
+  margin-top: 4px;
+  white-space: pre-wrap;
+}
+.pfs-annotation-meta {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}

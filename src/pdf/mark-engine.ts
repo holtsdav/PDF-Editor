@@ -1,4 +1,4 @@
-import { PDFArray, PDFDict, PDFHexString, PDFName, PDFNumber, PDFString } from 'pdf-lib';
+import { PDFArray, PDFDict, PDFHexString, PDFName, PDFNumber, PDFRef, PDFString } from 'pdf-lib';
 import type { PDFDocument, PDFPage } from 'pdf-lib';
 import type { Rect } from './text-engine.ts';
 import type { PdfColor } from './text-format.ts';
@@ -11,6 +11,8 @@ import { referencedObjects, pruneReplacedObjects } from './object-references.ts'
  */
 export const MARK_PREFIX = 'pdf-form-studio-mark-';
 export const MARK_AUTHOR = 'PDF Editor';
+/** IDs for other apps' annotations, derived from their PDF object reference. */
+export const FOREIGN_PREFIX = 'pdf-foreign-mark-';
 export const NOTE_SIZE = 20;
 export type MarkKind = 'highlight' | 'note';
 export interface PdfMark {
@@ -26,6 +28,9 @@ export interface PdfMark {
   comment: string;
   /** PDF date string (D:YYYYMMDDHHmmSS) of the last change. */
   modified: string;
+  /** Made by another app; edited in place. */
+  foreign?: true;
+  author?: string;
 }
 
 export function pdfDate(date = new Date()): string {
@@ -78,7 +83,7 @@ export function validateMark(mark: PdfMark, bounds: Rect): void {
     rect[2] <= bounds[2] + 0.01 &&
     rect[3] <= bounds[3] + 0.01;
   if (
-    !mark.id.startsWith(MARK_PREFIX) ||
+    (!mark.id.startsWith(MARK_PREFIX) && !mark.id.startsWith(FOREIGN_PREFIX)) ||
     (mark.kind !== 'highlight' && mark.kind !== 'note') ||
     (mark.kind === 'highlight' && (!mark.quads.length || mark.quads.length > 2000)) ||
     (mark.kind === 'note' && mark.quads.length) ||
@@ -113,7 +118,8 @@ function numbers(dict: PDFDict, key: string): number[] | undefined {
     ? values.map((value) => value.asNumber())
     : undefined;
 }
-function kindOf(dict: PDFDict): MarkKind | undefined {
+/** Our own annotations, tagged when we created them. */
+function ownKind(dict: PDFDict): MarkKind | undefined {
   const id = text(dict, 'NM');
   const tag = dict.get(PDFName.of('PFSKind'))?.toString();
   const subtype = dict.get(PDFName.of('Subtype'))?.toString();
@@ -128,63 +134,158 @@ function kindOf(dict: PDFDict): MarkKind | undefined {
   }
   return undefined;
 }
+
+/**
+ * Highlights and sticky notes made by other apps (Acrobat, Okular, PDF++ …). Replies,
+ * review states and hidden annotations are left alone and keep their own rendering.
+ */
+function foreignKind(dict: PDFDict): MarkKind | undefined {
+  if (text(dict, 'NM')?.startsWith(MARK_PREFIX) || dict.has(PDFName.of('PFSKind'))) {
+    return undefined;
+  }
+  const flags = dict.lookup(PDFName.of('F'));
+  if (
+    dict.has(PDFName.of('IRT')) ||
+    dict.has(PDFName.of('State')) ||
+    (flags instanceof PDFNumber && flags.asNumber() & (1 | 2 | 32))
+  ) {
+    return undefined;
+  }
+  const subtype = dict.get(PDFName.of('Subtype'))?.toString();
+  return subtype === '/Highlight' ? 'highlight' : subtype === '/Text' ? 'note' : undefined;
+}
+
+function foreignId(ref: PDFRef): string {
+  return `${FOREIGN_PREFIX}${ref.objectNumber}-${ref.generationNumber}`;
+}
+
 function bounds(page: PDFPage): Rect {
   const box = page.getCropBox();
   return [box.x, box.y, box.x + box.width, box.y + box.height];
 }
 
-/** Only our tagged annotations are editable; other highlights and comments stay untouched. */
-export function readMarks(pdf: PDFDocument): PdfMark[] {
-  const marks: PdfMark[] = [];
-  const ids = new Set<string>();
+interface Located {
+  page: PDFPage;
+  index: number;
+  ref?: PDFRef;
+  dict: PDFDict;
+  kind: MarkKind;
+  id: string;
+  foreign: boolean;
+}
+
+/** Every highlight/note annotation this plugin can show and edit, with a stable ID. */
+function locate(pdf: PDFDocument): Located[] {
+  const found: Located[] = [];
   pdf.getPages().forEach((page, index) => {
-    for (const ref of page.node.Annots()?.asArray() ?? []) {
-      const dict = pdf.context.lookup(ref);
+    for (const entry of page.node.Annots()?.asArray() ?? []) {
+      const dict = pdf.context.lookup(entry);
       if (!(dict instanceof PDFDict)) {
         continue;
       }
-      const kind = kindOf(dict);
-      if (!kind) {
+      const own = ownKind(dict);
+      if (own) {
+        found.push({ page, index, dict, kind: own, id: text(dict, 'NM')!, foreign: false });
         continue;
       }
-      const id = text(dict, 'NM')!;
-      if (ids.has(id)) {
-        throw new Error('The PDF contains duplicate highlight IDs.');
+      const foreign = entry instanceof PDFRef ? foreignKind(dict) : undefined;
+      if (foreign && entry instanceof PDFRef) {
+        found.push({
+          page,
+          index,
+          ref: entry,
+          dict,
+          kind: foreign,
+          id: foreignId(entry),
+          foreign: true,
+        });
       }
-      ids.add(id);
-      const rect = numbers(dict, 'Rect');
-      const color = numbers(dict, 'C') ?? [1, 0.9, 0.2];
-      const points = kind === 'highlight' ? numbers(dict, 'QuadPoints') : [];
-      if (rect?.length !== 4 || color.length !== 3 || !points || points.length % 8) {
-        throw new Error('Invalid highlight or comment in this PDF.');
-      }
-      const quads: Rect[] = [];
+    }
+  });
+  return found;
+}
+
+function markOf(item: Located): PdfMark | undefined {
+  const { dict, kind } = item;
+  const raw = numbers(dict, 'Rect');
+  const color = numbers(dict, 'C');
+  if (raw?.length !== 4) {
+    return undefined;
+  }
+  const rect: Rect = [
+    Math.min(raw[0]!, raw[2]!),
+    Math.min(raw[1]!, raw[3]!),
+    Math.max(raw[0]!, raw[2]!),
+    Math.max(raw[1]!, raw[3]!),
+  ];
+  const quads: Rect[] = [];
+  if (kind === 'highlight') {
+    const points = numbers(dict, 'QuadPoints');
+    if (points?.length && points.length % 8 === 0) {
       for (let i = 0; i < points.length; i += 8) {
         const xs = [points[i]!, points[i + 2]!, points[i + 4]!, points[i + 6]!];
         const ys = [points[i + 1]!, points[i + 3]!, points[i + 5]!, points[i + 7]!];
         quads.push([Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)]);
       }
-      const opacity = dict.lookup(PDFName.of('CA'));
-      const mark: PdfMark = {
-        id,
-        page: index + 1,
-        kind,
-        quads,
-        rect: [
-          Math.min(rect[0]!, rect[2]!),
-          Math.min(rect[1]!, rect[3]!),
-          Math.max(rect[0]!, rect[2]!),
-          Math.max(rect[1]!, rect[3]!),
-        ],
-        color: color as PdfColor,
-        opacity: opacity instanceof PDFNumber ? opacity.asNumber() : 1,
-        comment: text(dict, 'Contents') ?? '',
-        modified: text(dict, 'M') ?? pdfDate(new Date(0)),
-      };
-      validateMark(mark, bounds(page));
-      marks.push(mark);
+    } else if (item.foreign) {
+      quads.push(rect);
+    } else {
+      return undefined;
     }
-  });
+  }
+  const opacity = dict.lookup(PDFName.of('CA'));
+  const modified = text(dict, 'M');
+  return {
+    id: item.id,
+    page: item.index + 1,
+    kind,
+    quads,
+    rect: kind === 'highlight' ? unionRect(quads) : rect,
+    // Colour arrays may be gray (1), RGB (3) or CMYK (4) components.
+    color: (color?.length === 3
+      ? color
+      : color?.length === 1
+        ? [color[0]!, color[0]!, color[0]!]
+        : color?.length === 4
+          ? color.slice(0, 3).map((value) => 1 - Math.min(1, value + color[3]!))
+          : [1, 0.85, 0.1]) as PdfColor,
+    opacity: opacity instanceof PDFNumber ? opacity.asNumber() : 1,
+    comment: text(dict, 'Contents') ?? '',
+    modified: modified && /^D:\d{14}/.test(modified) ? modified : pdfDate(new Date(0)),
+    ...(item.foreign ? { foreign: true as const, author: text(dict, 'T') ?? '' } : {}),
+  };
+}
+
+/**
+ * Highlights and notes, our own and other apps'. Our own must be valid (we wrote them);
+ * a foreign annotation we cannot represent faithfully is skipped and left untouched.
+ */
+export function readMarks(pdf: PDFDocument): PdfMark[] {
+  const marks: PdfMark[] = [];
+  const ids = new Set<string>();
+  for (const item of locate(pdf)) {
+    const mark = markOf(item);
+    if (!item.foreign) {
+      if (ids.has(item.id)) {
+        throw new Error('The PDF contains duplicate highlight IDs.');
+      }
+      if (!mark) {
+        throw new Error('Invalid highlight or comment in this PDF.');
+      }
+      validateMark(mark, bounds(item.page));
+    } else {
+      if (!mark || ids.has(item.id)) {
+        continue;
+      }
+      try {
+        validateMark(mark, bounds(item.page));
+      } catch {
+        continue;
+      }
+    }
+    ids.add(item.id);
+    marks.push(mark);
+  }
   return marks;
 }
 
@@ -222,37 +323,74 @@ function noteAppearance(mark: PdfMark): string {
   ].join('\n');
 }
 
-function ownedAnnotations(page: PDFPage, pdf: PDFDocument, id: string): PDFDict[] {
-  return (page.node.Annots()?.asArray() ?? [])
-    .map((ref) => pdf.context.lookup(ref))
-    .filter(
-      (dict): dict is PDFDict =>
-        dict instanceof PDFDict && text(dict, 'NM') === id && !!kindOf(dict),
-    );
+function appearanceStream(pdf: PDFDocument, mark: PdfMark): PDFRef {
+  const context = pdf.context;
+  const [left, bottom, right, top] = mark.rect;
+  const highlight = mark.kind === 'highlight';
+  return context.register(
+    context.flateStream(highlight ? highlightAppearance(mark) : noteAppearance(mark), {
+      Type: 'XObject',
+      Subtype: 'Form',
+      FormType: 1,
+      BBox: [0, 0, right - left, top - bottom],
+      ...(highlight
+        ? {
+            Resources: {
+              ExtGState: {
+                GS0: { Type: 'ExtGState', CA: mark.opacity, ca: mark.opacity, BM: 'Multiply' },
+              },
+            },
+          }
+        : {}),
+    }),
+  );
 }
 
-/** Remove our annotation and its popup from every page. */
-function removeMark(pdf: PDFDocument, id: string): PDFDict[] {
-  const removed: PDFDict[] = [];
-  for (const page of pdf.getPages()) {
-    const annotations = page.node.Annots();
-    if (!annotations) {
-      continue;
-    }
-    const owned = ownedAnnotations(page, pdf, id);
-    const popups = new Set<unknown>(owned.map((dict) => dict.get(PDFName.of('Popup'))));
-    for (let i = annotations.size() - 1; i >= 0; i--) {
-      const ref = annotations.get(i);
-      const dict = annotations.lookup(i);
-      if ((dict instanceof PDFDict && owned.includes(dict)) || popups.has(ref)) {
-        if (dict instanceof PDFDict) {
-          removed.push(dict);
-        }
-        annotations.remove(i);
-      }
+/** Remove an annotation, its popup and any replies to it from its page. */
+function removeLocated(item: Located): void {
+  const annotations = item.page.node.Annots();
+  if (!annotations) {
+    return;
+  }
+  const popup = item.dict.get(PDFName.of('Popup'));
+  for (let i = annotations.size() - 1; i >= 0; i--) {
+    const entry = annotations.get(i);
+    const dict = annotations.lookup(i);
+    const reply =
+      dict instanceof PDFDict && item.ref !== undefined && dict.get(PDFName.of('IRT')) === item.ref;
+    if (dict === item.dict || (popup !== undefined && entry === popup) || reply) {
+      annotations.remove(i);
     }
   }
-  return removed;
+}
+
+const quadPoints = (quads: Rect[]) =>
+  quads.flatMap(([x1, y1, x2, y2]) => [x1, y2, x2, y2, x1, y1, x2, y1]);
+
+/** Change another app's annotation in place, so its author, replies and other keys survive. */
+function updateForeign(pdf: PDFDocument, item: Located, mark: PdfMark, prior: PdfMark): void {
+  const { dict } = item;
+  const context = pdf.context;
+  dict.set(PDFName.of('Contents'), PDFHexString.fromText(mark.comment));
+  // Rich text would override the plain comment in Acrobat; keep a single source of truth.
+  dict.delete(PDFName.of('RC'));
+  dict.set(PDFName.of('M'), PDFString.of(mark.modified));
+  dict.set(PDFName.of('C'), context.obj(mark.color));
+  const recoloured = mark.color.some((value, i) => Math.abs(value - prior.color[i]!) > 0.0005);
+  if (mark.kind === 'highlight') {
+    dict.set(PDFName.of('QuadPoints'), context.obj(quadPoints(mark.quads)));
+    dict.set(PDFName.of('Rect'), context.obj(mark.rect));
+    if (
+      recoloured ||
+      JSON.stringify(mark.quads) !== JSON.stringify(prior.quads) ||
+      !dict.has(PDFName.of('AP'))
+    ) {
+      dict.set(PDFName.of('AP'), context.obj({ N: appearanceStream(pdf, mark) }));
+    }
+  } else if (recoloured) {
+    // Readers draw a note icon from /Name and /C when there is no appearance.
+    dict.delete(PDFName.of('AP'));
+  }
 }
 
 export function writeMarks(
@@ -260,23 +398,27 @@ export function writeMarks(
   changed: Map<string, PdfMark>,
   deleted: Set<string>,
 ): void {
+  const located = new Map(locate(pdf).map((item) => [item.id, item]));
   const existing = new Map(readMarks(pdf).map((mark) => [mark.id, mark]));
   const context = pdf.context;
+  const touched = [...changed.keys(), ...deleted]
+    .map((id) => located.get(id))
+    .filter((item): item is Located => !!item);
   const replaced = referencedObjects(
     pdf,
-    pdf
-      .getPages()
-      .flatMap((page) =>
-        [...changed.keys(), ...deleted]
-          .flatMap((id) => ownedAnnotations(page, pdf, id))
-          .flatMap((dict) => [dict.get(PDFName.of('AP')), dict.get(PDFName.of('Popup'))]),
-      ),
+    touched.flatMap((item) => [
+      item.dict.get(PDFName.of('AP')),
+      item.dict.get(PDFName.of('Popup')),
+    ]),
   );
   for (const id of deleted) {
-    if (!id.startsWith(MARK_PREFIX)) {
-      throw new Error('Only highlights and comments made by this plugin can be removed.');
+    if (!id.startsWith(MARK_PREFIX) && !id.startsWith(FOREIGN_PREFIX)) {
+      throw new Error('This annotation cannot be removed.');
     }
-    removeMark(pdf, id);
+    const item = located.get(id);
+    if (item) {
+      removeLocated(item);
+    }
   }
   for (const mark of changed.values()) {
     if (deleted.has(mark.id)) {
@@ -291,28 +433,21 @@ export function writeMarks(
       throw new Error('The highlight page no longer exists.');
     }
     validateMark(mark, bounds(page));
-    if (prior) {
-      removeMark(pdf, mark.id);
+    if (mark.id.startsWith(FOREIGN_PREFIX)) {
+      const item = located.get(mark.id);
+      if (!item || !prior) {
+        throw new Error('This highlight changed in the PDF. Reload it before editing.');
+      }
+      updateForeign(pdf, item, mark, prior);
+      continue;
     }
-    const [left, bottom, right, top] = mark.rect;
+    const item = located.get(mark.id);
+    if (item) {
+      removeLocated(item);
+    }
+    const [, , right, top] = mark.rect;
     const highlight = mark.kind === 'highlight';
-    const ap = context.register(
-      context.flateStream(highlight ? highlightAppearance(mark) : noteAppearance(mark), {
-        Type: 'XObject',
-        Subtype: 'Form',
-        FormType: 1,
-        BBox: [0, 0, right - left, top - bottom],
-        ...(highlight
-          ? {
-              Resources: {
-                ExtGState: {
-                  GS0: { Type: 'ExtGState', CA: mark.opacity, ca: mark.opacity, BM: 'Multiply' },
-                },
-              },
-            }
-          : {}),
-      }),
-    );
+    const ap = appearanceStream(pdf, mark);
     const annotRef = context.nextRef();
     const popupRef = context.nextRef();
     const annotation = context.obj({
@@ -333,10 +468,7 @@ export function writeMarks(
       AP: { N: ap },
     });
     if (highlight) {
-      annotation.set(
-        PDFName.of('QuadPoints'),
-        context.obj(mark.quads.flatMap(([x1, y1, x2, y2]) => [x1, y2, x2, y2, x1, y1, x2, y1])),
-      );
+      annotation.set(PDFName.of('QuadPoints'), context.obj(quadPoints(mark.quads)));
     } else {
       annotation.set(PDFName.of('Name'), PDFName.of('Comment'));
       annotation.set(PDFName.of('Open'), context.obj(false));
@@ -394,26 +526,12 @@ export function verifyMarks(
   }
 }
 
-/** Display copy: our marks are painted live by the editor, so drop them and their popups. */
+/** Display copy: editable marks (ours and other apps') are painted live, so drop them and their popups. */
 export function stripMarks(pdf: PDFDocument): void {
-  for (const page of pdf.getPages()) {
-    const annotations = page.node.Annots();
-    if (!annotations) {
-      continue;
-    }
-    const popups = new Set<unknown>();
-    for (let i = annotations.size() - 1; i >= 0; i--) {
-      const dict = annotations.lookup(i);
-      if (dict instanceof PDFDict && kindOf(dict)) {
-        popups.add(dict.get(PDFName.of('Popup')));
-        annotations.remove(i);
-      }
-    }
-    for (let i = annotations.size() - 1; i >= 0; i--) {
-      if (popups.has(annotations.get(i))) {
-        annotations.remove(i);
-      }
-    }
+  const shown = new Set(readMarks(pdf).map((mark) => mark.id));
+  const items = locate(pdf).filter((item) => shown.has(item.id));
+  for (const item of items.reverse()) {
+    removeLocated(item);
   }
 }
 

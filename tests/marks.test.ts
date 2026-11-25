@@ -90,7 +90,7 @@ test('highlights and notes are saved as standard annotations other readers show'
   assert.equal(session.status, 'saved');
 
   // Our own reader.
-  const marks = (await readTextPdf(file.bytes())).marks!;
+  const marks = (await readTextPdf(file.bytes())).marks!.filter((mark) => !mark.foreign);
   assert.deepEqual(
     marks.map((mark) => [mark.kind, mark.comment]),
     [
@@ -128,7 +128,8 @@ test('highlights and notes are saved as standard annotations other readers show'
     .map((ref) => pdf.context.lookup(ref, PDFDict));
   const subtypes = dicts.map((dict) => dict.get(PDFName.of('Subtype'))?.toString());
   assert.deepEqual(subtypes.sort(), ['/Highlight', '/Highlight', '/Popup']);
-  const saved = (await readTextPdf(file.bytes())).marks!;
+  // The foreign highlight is listed too, but marked as made elsewhere.
+  const saved = (await readTextPdf(file.bytes())).marks!.filter((mark) => !mark.foreign);
   assert.equal(saved.length, 1);
   assert.equal(saved[0]!.comment, 'Geändert');
   assert.deepEqual(saved[0]!.color, [0.4, 0.9, 0.4]);
@@ -159,7 +160,7 @@ test('undo and redo restore highlights and comments', async () => {
   assert.equal((await readTextPdf(file.bytes())).marks![0]!.comment, 'AB');
 });
 
-test('invalid highlights are rejected and the display copy omits our marks only', async () => {
+test('invalid highlights are rejected and the display copy omits editable marks', async () => {
   const file = memory(await textPdf(true));
   const session = await TextSession.open(file.store, font);
   assert.throws(
@@ -178,7 +179,8 @@ test('invalid highlights are rejected and the display copy omits our marks only'
     .node.Annots()!
     .asArray()
     .map((ref) => display.context.lookup(ref, PDFDict).get(PDFName.of('Subtype'))?.toString());
-  assert.deepEqual(left, ['/Highlight']);
+  // Our note and the foreign highlight are both painted live by the editor.
+  assert.deepEqual(left, []);
 });
 
 test('removing part of a highlight keeps the rest of the line and the comment', async () => {
@@ -224,4 +226,121 @@ test('removing part of a highlight keeps the rest of the line and the comment', 
   assert.equal(saved.length, 1);
   assert.equal(saved[0]!.id, mark.id);
   assert.deepEqual(saved[0]!.quads, [[120, 338, 200, 352]]);
+});
+
+async function acrobatPdf(): Promise<Uint8Array> {
+  const pdf = await PDFDocument.create();
+  const page = pdf.addPage([400, 400]);
+  const context = pdf.context;
+  const ap = context.register(
+    context.flateStream('1 1 0 rg 0 0 160 14 re f', {
+      Type: 'XObject',
+      Subtype: 'Form',
+      BBox: [0, 0, 160, 14],
+    }),
+  );
+  const highlight = context.register(
+    context.obj({
+      Type: 'Annot',
+      Subtype: 'Highlight',
+      Rect: [40, 338, 200, 352],
+      QuadPoints: [40, 352, 200, 352, 40, 338, 200, 338],
+      C: [1, 1, 0],
+      T: PDFHexString.fromText('Anna (Acrobat)'),
+      Contents: PDFHexString.fromText('Alt'),
+      RC: PDFHexString.fromText('<body><p>Alt</p></body>'),
+      AP: { N: ap },
+    }),
+  );
+  const reply = context.register(
+    context.obj({
+      Type: 'Annot',
+      Subtype: 'Text',
+      Rect: [210, 338, 230, 358],
+      IRT: highlight,
+      Contents: PDFHexString.fromText('Antwort'),
+    }),
+  );
+  const note = context.register(
+    context.obj({
+      Type: 'Annot',
+      Subtype: 'Text',
+      Rect: [300, 300, 324, 324],
+      Name: 'Comment',
+      C: [1, 0.8, 0],
+      Contents: PDFHexString.fromText('Okular-Notiz'),
+      T: PDFHexString.fromText('Ben'),
+    }),
+  );
+  const hidden = context.register(
+    context.obj({
+      Type: 'Annot',
+      Subtype: 'Highlight',
+      F: 2,
+      Rect: [40, 100, 80, 112],
+      QuadPoints: [40, 112, 80, 112, 40, 100, 80, 100],
+    }),
+  );
+  for (const ref of [highlight, reply, note, hidden]) {
+    page.node.addAnnot(ref);
+  }
+  return pdf.save();
+}
+
+test('highlights and notes from other apps can be edited, re-coloured, trimmed and deleted', async () => {
+  const file = memory(await acrobatPdf());
+  const session = await TextSession.open(file.store, font);
+  const marks = session.snapshot.marks!;
+  // Replies and hidden annotations are not offered for editing.
+  assert.deepEqual(
+    marks.map((mark) => [mark.kind, mark.comment, mark.author, mark.foreign]),
+    [
+      ['highlight', 'Alt', 'Anna (Acrobat)', true],
+      ['note', 'Okular-Notiz', 'Ben', true],
+    ],
+  );
+  const [highlight, note] = marks;
+  session.updateMark(highlight!.id, { comment: 'Neu', color: [0.45, 0.9, 0.45] });
+  session.eraseHighlights(1, [[150, 338, 200, 352]]);
+  session.updateMark(note!.id, { comment: 'Erledigt' });
+  await session.save();
+
+  const pdf = await PDFDocument.load(file.bytes());
+  const dicts = pdf
+    .getPages()[0]!
+    .node.Annots()!
+    .asArray()
+    .map((ref) => pdf.context.lookup(ref, PDFDict));
+  const edited = dicts.find(
+    (dict) =>
+      dict.get(PDFName.of('Subtype'))?.toString() === '/Highlight' && !dict.has(PDFName.of('F')),
+  )!;
+  // Edited in place: author kept, rich text dropped so readers show the new comment.
+  assert.equal(edited.lookup(PDFName.of('T'), PDFHexString).decodeText(), 'Anna (Acrobat)');
+  assert.equal(edited.lookup(PDFName.of('Contents'), PDFHexString).decodeText(), 'Neu');
+  assert.equal(edited.has(PDFName.of('RC')), false);
+  const reread = (await readTextPdf(file.bytes())).marks!;
+  assert.deepEqual(reread[0]!.quads, [[40, 338, 150, 352]]);
+  assert.deepEqual(reread[0]!.color, [0.45, 0.9, 0.45]);
+  assert.equal(reread[1]!.comment, 'Erledigt');
+
+  // PDF.js shows the edited comment.
+  const document = await getDocument({ data: file.bytes().slice() }).promise;
+  const shown = await (await document.getPage(1)).getAnnotations();
+  assert.ok(shown.some((item) => item.subtype === 'Highlight' && item.contentsObj?.str === 'Neu'));
+  await document.destroy();
+
+  // Deleting removes the highlight together with its reply; the hidden one stays.
+  session.deleteMark(highlight!.id);
+  await session.save();
+  const after = await PDFDocument.load(file.bytes());
+  const left = after
+    .getPages()[0]!
+    .node.Annots()!
+    .asArray()
+    .map((ref) => after.context.lookup(ref, PDFDict))
+    .map(
+      (dict) => dict.lookupMaybe(PDFName.of('Contents'), PDFHexString)?.decodeText() ?? '(hidden)',
+    );
+  assert.deepEqual(left, ['Erledigt', '(hidden)']);
 });
