@@ -1415,3 +1415,90 @@ button.pfs-choice.is-round {
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
 }
+
+/* Shapes: rectangles, ellipses, lines and arrows. */
+.pdf-form-studio-layer[data-tool='shape'] {
+  pointer-events: auto;
+  cursor: crosshair;
+  touch-action: none;
+}
+.pfs-shapes {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+.pfs-shapes .pfs-shape-hit,
+.pfs-shapes .pfs-shape-handle {
+  pointer-events: none;
+}
+.pfs-shapes[data-tool='select'] .pfs-shape-hit {
+  pointer-events: visiblePainted;
+  cursor: move;
+}
+.pfs-shapes[data-tool='select'] .pfs-shape-hit[fill='none'] {
+  pointer-events: stroke;
+}
+.pfs-shapes[data-tool='select'] .pfs-shape-handle {
+  pointer-events: all;
+  cursor: nwse-resize;
+}
+.pfs-shape-outline {
+  fill: none;
+  stroke: var(--interactive-accent, #1476e5);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
+.pfs-shape-handle {
+  fill: var(--background-primary, #fff);
+  stroke: var(--interactive-accent, #1476e5);
+  stroke-width: 1.5;
+}
+.pfs-shape.is-preview {
+  opacity: 0.7;
+}
+.pfs-shape-menu {
+  position: fixed;
+  z-index: var(--layer-menu, 65);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-s);
+}
+.pfs-shape-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.pfs-shape-choice[aria-pressed='true'] {
+  background: var(--background-modifier-active-hover);
+  color: var(--interactive-accent);
+}
+.pfs-shape-choice.pfs-mark-swatch[aria-pressed='true'] {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 1px;
+}
+.pfs-shape-fill-choice::before {
+  content: '';
+  width: 14px;
+  height: 14px;
+  border: 2px solid currentColor;
+  border-radius: 2px;
+}
+.pfs-shape-fill-choice.is-filled::before {
+  background: currentColor;
+}
+.pfs-shape-width-choice::before {
+  content: '';
+  width: 18px;
+  height: var(--pfs-line-width, 2px);
+  background: currentColor;
+}
+.pdf-form-studio-toolbar .pfs-shape-options-button {
+  width: 18px;
+  min-width: 18px;
+}

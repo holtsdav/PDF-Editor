@@ -2475,3 +2475,97 @@ test('pressing highlight again on highlighted text removes that highlight', asyn
     f.dispose();
   }
 });
+
+test('shapes are drawn by dragging, then selected, moved, resized, restyled and deleted', async () => {
+  const f = await fixture();
+  try {
+    const layer = f.doc.querySelector<HTMLElement>('.pdf-form-studio-layer')!;
+    // Choose "Ellipse, filled, blue, 4 pt" in the shape menu.
+    f.tool('Shape options');
+    const pick = (label: string) => {
+      const element = f.doc.querySelector<HTMLButtonElement>(
+        `.pfs-shape-menu [aria-label="${label}"]`,
+      )!;
+      assert.ok(element, label);
+      f.pointer(element, 'pointerdown');
+      element.click();
+    };
+    pick('Ellipse');
+    pick('Filled');
+    pick('Blue');
+    pick('4 pt line');
+    f.pointer(f.doc.body, 'pointerdown');
+    assert.equal(f.doc.querySelector('.pfs-shape-menu'), null, 'menu closes on outside click');
+    assert.equal(layer.dataset.tool, 'shape');
+
+    // Drag from (100,100) to (200,160) in viewport pixels = PDF y flipped on a 800 pt page.
+    f.pointer(layer, 'pointerdown', 100, 100);
+    f.pointer(layer, 'pointermove', 200, 160);
+    assert.ok(f.doc.querySelector('.pfs-shape.is-preview ellipse'), 'live preview while dragging');
+    f.pointer(layer, 'pointerup', 200, 160);
+    const [ellipse] = f.session.snapshot.shapes!;
+    assert.deepEqual(
+      [ellipse!.kind, ellipse!.box, ellipse!.fill, ellipse!.color, ellipse!.width],
+      ['ellipse', [100, 640, 200, 700], [0.15, 0.4, 0.85], [0.15, 0.4, 0.85], 4],
+    );
+    // Like Word: the new shape is selected, with handles, and the select tool is back.
+    assert.equal(layer.dataset.tool, 'select');
+    assert.equal(f.doc.querySelectorAll('.pfs-shape-handle').length, 4);
+
+    // Drag the shape by 20/10 px.
+    const hit = f.doc.querySelector('.pfs-shape-hit')!;
+    // Pressing repaints the selection, so later events come from wherever the pointer is.
+    f.pointer(hit, 'pointerdown', 150, 130);
+    f.pointer(f.doc.body, 'pointermove', 170, 140);
+    f.pointer(f.doc.body, 'pointerup', 170, 140);
+    assert.deepEqual(f.session.snapshot.shapes![0]!.box, [120, 630, 220, 690]);
+    // Resize from the south-east handle.
+    const se = f.doc.querySelector('.pfs-shape-handle[data-handle="se"]')!;
+    f.pointer(se, 'pointerdown', 220, 170);
+    f.pointer(f.doc.body, 'pointermove', 260, 200);
+    f.pointer(f.doc.body, 'pointerup', 260, 200);
+    assert.deepEqual(f.session.snapshot.shapes![0]!.box, [120, 600, 260, 690]);
+    // Arrow keys nudge the selected shape instead of turning pages.
+    const right = f.key('ArrowRight', { shiftKey: true });
+    f.doc.body.dispatchEvent(right);
+    assert.equal(right.defaultPrevented, true);
+    assert.deepEqual(f.session.snapshot.shapes![0]!.box, [130, 600, 270, 690]);
+    // Restyle the selected shape from the menu: outline only, red.
+    f.tool('Shape options');
+    pick('Outline only');
+    pick('Red');
+    assert.equal(f.session.snapshot.shapes![0]!.fill, undefined);
+    assert.deepEqual(f.session.snapshot.shapes![0]!.color, [0.85, 0.15, 0.15]);
+    f.pointer(f.doc.querySelector('.pfs-shape-hit')!, 'pointerdown', 130, 150);
+    f.pointer(f.doc.body, 'pointerup', 130, 150);
+
+    // An arrow, with Shift snapping to 45°.
+    f.tool('Shape options');
+    pick('Arrow');
+    f.pointer(f.doc.body, 'pointerdown');
+    f.pointer(layer, 'pointerdown', 300, 300);
+    f.pointer(layer, 'pointermove', 400, 310, true);
+    f.pointer(layer, 'pointerup', 400, 310, true);
+    const arrow = f.session.snapshot.shapes![1]!;
+    assert.equal(arrow.kind, 'arrow');
+    assert.ok(Math.abs(arrow.end![1] - arrow.start![1]) < 0.001, 'snapped horizontal');
+    assert.ok(f.doc.querySelector('.pfs-shape polygon'), 'arrow head painted');
+
+    // Delete removes the selected shape; undo brings it back; the PDF keeps both.
+    const del = f.key('Delete');
+    f.doc.body.dispatchEvent(del);
+    assert.equal(f.session.snapshot.shapes!.length, 1);
+    f.session.undoStroke();
+    assert.equal(f.session.snapshot.shapes!.length, 2);
+    await f.session.save();
+    const document = await getDocument({ data: f.bytes().slice() }).promise;
+    const annotations = await (await document.getPage(1)).getAnnotations();
+    assert.deepEqual(
+      annotations.map((item) => item.subtype),
+      ['Circle', 'Line'],
+    );
+    await document.destroy();
+  } finally {
+    f.dispose();
+  }
+});

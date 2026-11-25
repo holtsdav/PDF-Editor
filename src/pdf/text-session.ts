@@ -33,6 +33,8 @@ import {
   validateMark,
 } from './mark-engine.ts';
 import type { MarkKind, PdfMark } from './mark-engine.ts';
+import { SHAPE_PREFIX, validateShape } from './shape-engine.ts';
+import type { PdfShape, Point as ShapePoint, ShapeKind } from './shape-engine.ts';
 
 const MAX_HISTORY_ENTRIES = 50;
 
@@ -53,6 +55,9 @@ type TextState = {
   markList?: PdfMark[];
   marks?: Map<string, PdfMark>;
   deletedMarks?: Set<string>;
+  shapeList?: PdfShape[];
+  shapes?: Map<string, PdfShape>;
+  deletedShapes?: Set<string>;
   values: TextChanges['values'];
   added: TextChanges['added'];
   boxes: TextChanges['boxes'];
@@ -113,6 +118,8 @@ const emptyChanges = (): TextChanges => ({
   choices: new Map(),
   marks: new Map(),
   deletedMarks: new Set(),
+  shapes: new Map(),
+  deletedShapes: new Set(),
 });
 
 /** One session per vault PDF; every view shares its model and serialized writer. */
@@ -374,6 +381,104 @@ export class TextSession {
     }
     mark.modified = pdfDate();
     (this.changes.marks ??= new Map()).set(id, structuredClone(mark));
+    this.changed();
+  }
+
+  /** Draw a rectangle/ellipse (box) or a line/arrow (start → end), in PDF points. */
+  addShape(input: {
+    page: number;
+    kind: ShapeKind;
+    box?: Rect;
+    start?: ShapePoint;
+    end?: ShapePoint;
+    color: PdfColor;
+    fill?: PdfColor;
+    width: number;
+    opacity?: number;
+  }): PdfShape {
+    this.assertEditable();
+    const bounds = this.snapshot.pages[input.page - 1];
+    if (!bounds) {
+      throw new Error('The page no longer exists.');
+    }
+    const boxed = input.kind === 'rectangle' || input.kind === 'ellipse';
+    const shape: PdfShape = {
+      id: `${SHAPE_PREFIX}${crypto.randomUUID()}`,
+      page: input.page,
+      kind: input.kind,
+      ...(boxed
+        ? { box: [...input.box!] as Rect }
+        : { start: [...input.start!] as ShapePoint, end: [...input.end!] as ShapePoint }),
+      color: [...input.color] as PdfColor,
+      ...(boxed && input.fill ? { fill: [...input.fill] as PdfColor } : {}),
+      width: input.width,
+      opacity: input.opacity ?? 1,
+      modified: pdfDate(),
+    };
+    validateShape(shape, bounds);
+    this.rememberText(`shape:${shape.id}`, false);
+    (this.snapshot.shapes ??= []).push(shape);
+    (this.changes.shapes ??= new Map()).set(shape.id, structuredClone(shape));
+    this.changed();
+    return shape;
+  }
+
+  /** Move, resize or restyle a shape (one undo step each). */
+  updateShape(
+    id: string,
+    update: Partial<Pick<PdfShape, 'box' | 'start' | 'end' | 'color' | 'width'>> & {
+      fill?: PdfColor | null;
+    },
+  ): void {
+    this.assertEditable();
+    const shape = this.snapshot.shapes?.find((item) => item.id === id);
+    if (!shape) {
+      throw new Error('This shape no longer exists.');
+    }
+    const next: PdfShape = structuredClone(shape);
+    if (update.box) {
+      next.box = [...update.box] as Rect;
+    }
+    if (update.start) {
+      next.start = [...update.start] as ShapePoint;
+    }
+    if (update.end) {
+      next.end = [...update.end] as ShapePoint;
+    }
+    if (update.color) {
+      next.color = [...update.color] as PdfColor;
+    }
+    if (update.width !== undefined) {
+      next.width = update.width;
+    }
+    if (update.fill === null) {
+      delete next.fill;
+    } else if (update.fill && (next.kind === 'rectangle' || next.kind === 'ellipse')) {
+      next.fill = [...update.fill] as PdfColor;
+    }
+    next.modified = pdfDate();
+    validateShape(next, this.snapshot.pages[shape.page - 1]!);
+    if (JSON.stringify({ ...next, modified: '' }) === JSON.stringify({ ...shape, modified: '' })) {
+      return;
+    }
+    this.rememberText(`shape:${id}`, false);
+    Object.assign(shape, next);
+    if (!next.fill) {
+      delete shape.fill;
+    }
+    (this.changes.shapes ??= new Map()).set(id, structuredClone(shape));
+    this.changed();
+  }
+
+  deleteShape(id: string): void {
+    this.assertEditable();
+    if (!this.snapshot.shapes?.some((item) => item.id === id)) {
+      return;
+    }
+    this.rememberText(`shape:${id}`, false);
+    this.snapshot.shapes = this.snapshot.shapes.filter((item) => item.id !== id);
+    this.changes.shapes?.delete(id);
+    (this.changes.deletedShapes ??= new Set()).add(id);
     this.changed();
   }
 
@@ -805,7 +910,18 @@ export class TextSession {
   }
 
   private textState(): TextState {
-    const { values, added, boxes, deleted, formats, choices, marks, deletedMarks } = this.changes;
+    const {
+      values,
+      added,
+      boxes,
+      deleted,
+      formats,
+      choices,
+      marks,
+      deletedMarks,
+      shapes,
+      deletedShapes,
+    } = this.changes;
     return structuredClone({
       fields: this.snapshot.fields,
       choiceFields: this.snapshot.choices,
@@ -813,6 +929,9 @@ export class TextSession {
       markList: this.snapshot.marks,
       marks,
       deletedMarks,
+      shapeList: this.snapshot.shapes,
+      shapes,
+      deletedShapes,
       values,
       added,
       boxes,
@@ -842,13 +961,16 @@ export class TextSession {
       this.restoreInk(entry.strokes);
       return;
     }
-    const { fields, choiceFields, markList, ...changes } = structuredClone(entry.state);
+    const { fields, choiceFields, markList, shapeList, ...changes } = structuredClone(entry.state);
     this.snapshot.fields = fields;
     if (choiceFields) {
       this.snapshot.choices = choiceFields;
     }
     if (markList) {
       this.snapshot.marks = markList;
+    }
+    if (shapeList) {
+      this.snapshot.shapes = shapeList;
     }
     Object.assign(this.changes, changes);
     if (entry.kind === 'objects') {

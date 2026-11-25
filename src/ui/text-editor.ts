@@ -23,6 +23,25 @@ import type { ChoiceField, ChoiceWidget } from '../pdf/choice-engine';
 import { lineQuads } from '../pdf/mark-engine';
 import { continueList, indent, toggleList } from '../pdf/list-format';
 import type { TextEdit } from '../pdf/list-format';
+import { ShapeLayer } from './shape-layer';
+import type { ShapeStyle } from './shape-layer';
+import type { ShapeKind } from '../pdf/shape-engine';
+
+const SHAPE_KINDS: { kind: ShapeKind; label: string; icon: string }[] = [
+  { kind: 'rectangle', label: 'Rectangle', icon: 'square' },
+  { kind: 'ellipse', label: 'Ellipse', icon: 'circle' },
+  { kind: 'line', label: 'Line', icon: 'minus' },
+  { kind: 'arrow', label: 'Arrow', icon: 'move-up-right' },
+];
+const SHAPE_COLORS: { name: string; color: PdfColor }[] = [
+  { name: 'Red', color: [0.85, 0.15, 0.15] },
+  { name: 'Blue', color: [0.15, 0.4, 0.85] },
+  { name: 'Green', color: [0.15, 0.6, 0.25] },
+  { name: 'Orange', color: [0.95, 0.55, 0.1] },
+  { name: 'Yellow', color: [1, 0.85, 0.1] },
+  { name: 'Black', color: [0.1, 0.1, 0.1] },
+];
+const SHAPE_WIDTHS = [1, 2, 4];
 import type { PdfMark } from '../pdf/mark-engine';
 
 const MARK_COLORS: { name: string; color: PdfColor }[] = [
@@ -84,6 +103,7 @@ interface PageLayer {
   highlights?: HTMLElement;
   /** Comment badges of highlights (above the page, clickable). */
   badges?: Map<string, HTMLElement>;
+  shapes?: ShapeLayer;
   ink: InkLayer;
   cancelPlacement?: () => void;
   placing?: () => boolean;
@@ -169,6 +189,15 @@ export class TextEditor extends Component {
   };
   private markClickPages = new WeakSet<HTMLElement>();
   private listEditing = false;
+  private shapeStyle: ShapeStyle = {
+    kind: 'rectangle',
+    filled: false,
+    color: SHAPE_COLORS[0]!.color,
+    width: 2,
+  };
+  private selectedShape?: string;
+  private shapeMenu?: HTMLElement;
+  private closeShapeMenuListeners?: () => void;
   private listGroup!: HTMLElement;
   private listInput?: { input: HTMLTextAreaElement; name: string };
   private highlightButton!: HTMLButtonElement;
@@ -266,6 +295,7 @@ export class TextEditor extends Component {
       ['scribble', 'Pen', 'pencil'],
       ['eraser', 'Eraser', 'eraser'],
       ['note', 'Add comment note', 'message-square-plus'],
+      ['shape', 'Draw shapes', 'square'],
     ] as const) {
       this.tools.set(
         tool,
@@ -279,6 +309,13 @@ export class TextEditor extends Component {
       );
       if (tool === 'text') {
         this.toolbar.append(this.native.answerLineButton());
+      }
+      if (tool === 'shape') {
+        const options = button(this.toolbar, 'Shape options', 'chevron-down', () =>
+          this.toggleShapeMenu(options),
+        );
+        options.classList.add('pfs-shape-options-button');
+        this.register(() => this.closeShapeMenu());
       }
     }
     // Highlight the PDF text selected on the page, with a colour menu.
@@ -426,6 +463,93 @@ export class TextEditor extends Component {
       this.markPopover?.element.remove();
       this.markPopover = undefined;
     });
+    // Shapes: a click elsewhere deselects; keys delete, nudge or deselect the selected shape.
+    this.registerDomEvent(
+      doc,
+      'pointerdown',
+      (event) => {
+        const target = event.target;
+        if (
+          this.selectedShape &&
+          !(
+            target instanceof doc.defaultView!.Element &&
+            (target.closest('.pfs-shape-hit, .pfs-shape-handle, .pfs-shape-menu') ||
+              this.toolbar.contains(target))
+          )
+        ) {
+          this.selectedShape = undefined;
+          this.refresh();
+        }
+      },
+      true,
+    );
+    this.registerDomEvent(
+      doc,
+      'keydown',
+      (event) => {
+        const id = this.selectedShape;
+        const target = event.target;
+        if (
+          !id ||
+          !this.session ||
+          event.metaKey ||
+          event.ctrlKey ||
+          event.altKey ||
+          (target instanceof doc.defaultView!.Element &&
+            target.closest('input, textarea, select, [contenteditable="true"]'))
+        ) {
+          return;
+        }
+        const shape = this.session.snapshot.shapes?.find((item) => item.id === id);
+        if (!shape) {
+          return;
+        }
+        const step = event.shiftKey ? 10 : 1;
+        const delta: Record<string, [number, number]> = {
+          ArrowLeft: [-step, 0],
+          ArrowRight: [step, 0],
+          ArrowUp: [0, step],
+          ArrowDown: [0, -step],
+        };
+        try {
+          if (event.key === 'Delete' || event.key === 'Backspace') {
+            this.session.deleteShape(id);
+            this.selectedShape = undefined;
+          } else if (event.key === 'Escape') {
+            this.selectedShape = undefined;
+            this.refresh();
+          } else if (delta[event.key]) {
+            const [dx, dy] = delta[event.key]!;
+            const bounds = this.session.snapshot.pages[shape.page - 1]!;
+            const extent = shape.box ?? [
+              Math.min(shape.start![0], shape.end![0]),
+              Math.min(shape.start![1], shape.end![1]),
+              Math.max(shape.start![0], shape.end![0]),
+              Math.max(shape.start![1], shape.end![1]),
+            ];
+            const x = Math.max(bounds[0] - extent[0], Math.min(bounds[2] - extent[2], dx));
+            const y = Math.max(bounds[1] - extent[1], Math.min(bounds[3] - extent[3], dy));
+            this.session.updateShape(
+              id,
+              shape.box
+                ? { box: [shape.box[0] + x, shape.box[1] + y, shape.box[2] + x, shape.box[3] + y] }
+                : {
+                    start: [shape.start![0] + x, shape.start![1] + y],
+                    end: [shape.end![0] + x, shape.end![1] + y],
+                  },
+            );
+          } else {
+            return;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+          this.scheduleSave();
+        } catch (error) {
+          this.showError(error);
+        }
+      },
+      true,
+    );
     this.registerDomEvent(
       doc,
       'pointerdown',
@@ -571,6 +695,7 @@ export class TextEditor extends Component {
               h: 'marker',
               e: 'eraser',
               n: 'note',
+              r: 'shape',
             };
             const tool = shortcut[event.key.toLowerCase()];
             if (tool) {
@@ -942,6 +1067,9 @@ export class TextEditor extends Component {
       active.blur();
     }
     this.tool = tool;
+    if (tool !== 'select') {
+      this.selectedShape = undefined;
+    }
     this.hideSelectionBar();
     this.closeMarkPopover();
     this.selected = retain;
@@ -1439,6 +1567,7 @@ export class TextEditor extends Component {
       this.toolbar.contains(target) ||
       !!this.popover?.element.contains(target) ||
       !!this.highlightColors?.contains(target) ||
+      !!this.shapeMenu?.contains(target) ||
       (this.openingPopover && !!target.closest('.pfs-tool-popover'))
     );
   }
@@ -2296,6 +2425,7 @@ export class TextEditor extends Component {
           this.releaseFocus();
         }
         entry.cancelPlacement?.();
+        entry.shapes?.dispose();
         this.removeChild(entry.ink);
         for (const control of entry.controls.values()) {
           control.dispose?.();
@@ -2365,6 +2495,7 @@ export class TextEditor extends Component {
         this.layers.set(page.div, entry);
         this.bindPlacement(entry);
         this.bindMarks(page.div, layer);
+        entry.shapes = this.shapeLayer(page, layer);
       }
       entry.page = page;
       entry.layer.dataset.tool = this.tool;
@@ -2436,6 +2567,7 @@ export class TextEditor extends Component {
       }
       this.refreshChoices(entry);
       this.refreshMarks(entry);
+      (entry.shapes ??= this.shapeLayer(entry.page, entry.layer)).update(entry.page, this.session);
       // Explicit reload/recovery can replace pages. Restore focus only when
       // the user has not deliberately moved it elsewhere.
       const active = page.div.ownerDocument.activeElement;
@@ -2961,6 +3093,160 @@ export class TextEditor extends Component {
         this.openMarkPopover(entry, mark.id, false);
       }
     });
+  }
+
+  private shapeLayer(page: NativePage, layer: HTMLElement): ShapeLayer {
+    return new ShapeLayer(page, layer, this.session!, {
+      tool: () => this.tool,
+      style: () => this.shapeStyle,
+      selected: () => this.selectedShape,
+      select: (id) => {
+        this.selectedShape = id;
+        this.selected = undefined;
+        this.selectedStroke = undefined;
+        this.refresh();
+      },
+      drawn: (id) => {
+        // Like Word: after drawing, the new shape is selected for moving or resizing.
+        this.setTool('select');
+        this.selectedShape = id;
+        this.refresh();
+      },
+      changed: () => this.scheduleSave(),
+      error: (error) => this.showError(error),
+    });
+  }
+
+  /** Shape kind, outline/filled, colour and line width; also restyles the selected shape. */
+  private toggleShapeMenu(anchor: HTMLElement): void {
+    if (this.shapeMenu) {
+      this.closeShapeMenu();
+      return;
+    }
+    const doc = anchor.ownerDocument;
+    const menu = doc.createElement('div');
+    menu.className = 'pfs-shape-menu pfs-mark-ui';
+    menu.setAttribute('role', 'dialog');
+    menu.setAttribute('aria-label', 'Shape options');
+    const row = (label: string) => {
+      const element = doc.createElement('div');
+      element.className = 'pfs-shape-menu-row';
+      element.setAttribute('role', 'group');
+      element.setAttribute('aria-label', label);
+      menu.append(element);
+      return element;
+    };
+    const choice = (parent: HTMLElement, label: string, pressed: boolean, apply: () => void) => {
+      const element = doc.createElement('button');
+      element.type = 'button';
+      element.className = 'clickable-icon pfs-shape-choice';
+      element.setAttribute('aria-pressed', String(pressed));
+      setTooltip(element, label);
+      element.addEventListener('pointerdown', (event) => event.preventDefault());
+      element.addEventListener('click', () => {
+        apply();
+        this.closeShapeMenu();
+        this.toggleShapeMenu(anchor);
+      });
+      parent.append(element);
+      return element;
+    };
+    const selected = () =>
+      this.session?.snapshot.shapes?.find((item) => item.id === this.selectedShape);
+    const restyle = (update: Parameters<TextSession['updateShape']>[1]) => {
+      const shape = selected();
+      if (shape) {
+        try {
+          this.session!.updateShape(shape.id, update);
+          this.scheduleSave();
+        } catch (error) {
+          this.showError(error);
+        }
+      }
+    };
+    const kinds = row('Shape');
+    for (const { kind, label, icon } of SHAPE_KINDS) {
+      setIcon(
+        choice(kinds, label, this.shapeStyle.kind === kind, () => {
+          this.shapeStyle = { ...this.shapeStyle, kind };
+          setIcon(this.tools.get('shape')!, icon);
+          this.setTool('shape');
+        }),
+        icon,
+      );
+    }
+    const fill = row('Fill');
+    const boxedKind = this.shapeStyle.kind === 'rectangle' || this.shapeStyle.kind === 'ellipse';
+    for (const filled of [false, true]) {
+      const element = choice(
+        fill,
+        filled ? 'Filled' : 'Outline only',
+        this.shapeStyle.filled === filled,
+        () => {
+          this.shapeStyle = { ...this.shapeStyle, filled };
+          restyle({ fill: filled ? (selected()?.color ?? this.shapeStyle.color) : null });
+        },
+      );
+      element.classList.add('pfs-shape-fill-choice');
+      element.classList.toggle('is-filled', filled);
+      element.disabled = !boxedKind && !selected()?.box;
+    }
+    const colors = row('Colour');
+    for (const { name, color } of SHAPE_COLORS) {
+      const element = choice(
+        colors,
+        name,
+        color.every((v, i) => v === this.shapeStyle.color[i]),
+        () => {
+          this.shapeStyle = { ...this.shapeStyle, color };
+          const shape = selected();
+          restyle({ color, ...(shape?.fill ? { fill: color } : {}) });
+        },
+      );
+      element.classList.add('pfs-mark-swatch');
+      element.style.backgroundColor = cssColor(color);
+    }
+    const widths = row('Line width');
+    for (const width of SHAPE_WIDTHS) {
+      const element = choice(widths, `${width} pt line`, this.shapeStyle.width === width, () => {
+        this.shapeStyle = { ...this.shapeStyle, width };
+        restyle({ width });
+      });
+      element.classList.add('pfs-shape-width-choice');
+      element.style.setProperty('--pfs-line-width', `${width}px`);
+    }
+    const box = anchor.getBoundingClientRect();
+    const view = doc.defaultView!;
+    menu.style.left = `${Math.max(4, Math.min(box.left - 80, view.innerWidth - 200))}px`;
+    menu.style.top = `${box.bottom + 4}px`;
+    doc.body.append(menu);
+    this.shapeMenu = menu;
+    const outside = (event: Event) => {
+      if (
+        !(event.target instanceof view.Node) ||
+        (!menu.contains(event.target) && !anchor.contains(event.target))
+      ) {
+        this.closeShapeMenu();
+      }
+    };
+    const key = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        this.closeShapeMenu();
+      }
+    };
+    doc.addEventListener('pointerdown', outside, true);
+    doc.addEventListener('keydown', key, true);
+    this.closeShapeMenuListeners = () => {
+      doc.removeEventListener('pointerdown', outside, true);
+      doc.removeEventListener('keydown', key, true);
+    };
+  }
+
+  private closeShapeMenu(): void {
+    this.closeShapeMenuListeners?.();
+    this.closeShapeMenuListeners = undefined;
+    this.shapeMenu?.remove();
+    this.shapeMenu = undefined;
   }
 
   /** Paint this page's highlights and notes; the background render omits them. */
