@@ -160,8 +160,9 @@ export class TextEditor extends Component {
     created: boolean;
   };
   private markClickPages = new WeakSet<HTMLElement>();
-  private listBar?: { element: HTMLElement; input?: HTMLTextAreaElement };
   private listEditing = false;
+  private listGroup!: HTMLElement;
+  private listInput?: { input: HTMLTextAreaElement; name: string };
 
   /** Attach document-local editing controls and shortcut ownership to the shared session registry. */
   constructor(app: App, native: EditorSurface, sessions: VaultSessions, state?: EditorState) {
@@ -262,6 +263,31 @@ export class TextEditor extends Component {
       if (tool === 'text') {
         this.toolbar.append(this.native.answerLineButton());
       }
+    }
+    // Lists and indentation for the selected text box.
+    this.listGroup = doc.createElement('div');
+    this.listGroup.className = 'pdf-form-studio-list-controls';
+    this.listGroup.setAttribute('role', 'group');
+    this.listGroup.setAttribute('aria-label', 'Lists and indentation');
+    this.toolbar.append(this.listGroup);
+    for (const [label, icon, fallback, action] of [
+      ['Bulleted list (Ctrl+Shift+8)', 'list', '•', (e: TextEdit) => toggleList(e, 'bullet')],
+      [
+        'Numbered list (Ctrl+Shift+7)',
+        'list-ordered',
+        '1.',
+        (e: TextEdit) => toggleList(e, 'number'),
+      ],
+      ['Decrease indent (Shift+Tab)', 'indent-decrease', '⇤', (e: TextEdit) => indent(e, -1)],
+      ['Increase indent (Tab)', 'indent-increase', '⇥', (e: TextEdit) => indent(e, 1)],
+    ] as const) {
+      const element = button(this.listGroup, label, icon, () => this.listAction(action));
+      if (!element.querySelector('svg')) {
+        element.textContent = fallback;
+      }
+      // Keep the caret and selection in the text box while clicking.
+      element.addEventListener('pointerdown', (event) => event.preventDefault());
+      element.addEventListener('mousedown', (event) => event.preventDefault());
     }
     this.editControls = doc.createElement('div');
     this.editControls.className = 'pdf-form-studio-edit-controls';
@@ -1910,6 +1936,7 @@ export class TextEditor extends Component {
     this.syncObjectScope();
     const session = this.session;
     const blocked = session?.status === 'conflict' || !!session?.replacing;
+    this.listGroup.hidden = blocked || !this.listTargetNow();
     const selected = session?.snapshot.fields.find((field) => field.name === this.selected);
     const brush = this.tool === 'marker' || this.tool === 'scribble';
     this.propertiesButton.disabled =
@@ -2382,7 +2409,6 @@ export class TextEditor extends Component {
     }
     this.selection?.update(pages);
     this.popover?.refreshSpacing();
-    this.updateListBar();
   }
 
   /** Replace a text box's value with a list edit and run the normal input path (history, autosave). */
@@ -2436,82 +2462,74 @@ export class TextEditor extends Component {
     }
   }
 
-  /** Small list/indent bar above the text box being typed in. */
-  private updateListBar(): void {
+  /** The text box that list buttons act on: the one being edited or selected. */
+  private listTargetNow(): { input: HTMLTextAreaElement; name: string } | undefined {
     const doc = this.native.element.ownerDocument;
-    const active = doc.activeElement;
-    let target: { entry: PageLayer; control: FieldControl; name: string } | undefined;
+    const remembered = this.listInput;
+    if (
+      remembered?.input.isConnected &&
+      this.listTarget(remembered.name) &&
+      (doc.activeElement === remembered.input ||
+        this.editing === remembered.name ||
+        this.selected === remembered.name ||
+        this.activeBox === remembered.name)
+    ) {
+      return remembered;
+    }
+    const name = this.selected ?? this.activeBox;
+    if (!name || !this.listTarget(name)) {
+      return undefined;
+    }
     for (const entry of this.layers.values()) {
       for (const control of entry.controls.values()) {
-        const name = control.input.dataset.pdfField;
         if (
-          control.input === active &&
-          control.input instanceof doc.defaultView!.HTMLTextAreaElement &&
-          name &&
-          this.listTarget(name) &&
-          !control.input.readOnly
+          control.input.dataset.pdfField === name &&
+          control.input instanceof doc.defaultView!.HTMLTextAreaElement
         ) {
-          target = { entry, control, name };
+          return { input: control.input, name };
         }
       }
     }
-    if (!target) {
-      this.listBar?.element.remove();
-      this.listBar = undefined;
+    return undefined;
+  }
+
+  /** Toolbar list action: edit the session value directly, then restore caret and focus. */
+  private listAction(action: (edit: TextEdit) => TextEdit): void {
+    const target = this.listTargetNow();
+    const session = this.session;
+    const field = session?.snapshot.fields.find((item) => item.name === target?.name);
+    if (!target || !session || !field || field.readOnly) {
       return;
     }
-    if (!this.listBar) {
-      const bar = doc.createElement('div');
-      bar.className = 'pfs-list-bar pfs-mark-ui';
-      bar.setAttribute('role', 'toolbar');
-      bar.setAttribute('aria-label', 'Lists and indentation');
-      const state: { element: HTMLElement; input?: HTMLTextAreaElement } = { element: bar };
-      for (const [label, icon, fallback, action] of [
-        ['Bulleted list (Ctrl+Shift+8)', 'list', '•', (e: TextEdit) => toggleList(e, 'bullet')],
-        [
-          'Numbered list (Ctrl+Shift+7)',
-          'list-ordered',
-          '1.',
-          (e: TextEdit) => toggleList(e, 'number'),
-        ],
-        ['Decrease indent (Shift+Tab)', 'indent-decrease', '⇤', (e: TextEdit) => indent(e, -1)],
-        ['Increase indent (Tab)', 'indent-increase', '⇥', (e: TextEdit) => indent(e, 1)],
-      ] as const) {
-        const button = doc.createElement('button');
-        button.type = 'button';
-        button.className = 'clickable-icon pfs-list-button';
-        setIcon(button, icon);
-        if (!button.querySelector('svg')) {
-          button.textContent = fallback;
+    const { input, name } = target;
+    // The textarea keeps its selection after losing focus; fall back to all lines.
+    const synced = input.value === field.value;
+    const edit = action({
+      value: field.value,
+      start: synced ? input.selectionStart : 0,
+      end: synced ? input.selectionEnd : field.value.length,
+    });
+    if (field.maxLength !== undefined && edit.value.length > field.maxLength) {
+      return;
+    }
+    try {
+      session.setValue(name, edit.value, true);
+    } catch (error) {
+      this.showError(error);
+      return;
+    }
+    input.value = edit.value;
+    input.focus({ preventScroll: true });
+    input.setSelectionRange(edit.start, edit.end);
+    for (const entry of this.layers.values()) {
+      for (const control of entry.controls.values()) {
+        if (control.input === input) {
+          this.growField(entry, control);
         }
-        setTooltip(button, label);
-        // Keep focus and selection in the text box.
-        button.addEventListener('pointerdown', (event) => event.preventDefault());
-        button.addEventListener('mousedown', (event) => event.preventDefault());
-        button.addEventListener('click', () => {
-          const input = state.input;
-          if (input) {
-            this.applyListEdit(
-              input,
-              action({ value: input.value, start: input.selectionStart, end: input.selectionEnd }),
-            );
-            input.focus({ preventScroll: true });
-          }
-        });
-        bar.append(button);
       }
-      this.listBar = state;
     }
-    const { element } = this.listBar;
-    this.listBar.input = target.control.input as HTMLTextAreaElement;
-    if (element.parentElement !== target.entry.layer) {
-      target.entry.layer.append(element);
-    }
-    const frame = target.control.frame;
-    const top = parseFloat(frame.style.top) || 0;
-    const height = parseFloat(frame.style.height) || 0;
-    element.style.left = `${Math.max(0, parseFloat(frame.style.left) || 0)}px`;
-    element.style.top = `${top >= 34 ? top - 34 : top + height + 4}px`;
+    this.scheduleSave();
+    this.updateStatus();
   }
 
   /** Convert a client point to PDF coordinates on one page layer. */
@@ -3204,8 +3222,13 @@ export class TextEditor extends Component {
     });
     if (input instanceof doc.defaultView!.HTMLTextAreaElement) {
       input.addEventListener('keydown', (event) => this.listKey(event, input, field.name));
+      input.addEventListener('focus', () => {
+        this.listInput = { input, name: field.name };
+        this.updateStatus();
+      });
+      // Focus leaves after the editor's pointerdown handling; recheck the list buttons then.
       input.addEventListener('blur', () =>
-        doc.defaultView!.setTimeout(() => this.updateListBar(), 0),
+        doc.defaultView!.setTimeout(() => this.updateStatus(), 0),
       );
     }
     input.addEventListener('keydown', (event) => {

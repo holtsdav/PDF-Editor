@@ -1290,22 +1290,17 @@ button.pfs-choice.is-round {
   outline-offset: 1px;
 }
 
-/* Lists and indentation bar above the active text box. */
-.pfs-list-bar {
-  position: absolute;
-  z-index: 30;
+/* Lists and indentation buttons in the toolbar, shown while a text box is selected. */
+.pdf-form-studio-list-controls {
   display: flex;
-  gap: 2px;
-  padding: 2px;
-  pointer-events: auto;
-  background: var(--background-primary);
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 6px;
-  box-shadow: var(--shadow-s);
+  align-items: center;
+  gap: 4px;
 }
-.pfs-list-button {
-  min-width: 26px;
-  height: 26px;
-  padding: 3px;
-  font-size: var(--font-ui-small);
+.pfs-tools-host .pdf-form-studio-list-controls {
+  border-left: 1px solid var(--background-modifier-border);
+  padding-left: 8px;
+  margin-left: 4px;
+}
+.pdf-form-studio-toolbar .pdf-form-studio-list-controls[hidden] {
+  display: none;
 }
