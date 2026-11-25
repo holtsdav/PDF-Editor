@@ -34,6 +34,7 @@ import {
 } from './choice-engine.ts';
 import type { ChoiceField } from './choice-engine.ts';
 import { readMarks, stripMarks, verifyMarks, writeMarks } from './mark-engine.ts';
+import { fieldIndex } from './field-index.ts';
 import type { PdfMark } from './mark-engine.ts';
 import type { RuledLayout } from './ruled-text';
 
@@ -529,6 +530,7 @@ export async function writeTextPdf(
   const pdf = await loadWritable(seed);
   pdf.registerFontkit(fontkit);
   const form = pdf.getForm();
+  const fields = fieldIndex(form);
   const replaced = referencedObjects(
     pdf,
     form
@@ -559,7 +561,7 @@ export async function writeTextPdf(
     return font;
   };
   for (const name of changes.deleted) {
-    const field = form.getFieldMaybe(name);
+    const field = fields.maybe(name);
     if (!(field instanceof PDFTextField) || !ownedText(field) || !editableText(field)) {
       throw new Error('Only editable text boxes created by this plugin can be deleted.');
     }
@@ -577,6 +579,7 @@ export async function writeTextPdf(
         ),
       }));
       form.removeField(field);
+      fields.forget(name);
       for (const { annotations, refs } of entries) {
         if (annotations) {
           for (let i = annotations.size() - 1; i >= 0; i--) {
@@ -589,7 +592,7 @@ export async function writeTextPdf(
     }
   }
   for (const added of changes.added.values()) {
-    if (!added.name.startsWith(FIELD_PREFIX) || form.getFieldMaybe(added.name)) {
+    if (!added.name.startsWith(FIELD_PREFIX) || fields.has(added.name)) {
       throw new Error('Invalid or duplicate text box ID.');
     }
     const page = pdf.getPages()[added.page - 1];
@@ -601,6 +604,7 @@ export async function writeTextPdf(
       throw new Error('Invalid text box geometry.');
     }
     const field = form.createTextField(added.name);
+    fields.add(field);
     field.acroField.dict.set(PDFName.of('PFSKind'), PDFName.of('Text'));
     if (added.multiline) {
       field.enableMultiline();
@@ -638,7 +642,7 @@ export async function writeTextPdf(
     if (changes.deleted.has(name)) {
       continue;
     }
-    const field = form.getTextField(name);
+    const field = fields.text(name);
     if (!ownedText(field)) {
       throw new Error('Only added text boxes can be moved or resized.');
     }
@@ -678,7 +682,7 @@ export async function writeTextPdf(
     if (changes.deleted.has(name)) {
       continue;
     }
-    const field = form.getTextField(name);
+    const field = fields.text(name);
     const owned = ownedText(field);
     const originalDa = inheritedAppearance(pdf, field);
     const widgetDefaults = field.acroField
@@ -807,7 +811,7 @@ export async function writeTextPdf(
     }
   }
   if (changes.choices?.size) {
-    await writeChoices(pdf, changes.choices, () => getFont('sans'));
+    await writeChoices(pdf, fields, changes.choices, () => getFont('sans'));
   }
   writeInk(pdf, changes.strokes, changes.deletedStrokes);
   if (changes.marks?.size || changes.deletedMarks?.size) {
@@ -819,17 +823,18 @@ export async function writeTextPdf(
   const bytes = await pdf.save(pdfSaveOptions(pdf));
   // Reopen and verify logical values, widget appearances, and page count before any vault write.
   const verified = await loadPdfDocument(bytes);
+  const saved = fieldIndex(verified.getForm());
   if (verified.getPageCount() !== pdf.getPageCount()) {
     throw new Error('PDF page verification failed.');
   }
   verifyInk(verified, changes.strokes, changes.deletedStrokes);
-  verifyChoices(verified, changes.choices ?? new Map());
+  verifyChoices(saved, changes.choices ?? new Map());
   verifyMarks(verified, changes.marks ?? new Map(), changes.deletedMarks ?? new Set());
   for (const [name, value] of changes.values) {
     if (changes.deleted.has(name)) {
       continue;
     }
-    const field = verified.getForm().getTextField(name);
+    const field = saved.text(name);
     if ((field.getText() ?? '') !== value) {
       throw new Error(`PDF value verification failed for ${name}.`);
     }
@@ -843,7 +848,7 @@ export async function writeTextPdf(
     if (changes.deleted.has(name)) {
       continue;
     }
-    const field = verified.getForm().getTextField(name);
+    const field = saved.text(name);
     const da = field.acroField.getDefaultAppearance() ?? '';
     if (
       field.acroField.dict.get(PDFName.of('PFSFont'))?.toString() !== '/' + format.fontFamily ||
@@ -869,14 +874,13 @@ export async function writeTextPdf(
   for (const [name, format] of changes.formats) {
     if (
       format.alignment !== undefined &&
-      verified.getForm().getTextField(name).getAlignment() !==
-        { left: 0, center: 1, right: 2 }[format.alignment]
+      saved.text(name).getAlignment() !== { left: 0, center: 1, right: 2 }[format.alignment]
     ) {
       throw new Error('PDF alignment verification failed.');
     }
   }
   for (const name of changes.deleted) {
-    if (verified.getForm().getFieldMaybe(name)) {
+    if (saved.maybe(name)) {
       throw new Error(`PDF deletion verification failed for ${name}.`);
     }
   }
@@ -884,7 +888,7 @@ export async function writeTextPdf(
     if (changes.deleted.has(name)) {
       continue;
     }
-    const field = verified.getForm().getTextField(name);
+    const field = saved.text(name);
     const widget = field.acroField.getWidgets()[0]!;
     const { x, y, width, height } = widget.getRectangle();
     if (
@@ -905,10 +909,7 @@ export async function writeTextPdf(
     if (changes.deleted.has(name)) {
       continue;
     }
-    const layout = verified
-      .getForm()
-      .getTextField(name)
-      .acroField.dict.lookupMaybe(PDFName.of('PFSRuled'), PDFArray);
+    const layout = saved.text(name).acroField.dict.lookupMaybe(PDFName.of('PFSRuled'), PDFArray);
     if (
       expected
         ? !layout ||

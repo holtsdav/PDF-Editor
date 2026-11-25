@@ -20,6 +20,8 @@ import fontkit from '@pdf-lib/fontkit';
 import type { Font } from '@pdf-lib/fontkit';
 import type { FontFamily } from './text-format.ts';
 import { wrapText } from './wrap-text.ts';
+import { readInk } from './ink-engine.ts';
+import { loadPdfDocument } from './pdf-load.ts';
 import type { ChoiceField } from './choice-engine.ts';
 import { MARK_PREFIX, NOTE_SIZE, pdfDate, unionRect, validateMark } from './mark-engine.ts';
 import type { MarkKind, PdfMark } from './mark-engine.ts';
@@ -1502,6 +1504,7 @@ export class TextSession {
     try {
       let revision: number;
       let output: Uint8Array;
+      let saved: TextChanges;
       do {
         if (generation !== undefined) {
           await this.waitForInteraction(generation);
@@ -1511,6 +1514,7 @@ export class TextSession {
         }
         revision = this.revision;
         const changes = this.cloneChanges();
+        saved = changes;
         if (!equalBytes(await this.store.read(), this.baseline)) {
           return this.conflict();
         }
@@ -1571,16 +1575,19 @@ export class TextSession {
       }
       this.baseline = output;
       this.draftRevision = -1;
-      const savedSnapshot = await readTextPdf(output);
-      for (const field of savedSnapshot.fields) {
-        this.persistedFieldNames.add(field.name);
+      // The output was verified by writeTextPdf; avoid re-reading the whole document.
+      // New boxes are now persisted; only drawings need their saved annotation refs.
+      for (const name of saved!.added.keys()) {
+        if (!saved!.deleted.has(name)) {
+          this.persistedFieldNames.add(name);
+        }
       }
       if (this.snapshot.strokes.length) {
-        const saved = new Map(
-          savedSnapshot.strokes.map((stroke) => [stroke.id, stroke.annotationId]),
+        const ids = new Map(
+          readInk(await loadPdfDocument(output)).map((stroke) => [stroke.id, stroke.annotationId]),
         );
         for (const stroke of this.snapshot.strokes) {
-          stroke.annotationId = saved.get(stroke.id);
+          stroke.annotationId = ids.get(stroke.id);
         }
       }
       this.savedRevision = revision;

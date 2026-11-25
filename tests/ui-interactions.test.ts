@@ -2319,3 +2319,65 @@ test('toolbar list buttons and keys make bulleted and numbered lists and indent 
     f.dispose();
   }
 });
+
+test('the toolbar highlight button highlights selected PDF text in the chosen colour', async () => {
+  const f = await fixture();
+  try {
+    const page = f.doc.querySelector<HTMLElement>('#page')!;
+    const textLayer = f.doc.createElement('div');
+    textLayer.className = 'textLayer pfs-text-layer';
+    const span = f.doc.createElement('span');
+    span.textContent = 'Printed sentence';
+    textLayer.append(span);
+    page.prepend(textLayer);
+    Object.assign(f.doc.defaultView!.Range.prototype, {
+      getClientRects: () => [
+        { left: 50, right: 200, top: 100, bottom: 114, width: 150, height: 14 },
+      ],
+    });
+    const button = f.doc.querySelector<HTMLButtonElement>('.pfs-highlight-button')!;
+    assert.ok(button, 'highlight button sits in the toolbar');
+    assert.equal(button.disabled, true, 'disabled without a text selection');
+    const select = () => {
+      const range = f.doc.createRange();
+      range.selectNodeContents(span);
+      f.doc.getSelection()!.removeAllRanges();
+      f.doc.getSelection()!.addRange(range);
+    };
+    // jsdom reports selection changes asynchronously; wait until the button is ready.
+    const ready = async () => {
+      for (let i = 0; i < 100 && button.disabled; i++) {
+        await pause(5);
+      }
+      assert.equal(button.disabled, false);
+    };
+    select();
+    await ready();
+    // Pick blue from the colour menu: with text selected this highlights immediately.
+    f.tool('Highlight colour');
+    const blue = f.doc.querySelectorAll<HTMLButtonElement>(
+      '.pfs-highlight-colors .pfs-mark-swatch',
+    )[2]!;
+    f.pointer(blue, 'pointerdown');
+    blue.click();
+    assert.equal(f.doc.querySelector('.pfs-highlight-colors'), null);
+    assert.deepEqual(
+      f.session.snapshot.marks!.map((mark) => mark.color),
+      [[0.45, 0.75, 1]],
+    );
+    // The main button reuses that colour, through the real pointerdown → click sequence.
+    select();
+    await ready();
+    f.tool('Highlight selected text');
+    assert.equal(f.session.snapshot.marks!.length, 2);
+    assert.deepEqual(f.session.snapshot.marks![1]!.color, [0.45, 0.75, 1]);
+    assert.equal(f.doc.getSelection()!.isCollapsed, true);
+    // Highlight + comment opens the comment box.
+    select();
+    await ready();
+    f.tool('Highlight selected text and comment');
+    assert.ok(f.doc.querySelector('.pfs-mark-popover textarea'));
+  } finally {
+    f.dispose();
+  }
+});

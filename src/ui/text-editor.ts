@@ -62,6 +62,8 @@ function objectClipboardHtml(doc: Document, text: string, token: string): string
 interface FieldControl {
   frame: HTMLElement;
   input: HTMLInputElement | HTMLTextAreaElement;
+  /** Inputs of the last layout write; refresh skips unchanged boxes. */
+  layout?: string;
   preview?: Rect;
   dispose?: () => void;
   cancel?: () => void;
@@ -69,6 +71,7 @@ interface FieldControl {
 interface ChoiceControl {
   frame: HTMLElement;
   select?: HTMLSelectElement;
+  layout?: string;
 }
 interface PageLayer {
   page: NativePage;
@@ -163,6 +166,14 @@ export class TextEditor extends Component {
   private listEditing = false;
   private listGroup!: HTMLElement;
   private listInput?: { input: HTMLTextAreaElement; name: string };
+  private highlightButton!: HTMLButtonElement;
+  private highlightCommentButton!: HTMLButtonElement;
+  private highlightColors?: HTMLElement;
+  /** Selection captured when a toolbar highlight control is pressed, before focus can move. */
+  private pressedSelection?: {
+    found: NonNullable<ReturnType<TextEditor['selectionQuads']>>;
+    time: number;
+  };
 
   /** Attach document-local editing controls and shortcut ownership to the shared session registry. */
   constructor(app: App, native: EditorSurface, sessions: VaultSessions, state?: EditorState) {
@@ -264,6 +275,37 @@ export class TextEditor extends Component {
         this.toolbar.append(this.native.answerLineButton());
       }
     }
+    // Highlight the PDF text selected on the page, with a colour menu.
+    const highlightGroup = doc.createElement('div');
+    highlightGroup.className = 'pdf-form-studio-highlight-controls';
+    highlightGroup.setAttribute('role', 'group');
+    highlightGroup.setAttribute('aria-label', 'Highlight selected text');
+    this.toolbar.append(highlightGroup);
+    this.highlightButton = button(highlightGroup, 'Highlight selected text', 'baseline', () =>
+      this.highlightSelection(false),
+    );
+    this.highlightButton.classList.add('pfs-highlight-button');
+    this.highlightCommentButton = button(
+      highlightGroup,
+      'Highlight selected text and comment',
+      'message-square-text',
+      () => this.highlightSelection(true),
+    );
+    const colorButton = button(highlightGroup, 'Highlight colour', 'chevron-down', () =>
+      this.toggleHighlightColors(highlightGroup),
+    );
+    colorButton.classList.add('pfs-highlight-color-button');
+    for (const element of [this.highlightButton, this.highlightCommentButton, colorButton]) {
+      // Keep the PDF text selection while pressing toolbar buttons.
+      element.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        this.capturePressedSelection();
+      });
+      element.addEventListener('mousedown', (event) => event.preventDefault());
+    }
+    this.registerDomEvent(doc, 'selectionchange', () =>
+      doc.defaultView!.setTimeout(() => this.updateHighlightButton(), 0),
+    );
     // Lists and indentation for the selected text box.
     this.listGroup = doc.createElement('div');
     this.listGroup.className = 'pdf-form-studio-list-controls';
@@ -1937,6 +1979,7 @@ export class TextEditor extends Component {
     const session = this.session;
     const blocked = session?.status === 'conflict' || !!session?.replacing;
     this.listGroup.hidden = blocked || !this.listTargetNow();
+    this.updateHighlightButton();
     const selected = session?.snapshot.fields.find((field) => field.name === this.selected);
     const brush = this.tool === 'marker' || this.tool === 'scribble';
     this.propertiesButton.disabled =
@@ -2547,8 +2590,115 @@ export class TextEditor extends Component {
     this.selectionBar = undefined;
   }
 
-  /** Offer highlight colours and a comment button next to selected PDF text. */
-  private updateSelectionBar(): void {
+  /** Cheap check without layout reads: is PDF text selected in this viewer? */
+  private hasTextSelection(): boolean {
+    const selection = this.native.element.ownerDocument.getSelection();
+    if (this.tool !== 'select' || !selection || selection.isCollapsed || !selection.rangeCount) {
+      return false;
+    }
+    return [selection.anchorNode, selection.focusNode].some((node) => {
+      const element = node?.nodeType === 1 ? (node as Element) : node?.parentElement;
+      return (
+        !!element &&
+        this.native.element.contains(element) &&
+        !!element.closest('.pfs-text-layer, .textLayer')
+      );
+    });
+  }
+
+  private updateHighlightButton(): void {
+    if (!this.highlightButton) {
+      return;
+    }
+    const ready = this.hasTextSelection();
+    if (
+      this.highlightButton.disabled === !ready &&
+      this.highlightButton.dataset.color === String(this.markColor)
+    ) {
+      return;
+    }
+    this.highlightButton.dataset.color = String(this.markColor);
+    for (const element of [this.highlightButton, this.highlightCommentButton]) {
+      element.disabled = !ready;
+    }
+    this.highlightButton.style.setProperty('--pdf-tool-color', cssColor(this.markColor));
+    setTooltip(
+      this.highlightButton,
+      ready ? 'Highlight selected text' : 'Highlight selected text (select text on the PDF first)',
+    );
+  }
+
+  private capturePressedSelection(): void {
+    const found = this.selectionQuads();
+    if (found) {
+      this.pressedSelection = { found, time: Date.now() };
+    }
+  }
+
+  private highlightSelection(comment: boolean): void {
+    const pressed =
+      this.pressedSelection && Date.now() - this.pressedSelection.time < 30000
+        ? this.pressedSelection.found
+        : undefined;
+    const found = this.selectionQuads() ?? pressed;
+    this.pressedSelection = undefined;
+    if (found) {
+      this.createHighlights(found.quads, comment);
+    }
+    this.updateHighlightButton();
+  }
+
+  /** Small colour menu under the toolbar; picking a colour also highlights a current selection. */
+  private toggleHighlightColors(group: HTMLElement): void {
+    if (this.highlightColors) {
+      this.highlightColors.remove();
+      this.highlightColors = undefined;
+      return;
+    }
+    const doc = group.ownerDocument;
+    const menu = doc.createElement('div');
+    menu.className = 'pfs-highlight-colors pfs-mark-ui';
+    menu.setAttribute('role', 'menu');
+    for (const { name, color } of MARK_COLORS) {
+      const swatch = doc.createElement('button');
+      swatch.type = 'button';
+      swatch.className = 'pfs-mark-swatch';
+      swatch.setAttribute('role', 'menuitemradio');
+      swatch.setAttribute('aria-checked', String(color.every((v, i) => v === this.markColor[i])));
+      swatch.style.backgroundColor = cssColor(color);
+      setTooltip(swatch, name);
+      swatch.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        this.capturePressedSelection();
+      });
+      swatch.addEventListener('mousedown', (event) => event.preventDefault());
+      swatch.addEventListener('click', () => {
+        this.markColor = color;
+        menu.remove();
+        this.highlightColors = undefined;
+        this.highlightSelection(false);
+      });
+      menu.append(swatch);
+    }
+    group.append(menu);
+    this.highlightColors = menu;
+    const close = (event: Event) => {
+      if (!(event.target instanceof doc.defaultView!.Node && group.contains(event.target))) {
+        menu.remove();
+        if (this.highlightColors === menu) {
+          this.highlightColors = undefined;
+        }
+        doc.removeEventListener('pointerdown', close, true);
+      }
+    };
+    doc.addEventListener('pointerdown', close, true);
+    this.register(() => doc.removeEventListener('pointerdown', close, true));
+  }
+
+  /** PDF text currently selected on this viewer's pages, as one quad per line per page. */
+  private selectionQuads():
+    | { quads: Map<PageLayer, Rect[]>; last: { entry: PageLayer; x: number; y: number } }
+    | undefined {
     const doc = this.native.element.ownerDocument;
     const selection = doc.getSelection();
     const session = this.session;
@@ -2561,8 +2711,7 @@ export class TextEditor extends Component {
       selection.isCollapsed ||
       !selection.rangeCount
     ) {
-      this.hideSelectionBar();
-      return;
+      return undefined;
     }
     const inText = (node: Node | null) => {
       const element = node?.nodeType === 1 ? (node as Element) : node?.parentElement;
@@ -2573,8 +2722,7 @@ export class TextEditor extends Component {
       );
     };
     if (!inText(selection.anchorNode) && !inText(selection.focusNode)) {
-      this.hideSelectionBar();
-      return;
+      return undefined;
     }
     const rects = [...selection.getRangeAt(0).getClientRects()].filter(
       (rect) => rect.width > 0.5 && rect.height > 0.5,
@@ -2605,10 +2753,19 @@ export class TextEditor extends Component {
         quads.set(entry, lines);
       }
     }
-    if (!last || !quads.size) {
+    return last && quads.size ? { quads, last } : undefined;
+  }
+
+  /** Offer highlight colours and a comment button next to selected PDF text. */
+  private updateSelectionBar(): void {
+    this.updateHighlightButton();
+    const doc = this.native.element.ownerDocument;
+    const found = this.selectionQuads();
+    if (!found) {
       this.hideSelectionBar();
       return;
     }
+    const { quads, last } = found;
     this.hideSelectionBar();
     const bar = doc.createElement('div');
     bar.className = 'pfs-selection-bar pfs-mark-ui';
@@ -2670,6 +2827,7 @@ export class TextEditor extends Component {
     }
     this.native.element.ownerDocument.getSelection()?.removeAllRanges();
     this.hideSelectionBar();
+    this.updateHighlightButton();
     this.refresh();
     this.scheduleSave();
     const last = created.at(-1);
@@ -3037,6 +3195,22 @@ export class TextEditor extends Component {
     locked: boolean,
     drawing: boolean,
   ): void {
+    const { viewport } = entry.page;
+    const layout = JSON.stringify([
+      widget,
+      field.value,
+      field.options,
+      locked,
+      drawing,
+      viewport.width,
+      viewport.height,
+      viewport.scale,
+      viewport.rotation,
+    ]);
+    if (control.layout === layout) {
+      return;
+    }
+    control.layout = layout;
     const { frame, select } = control;
     const scale = entry.page.viewport.scale;
     const [left, top, right, bottom] = screenRectangle(entry.page.viewport, widget.rect);
@@ -3105,6 +3279,29 @@ export class TextEditor extends Component {
     if (this.formatPreview?.name === field.name) {
       field = { ...field, ...this.formatPreview };
     }
+    // Refresh runs on every keystroke; rewriting identical styles for every box is wasted work.
+    const { viewport } = entry.page;
+    const layout = JSON.stringify([
+      rect,
+      rotation,
+      viewport.width,
+      viewport.height,
+      viewport.scale,
+      viewport.rotation,
+      field.fontFamily,
+      widget?.color ?? field.color,
+      widget?.fontSize ?? field.fontSize,
+      field.fontSize,
+      field.alignment,
+      widget?.appearance,
+      field.ruled,
+      field.letterSpacing,
+      field.lineSpacing,
+    ]);
+    if (control.layout === layout) {
+      return;
+    }
+    control.layout = layout;
     const { frame, input } = control;
     const [left, top, right, bottom] = screenRectangle(entry.page.viewport, rect);
     // PDF widget appearance rotation is counterclockwise; viewport/CSS is clockwise.

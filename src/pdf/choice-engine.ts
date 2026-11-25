@@ -14,6 +14,7 @@ import {
 } from 'pdf-lib';
 import type { PDFDocument, PDFFont, PDFField, PDFWidgetAnnotation } from 'pdf-lib';
 import type { Rect } from './text-engine.ts';
+import type { FieldIndex } from './field-index.ts';
 import type { PdfColor } from './text-format.ts';
 
 /** Checkboxes, radio buttons, dropdowns and single-select list boxes from an authored PDF form. */
@@ -284,12 +285,12 @@ async function choiceFont(
 /** Apply choice values to a writable copy and regenerate list appearances. */
 export async function writeChoices(
   pdf: PDFDocument,
+  fields: FieldIndex,
   changes: Map<string, string>,
   fallbackFont: () => Promise<PDFFont>,
 ): Promise<void> {
-  const form = pdf.getForm();
   for (const [name, value] of changes) {
-    const field = form.getFieldMaybe(name);
+    const field = fields.maybe(name);
     if (!field || !isChoice(field) || !editable(field)) {
       throw new Error(`Field ${name} is read only or unsupported.`);
     }
@@ -327,10 +328,9 @@ export async function writeChoices(
 }
 
 /** Reopened-output check: every requested value must read back exactly. */
-export function verifyChoices(pdf: PDFDocument, changes: Map<string, string>): void {
-  const form = pdf.getForm();
+export function verifyChoices(fields: FieldIndex, changes: Map<string, string>): void {
   for (const [name, value] of changes) {
-    const field = form.getFieldMaybe(name);
+    const field = fields.maybe(name);
     if (!field || !isChoice(field)) {
       throw new Error(`PDF value verification failed for ${name}.`);
     }
