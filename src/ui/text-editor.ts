@@ -170,6 +170,7 @@ export class TextEditor extends Component {
   private highlightButton!: HTMLButtonElement;
   private highlightCommentButton!: HTMLButtonElement;
   private highlightColors?: HTMLElement;
+  private closeColors?: () => void;
   /** Selection captured when a toolbar highlight control is pressed, before focus can move. */
   private pressedSelection?: {
     found: NonNullable<ReturnType<TextEditor['selectionQuads']>>;
@@ -293,8 +294,9 @@ export class TextEditor extends Component {
       () => this.highlightSelection('comment'),
     );
     const colorButton = button(highlightGroup, 'Highlight colour', 'chevron-down', () =>
-      this.toggleHighlightColors(highlightGroup),
+      this.toggleHighlightColors(colorButton),
     );
+    this.register(() => this.closeHighlightColors());
     colorButton.classList.add('pfs-highlight-color-button');
     for (const element of [this.highlightButton, this.highlightCommentButton, colorButton]) {
       // Keep the PDF text selection while pressing toolbar buttons.
@@ -1432,6 +1434,7 @@ export class TextEditor extends Component {
     return (
       this.toolbar.contains(target) ||
       !!this.popover?.element.contains(target) ||
+      !!this.highlightColors?.contains(target) ||
       (this.openingPopover && !!target.closest('.pfs-tool-popover'))
     );
   }
@@ -2653,16 +2656,20 @@ export class TextEditor extends Component {
   }
 
   /** Small colour menu under the toolbar; picking a colour also highlights a current selection. */
-  private toggleHighlightColors(group: HTMLElement): void {
+  /**
+   * Colour menu for the toolbar highlight button. It is a document-level portal at the
+   * button's position: inside the toolbar it would be clipped by the scrolling tool row.
+   */
+  private toggleHighlightColors(anchor: HTMLElement): void {
     if (this.highlightColors) {
-      this.highlightColors.remove();
-      this.highlightColors = undefined;
+      this.closeHighlightColors();
       return;
     }
-    const doc = group.ownerDocument;
+    const doc = anchor.ownerDocument;
     const menu = doc.createElement('div');
     menu.className = 'pfs-highlight-colors pfs-mark-ui';
     menu.setAttribute('role', 'menu');
+    menu.setAttribute('aria-label', 'Highlight colour');
     for (const { name, color } of MARK_COLORS) {
       const swatch = doc.createElement('button');
       swatch.type = 'button';
@@ -2678,25 +2685,46 @@ export class TextEditor extends Component {
       swatch.addEventListener('mousedown', (event) => event.preventDefault());
       swatch.addEventListener('click', () => {
         this.markColor = color;
-        menu.remove();
-        this.highlightColors = undefined;
+        this.closeHighlightColors();
         this.highlightSelection('color');
       });
       menu.append(swatch);
     }
-    group.append(menu);
+    const box = anchor.getBoundingClientRect();
+    const view = doc.defaultView!;
+    menu.style.left = `${Math.max(4, Math.min(box.left - 60, view.innerWidth - 150))}px`;
+    menu.style.top = `${box.bottom + 4}px`;
+    doc.body.append(menu);
     this.highlightColors = menu;
-    const close = (event: Event) => {
-      if (!(event.target instanceof doc.defaultView!.Node && group.contains(event.target))) {
-        menu.remove();
-        if (this.highlightColors === menu) {
-          this.highlightColors = undefined;
-        }
-        doc.removeEventListener('pointerdown', close, true);
+    const outside = (event: Event) => {
+      const target = event.target;
+      if (!(target instanceof view.Node) || (!menu.contains(target) && !anchor.contains(target))) {
+        this.closeHighlightColors();
       }
     };
-    doc.addEventListener('pointerdown', close, true);
-    this.register(() => doc.removeEventListener('pointerdown', close, true));
+    const key = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        this.closeHighlightColors();
+      }
+    };
+    const moved = () => this.closeHighlightColors();
+    doc.addEventListener('pointerdown', outside, true);
+    doc.addEventListener('keydown', key, true);
+    view.addEventListener('resize', moved);
+    doc.addEventListener('scroll', moved, true);
+    this.closeColors = () => {
+      doc.removeEventListener('pointerdown', outside, true);
+      doc.removeEventListener('keydown', key, true);
+      view.removeEventListener('resize', moved);
+      doc.removeEventListener('scroll', moved, true);
+    };
+  }
+
+  private closeHighlightColors(): void {
+    this.closeColors?.();
+    this.closeColors = undefined;
+    this.highlightColors?.remove();
+    this.highlightColors = undefined;
   }
 
   /** PDF text currently selected on this viewer's pages, as one quad per line per page. */

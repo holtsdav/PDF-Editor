@@ -2355,6 +2355,10 @@ test('the toolbar highlight button highlights selected PDF text in the chosen co
     await ready();
     // Pick blue from the colour menu: with text selected this highlights immediately.
     f.tool('Highlight colour');
+    // The menu is a document-level portal: inside the scrolling toolbar it would be clipped.
+    const menu = f.doc.querySelector<HTMLElement>('.pfs-highlight-colors')!;
+    assert.equal(menu.parentElement, f.doc.body);
+    assert.equal(f.doc.querySelector('.pdf-form-studio-toolbar .pfs-highlight-colors'), null);
     const blue = f.doc.querySelectorAll<HTMLButtonElement>(
       '.pfs-highlight-colors .pfs-mark-swatch',
     )[2]!;
