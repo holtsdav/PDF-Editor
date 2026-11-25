@@ -1469,6 +1469,11 @@ export class PdfSurface extends Component {
         : await this.pdf!.getPageIndex(ref as { num: number; gen: number });
     this.go(number + 1);
   }
+  /** Scroll to a page (used by the highlights sidebar). */
+  goToPage(number: number): void {
+    this.go(number);
+  }
+
   private go(number: number): void {
     const index = Math.max(1, Math.min(this.entries.length, Math.round(number) || 1));
     const entry = this.entries[index - 1];
