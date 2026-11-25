@@ -21,6 +21,8 @@ import { ruledAnswerBlock } from '../pdf/ruled-text';
 import { labelOverlay } from './overlay-label';
 import type { ChoiceField, ChoiceWidget } from '../pdf/choice-engine';
 import { lineQuads } from '../pdf/mark-engine';
+import { continueList, indent, toggleList } from '../pdf/list-format';
+import type { TextEdit } from '../pdf/list-format';
 import type { PdfMark } from '../pdf/mark-engine';
 
 const MARK_COLORS: { name: string; color: PdfColor }[] = [
@@ -158,6 +160,8 @@ export class TextEditor extends Component {
     created: boolean;
   };
   private markClickPages = new WeakSet<HTMLElement>();
+  private listBar?: { element: HTMLElement; input?: HTMLTextAreaElement };
+  private listEditing = false;
 
   /** Attach document-local editing controls and shortcut ownership to the shared session registry. */
   constructor(app: App, native: EditorSurface, sessions: VaultSessions, state?: EditorState) {
@@ -2378,6 +2382,136 @@ export class TextEditor extends Component {
     }
     this.selection?.update(pages);
     this.popover?.refreshSpacing();
+    this.updateListBar();
+  }
+
+  /** Replace a text box's value with a list edit and run the normal input path (history, autosave). */
+  private applyListEdit(input: HTMLTextAreaElement, edit: TextEdit | undefined): boolean {
+    if (
+      !edit ||
+      input.readOnly ||
+      input.disabled ||
+      (input.maxLength > 0 && edit.value.length > input.maxLength)
+    ) {
+      return false;
+    }
+    input.value = edit.value;
+    input.setSelectionRange(edit.start, edit.end);
+    this.listEditing = true;
+    try {
+      input.dispatchEvent(new input.ownerDocument.defaultView!.Event('input'));
+    } finally {
+      this.listEditing = false;
+    }
+    return true;
+  }
+
+  private listTarget(name: string): boolean {
+    const field = this.session?.snapshot.fields.find((item) => item.name === name);
+    // Detected answer lines keep Tab for moving between lines.
+    return !!field && !field.ruled && !this.answerFields.has(name);
+  }
+
+  /** Enter continues lists; Tab/Shift+Tab indent; Ctrl/Cmd+Shift+8/7 toggle bullets/numbers. */
+  private listKey(event: KeyboardEvent, input: HTMLTextAreaElement, name: string): void {
+    if (event.isComposing || event.altKey || !this.listTarget(name)) {
+      return;
+    }
+    const edit = { value: input.value, start: input.selectionStart, end: input.selectionEnd };
+    const mod = event.metaKey || event.ctrlKey;
+    let handled = false;
+    if (event.key === 'Enter' && !mod && !event.shiftKey) {
+      handled = this.applyListEdit(input, continueList(edit));
+    } else if (event.key === 'Tab' && !mod) {
+      handled = this.applyListEdit(input, indent(edit, event.shiftKey ? -1 : 1));
+    } else if (mod && event.shiftKey && (event.code === 'Digit8' || event.code === 'Digit7')) {
+      handled = this.applyListEdit(
+        input,
+        toggleList(edit, event.code === 'Digit8' ? 'bullet' : 'number'),
+      );
+    }
+    if (handled) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+  }
+
+  /** Small list/indent bar above the text box being typed in. */
+  private updateListBar(): void {
+    const doc = this.native.element.ownerDocument;
+    const active = doc.activeElement;
+    let target: { entry: PageLayer; control: FieldControl; name: string } | undefined;
+    for (const entry of this.layers.values()) {
+      for (const control of entry.controls.values()) {
+        const name = control.input.dataset.pdfField;
+        if (
+          control.input === active &&
+          control.input instanceof doc.defaultView!.HTMLTextAreaElement &&
+          name &&
+          this.listTarget(name) &&
+          !control.input.readOnly
+        ) {
+          target = { entry, control, name };
+        }
+      }
+    }
+    if (!target) {
+      this.listBar?.element.remove();
+      this.listBar = undefined;
+      return;
+    }
+    if (!this.listBar) {
+      const bar = doc.createElement('div');
+      bar.className = 'pfs-list-bar pfs-mark-ui';
+      bar.setAttribute('role', 'toolbar');
+      bar.setAttribute('aria-label', 'Lists and indentation');
+      const state: { element: HTMLElement; input?: HTMLTextAreaElement } = { element: bar };
+      for (const [label, icon, fallback, action] of [
+        ['Bulleted list (Ctrl+Shift+8)', 'list', '•', (e: TextEdit) => toggleList(e, 'bullet')],
+        [
+          'Numbered list (Ctrl+Shift+7)',
+          'list-ordered',
+          '1.',
+          (e: TextEdit) => toggleList(e, 'number'),
+        ],
+        ['Decrease indent (Shift+Tab)', 'indent-decrease', '⇤', (e: TextEdit) => indent(e, -1)],
+        ['Increase indent (Tab)', 'indent-increase', '⇥', (e: TextEdit) => indent(e, 1)],
+      ] as const) {
+        const button = doc.createElement('button');
+        button.type = 'button';
+        button.className = 'clickable-icon pfs-list-button';
+        setIcon(button, icon);
+        if (!button.querySelector('svg')) {
+          button.textContent = fallback;
+        }
+        setTooltip(button, label);
+        // Keep focus and selection in the text box.
+        button.addEventListener('pointerdown', (event) => event.preventDefault());
+        button.addEventListener('mousedown', (event) => event.preventDefault());
+        button.addEventListener('click', () => {
+          const input = state.input;
+          if (input) {
+            this.applyListEdit(
+              input,
+              action({ value: input.value, start: input.selectionStart, end: input.selectionEnd }),
+            );
+            input.focus({ preventScroll: true });
+          }
+        });
+        bar.append(button);
+      }
+      this.listBar = state;
+    }
+    const { element } = this.listBar;
+    this.listBar.input = target.control.input as HTMLTextAreaElement;
+    if (element.parentElement !== target.entry.layer) {
+      target.entry.layer.append(element);
+    }
+    const frame = target.control.frame;
+    const top = parseFloat(frame.style.top) || 0;
+    const height = parseFloat(frame.style.height) || 0;
+    element.style.left = `${Math.max(0, parseFloat(frame.style.left) || 0)}px`;
+    element.style.top = `${top >= 34 ? top - 34 : top + height + 4}px`;
   }
 
   /** Convert a client point to PDF coordinates on one page layer. */
@@ -3034,7 +3168,7 @@ export class TextEditor extends Component {
         return;
       }
       try {
-        this.session!.setValue(field.name, input.value);
+        this.session!.setValue(field.name, input.value, this.listEditing);
         this.growField(entry, control);
         this.scheduleSave();
       } catch (error) {
@@ -3068,6 +3202,12 @@ export class TextEditor extends Component {
         this.scheduleSave();
       }
     });
+    if (input instanceof doc.defaultView!.HTMLTextAreaElement) {
+      input.addEventListener('keydown', (event) => this.listKey(event, input, field.name));
+      input.addEventListener('blur', () =>
+        doc.defaultView!.setTimeout(() => this.updateListBar(), 0),
+      );
+    }
     input.addEventListener('keydown', (event) => {
       const key = event as KeyboardEvent;
       // Keep Obsidian's note editor from handling typing inside the PDF.

@@ -387,7 +387,8 @@ export class TextSession {
     }
   }
 
-  setValue(name: string, value: string): void {
+  /** `separate` starts a new undo step instead of merging with recent typing (list actions). */
+  setValue(name: string, value: string, separate = false): void {
     this.assertAvailable();
     if (this.status === 'conflict') {
       throw new Error('Reload the PDF before editing after an external change.');
@@ -399,7 +400,7 @@ export class TextSession {
     if (field.value === value) {
       return;
     }
-    this.rememberText(name);
+    this.rememberText(name, !separate);
     field.value = value;
     this.changes.values.set(name, value);
     this.fitRuledField(name);

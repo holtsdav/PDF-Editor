@@ -1289,3 +1289,23 @@ button.pfs-choice.is-round {
   outline: 2px solid var(--interactive-accent);
   outline-offset: 1px;
 }
+
+/* Lists and indentation bar above the active text box. */
+.pfs-list-bar {
+  position: absolute;
+  z-index: 30;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  pointer-events: auto;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  box-shadow: var(--shadow-s);
+}
+.pfs-list-button {
+  min-width: 26px;
+  height: 26px;
+  padding: 3px;
+  font-size: var(--font-ui-small);
+}

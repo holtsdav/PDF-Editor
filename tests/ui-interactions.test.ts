@@ -2250,3 +2250,66 @@ test('selected PDF text is highlighted, commented and saved; notes are placed wi
     f.dispose();
   }
 });
+
+test('text boxes get bulleted and numbered lists with Enter continuation and Tab indenting', async () => {
+  const f = await fixture();
+  try {
+    const field = f.session.add(1, [80, 500, 400, 640], 14, true);
+    f.editor.refresh();
+    const input = f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!;
+    input.focus();
+    // assert.equal narrows literal types; read the live value through a function.
+    const text = (): string => input.value;
+    input.value = 'Milk\nEggs';
+    input.dispatchEvent(new f.doc.defaultView!.Event('input'));
+    f.editor.refresh();
+    const bar = f.doc.querySelector<HTMLElement>('.pfs-list-bar')!;
+    assert.ok(bar, 'list bar shows above the focused text box');
+    const [bullets, numbers, outdent, indentButton] = [
+      ...bar.querySelectorAll<HTMLButtonElement>('button'),
+    ];
+    input.setSelectionRange(0, input.value.length);
+    numbers!.click();
+    assert.equal(text(), '1. Milk\n2. Eggs');
+    assert.equal(f.doc.activeElement, input, 'focus stays in the text box');
+
+    // Enter at the end continues numbering.
+    input.setSelectionRange(input.value.length, input.value.length);
+    const enter = f.key('Enter');
+    input.dispatchEvent(enter);
+    assert.equal(enter.defaultPrevented, true);
+    assert.equal(text(), '1. Milk\n2. Eggs\n3. ');
+    input.setRangeText('Bread', input.selectionStart, input.selectionEnd, 'end');
+    input.dispatchEvent(new f.doc.defaultView!.Event('input'));
+
+    // Tab nests the current item, Shift+Tab brings it back.
+    input.dispatchEvent(f.key('Tab'));
+    assert.equal(text(), '1. Milk\n2. Eggs\n    a. Bread');
+    outdent!.click();
+    assert.equal(text(), '1. Milk\n2. Eggs\n3. Bread');
+    indentButton!.click();
+    input.setSelectionRange(0, input.value.length);
+    bullets!.click();
+    assert.equal(text(), '• Milk\n• Eggs\n    – Bread');
+    assert.equal(
+      f.session.snapshot.fields.find((item) => item.name === field.name)!.value,
+      input.value,
+    );
+
+    // One undo step per list action.
+    f.session.undoStroke();
+    assert.equal(
+      f.session.snapshot.fields.find((item) => item.name === field.name)!.value,
+      '1. Milk\n2. Eggs\n    a. Bread',
+    );
+    f.session.redoStroke();
+    await f.session.save();
+    const saved = (await PDFDocument.load(f.bytes())).getForm().getTextField(field.name);
+    assert.equal(saved.getText(), '• Milk\n• Eggs\n    – Bread');
+    input.blur();
+    await pause(5);
+    assert.equal(f.doc.querySelector('.pfs-list-bar'), null, 'bar hides when typing ends');
+  } finally {
+    f.dispose();
+  }
+});
