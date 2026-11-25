@@ -21,6 +21,8 @@ import type { Font } from '@pdf-lib/fontkit';
 import type { FontFamily } from './text-format.ts';
 import { wrapText } from './wrap-text.ts';
 import type { ChoiceField } from './choice-engine.ts';
+import { MARK_PREFIX, NOTE_SIZE, pdfDate, unionRect, validateMark } from './mark-engine.ts';
+import type { MarkKind, PdfMark } from './mark-engine.ts';
 
 const MAX_HISTORY_ENTRIES = 50;
 
@@ -38,6 +40,9 @@ type TextState = {
   fields: TextField[];
   choiceFields?: ChoiceField[];
   choices?: Map<string, string>;
+  markList?: PdfMark[];
+  marks?: Map<string, PdfMark>;
+  deletedMarks?: Set<string>;
   values: TextChanges['values'];
   added: TextChanges['added'];
   boxes: TextChanges['boxes'];
@@ -96,6 +101,8 @@ const emptyChanges = (): TextChanges => ({
   deletedStrokes: new Set(),
   formats: new Map(),
   choices: new Map(),
+  marks: new Map(),
+  deletedMarks: new Set(),
 });
 
 /** One session per vault PDF; every view shares its model and serialized writer. */
@@ -273,6 +280,111 @@ export class TextSession {
     field.value = value;
     (this.changes.choices ??= new Map()).set(name, value);
     this.changed();
+  }
+
+  /** Add a text highlight (quads in PDF points) or a comment note at a point. */
+  addMark(input: {
+    page: number;
+    kind: MarkKind;
+    quads?: Rect[];
+    at?: [number, number];
+    color: PdfColor;
+    opacity?: number;
+    comment?: string;
+  }): PdfMark {
+    this.assertEditable();
+    const bounds = this.snapshot.pages[input.page - 1];
+    if (!bounds) {
+      throw new Error('The page no longer exists.');
+    }
+    let rect: Rect;
+    let quads: Rect[] = [];
+    if (input.kind === 'highlight') {
+      quads = (input.quads ?? []).map(
+        (quad) =>
+          [
+            Math.max(bounds[0], quad[0]),
+            Math.max(bounds[1], quad[1]),
+            Math.min(bounds[2], quad[2]),
+            Math.min(bounds[3], quad[3]),
+          ] as Rect,
+      );
+      quads = quads.filter((quad) => quad[2] > quad[0] && quad[3] > quad[1]);
+      if (!quads.length) {
+        throw new Error('Select some text on the PDF page to highlight it.');
+      }
+      rect = unionRect(quads);
+    } else {
+      const [x, y] = input.at ?? [bounds[0] + 20, bounds[3] - 20];
+      const left = Math.min(Math.max(bounds[0], x), bounds[2] - NOTE_SIZE);
+      const top = Math.max(Math.min(bounds[3], y), bounds[1] + NOTE_SIZE);
+      rect = [left, top - NOTE_SIZE, left + NOTE_SIZE, top];
+    }
+    const mark: PdfMark = {
+      id: `${MARK_PREFIX}${crypto.randomUUID()}`,
+      page: input.page,
+      kind: input.kind,
+      quads,
+      rect,
+      color: [...input.color] as PdfColor,
+      opacity: input.kind === 'highlight' ? (input.opacity ?? 0.45) : 1,
+      comment: input.comment ?? '',
+      modified: pdfDate(),
+    };
+    validateMark(mark, bounds);
+    this.rememberText(`mark:${mark.id}`, false);
+    (this.snapshot.marks ??= []).push(mark);
+    (this.changes.marks ??= new Map()).set(mark.id, structuredClone(mark));
+    this.changed();
+    return mark;
+  }
+
+  /** Change a highlight's comment or colour; typing in one comment merges into one undo step. */
+  updateMark(id: string, update: { comment?: string; color?: PdfColor }): void {
+    this.assertEditable();
+    const mark = this.snapshot.marks?.find((item) => item.id === id);
+    if (!mark) {
+      throw new Error('This highlight no longer exists.');
+    }
+    if (update.color && !validColor(update.color)) {
+      throw new Error('Invalid colour.');
+    }
+    if (
+      (update.comment === undefined || update.comment === mark.comment) &&
+      (!update.color || update.color.every((value, i) => value === mark.color[i]))
+    ) {
+      return;
+    }
+    this.rememberText(update.color ? `mark:${id}` : `mark-comment:${id}`, !update.color);
+    if (update.comment !== undefined) {
+      mark.comment = update.comment;
+    }
+    if (update.color) {
+      mark.color = [...update.color] as PdfColor;
+    }
+    mark.modified = pdfDate();
+    (this.changes.marks ??= new Map()).set(id, structuredClone(mark));
+    this.changed();
+  }
+
+  deleteMark(id: string): void {
+    this.assertEditable();
+    const mark = this.snapshot.marks?.find((item) => item.id === id);
+    if (!mark) {
+      return;
+    }
+    this.rememberText(`mark:${id}`, false);
+    this.snapshot.marks = this.snapshot.marks!.filter((item) => item.id !== id);
+    this.changes.marks?.delete(id);
+    (this.changes.deletedMarks ??= new Set()).add(id);
+    this.changed();
+  }
+
+  private assertEditable(): void {
+    this.assertAvailable();
+    if (this.status === 'conflict') {
+      throw new Error('Reload the PDF before editing after an external change.');
+    }
   }
 
   setValue(name: string, value: string): void {
@@ -645,11 +757,14 @@ export class TextSession {
   }
 
   private textState(): TextState {
-    const { values, added, boxes, deleted, formats, choices } = this.changes;
+    const { values, added, boxes, deleted, formats, choices, marks, deletedMarks } = this.changes;
     return structuredClone({
       fields: this.snapshot.fields,
       choiceFields: this.snapshot.choices,
       choices,
+      markList: this.snapshot.marks,
+      marks,
+      deletedMarks,
       values,
       added,
       boxes,
@@ -679,10 +794,13 @@ export class TextSession {
       this.restoreInk(entry.strokes);
       return;
     }
-    const { fields, choiceFields, ...changes } = structuredClone(entry.state);
+    const { fields, choiceFields, markList, ...changes } = structuredClone(entry.state);
     this.snapshot.fields = fields;
     if (choiceFields) {
       this.snapshot.choices = choiceFields;
+    }
+    if (markList) {
+      this.snapshot.marks = markList;
     }
     Object.assign(this.changes, changes);
     if (entry.kind === 'objects') {

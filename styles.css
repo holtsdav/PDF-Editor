@@ -1187,3 +1187,105 @@ button.pfs-choice.is-round {
 .pdf-form-studio-layer[data-tool='eraser'] .pfs-choice {
   pointer-events: none;
 }
+
+/* Text highlights and comments, stored as standard PDF annotations. */
+.pdf-form-studio-layer[data-tool='note'] {
+  pointer-events: auto;
+  cursor: copy;
+}
+.pfs-mark-highlight {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.pfs-mark-quad {
+  position: absolute;
+  mix-blend-mode: multiply;
+  pointer-events: none;
+}
+.pfs-mark-badge,
+.pfs-mark-note {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0;
+  pointer-events: auto;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  z-index: 3;
+}
+.pfs-mark-badge {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+}
+.pfs-mark-note {
+  border: 1px solid rgba(0, 0, 0, 0.45);
+  border-radius: 2px;
+  color: #222;
+}
+.pfs-mark-badge svg,
+.pfs-mark-note svg {
+  width: 70%;
+  height: 70%;
+}
+.pfs-mark-note.is-passive,
+.is-passive .pfs-mark-badge {
+  pointer-events: none;
+}
+.pfs-selection-bar,
+.pfs-mark-popover {
+  position: absolute;
+  z-index: 30;
+  pointer-events: auto;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-s);
+  cursor: default;
+}
+.pfs-selection-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+}
+.pfs-mark-popover {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 250px;
+  padding: 8px;
+}
+.pfs-mark-text {
+  width: 100%;
+  min-height: 70px;
+  resize: vertical;
+  font-size: var(--font-ui-small);
+}
+.pfs-mark-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.pfs-mark-spacer {
+  flex: 1;
+}
+.pfs-mark-swatch {
+  width: 18px;
+  height: 18px;
+  min-height: 0;
+  padding: 0;
+  border: 1px solid rgba(0, 0, 0, 0.3);
+  border-radius: 50%;
+  box-shadow: none;
+  cursor: pointer;
+}
+.pfs-mark-swatch.is-active {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 1px;
+}

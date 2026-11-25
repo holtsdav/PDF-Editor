@@ -15,7 +15,7 @@ import type { RecognizedShape } from '../pdf/ink-assist';
 import { HeldShape } from '../pdf/held-shape';
 import { labelSvgOverlay } from './overlay-label';
 
-export type EditorTool = 'select' | 'text' | 'marker' | 'scribble' | 'eraser';
+export type EditorTool = 'select' | 'text' | 'marker' | 'scribble' | 'eraser' | 'note';
 interface InkOptions {
   tool(): EditorTool;
   width(kind: InkKind): number;

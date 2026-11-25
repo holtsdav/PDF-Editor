@@ -2158,3 +2158,95 @@ test('checkboxes, radio buttons and dropdowns are clickable on the page and auto
     f.dispose();
   }
 });
+
+test('selected PDF text is highlighted, commented and saved; notes are placed with the note tool', async () => {
+  const f = await fixture();
+  try {
+    const page = f.doc.querySelector<HTMLElement>('#page')!;
+    const textLayer = f.doc.createElement('div');
+    textLayer.className = 'textLayer pfs-text-layer';
+    const span = f.doc.createElement('span');
+    span.textContent = 'Important sentence';
+    textLayer.append(span);
+    page.prepend(textLayer);
+    // jsdom has no layout: the selection covers one text line at y 100-114 (viewport px).
+    const range = f.doc.createRange();
+    range.selectNodeContents(span);
+    Object.assign(f.doc.defaultView!.Range.prototype, {
+      getClientRects: () => [
+        { left: 50, right: 150, top: 100, bottom: 114, width: 100, height: 14 },
+        { left: 150, right: 220, top: 100.5, bottom: 113.5, width: 70, height: 13 },
+      ],
+    });
+    const selection = f.doc.getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    f.pointer(span, 'pointerup');
+    await pause(5);
+    const bar = f.doc.querySelector<HTMLElement>('.pfs-selection-bar')!;
+    assert.ok(bar, 'highlight bar appears next to the selection');
+    const swatches = [...bar.querySelectorAll<HTMLButtonElement>('.pfs-mark-swatch')];
+    assert.equal(swatches.length, 4);
+    swatches[1]!.click(); // green
+    assert.equal(f.doc.querySelector('.pfs-selection-bar'), null);
+    const marks = f.session.snapshot.marks!;
+    assert.equal(marks.length, 1);
+    // Two selection rectangles on one line become one PDF quad (y flipped).
+    assert.deepEqual(marks[0]!.quads, [[50, 686, 220, 700]]);
+    assert.deepEqual(marks[0]!.color, [0.45, 0.9, 0.45]);
+    assert.equal(f.doc.querySelectorAll('.pfs-mark-quad').length, 1);
+
+    // Clicking the highlighted text opens its comment box.
+    const click = new f.doc.defaultView!.MouseEvent('click', {
+      bubbles: true,
+      clientX: 100,
+      clientY: 107,
+    });
+    span.dispatchEvent(click);
+    const popover = f.doc.querySelector<HTMLElement>('.pfs-mark-popover')!;
+    assert.ok(popover, 'comment box opens');
+    const textarea = popover.querySelector<HTMLTextAreaElement>('textarea')!;
+    textarea.value = 'Prüfungsrelevant';
+    textarea.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true }));
+    popover.querySelector<HTMLButtonElement>('.pfs-mark-done')!.click();
+    assert.equal(f.doc.querySelector('.pfs-mark-popover'), null);
+    assert.ok(f.doc.querySelector('.pfs-mark-badge'), 'commented highlights show a badge');
+
+    // Note tool: click places a note and opens its comment box.
+    f.tool('Add comment note');
+    const layer = f.doc.querySelector<HTMLElement>('.pdf-form-studio-layer')!;
+    assert.equal(layer.dataset.tool, 'note');
+    f.pointer(layer, 'pointerdown', 400, 200);
+    const notePopover = f.doc.querySelector<HTMLElement>('.pfs-mark-popover')!;
+    assert.ok(notePopover);
+    const noteText = notePopover.querySelector<HTMLTextAreaElement>('textarea')!;
+    noteText.value = 'Frage klären';
+    noteText.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true }));
+    notePopover.querySelector<HTMLButtonElement>('.pfs-mark-done')!.click();
+    assert.ok(f.doc.querySelector('.pfs-mark-note'));
+
+    // A note closed without text is discarded.
+    f.tool('Add comment note');
+    f.pointer(layer, 'pointerdown', 300, 300);
+    f.doc.querySelector<HTMLButtonElement>('.pfs-mark-popover .pfs-mark-done')!.click();
+    assert.equal(f.session.snapshot.marks!.length, 2);
+
+    await f.session.save();
+    const saved = await PDFDocument.load(f.bytes());
+    const annotations = await (
+      await (await getDocument({ data: f.bytes().slice() }).promise).getPage(1)
+    ).getAnnotations();
+    assert.deepEqual(
+      annotations
+        .filter((item) => item.subtype !== 'Popup')
+        .map((item) => [item.subtype, item.contentsObj?.str]),
+      [
+        ['Highlight', 'Prüfungsrelevant'],
+        ['Text', 'Frage klären'],
+      ],
+    );
+    assert.equal(saved.getPageCount(), 1);
+  } finally {
+    f.dispose();
+  }
+});

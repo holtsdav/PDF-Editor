@@ -20,6 +20,16 @@ import { ToolPopover } from './tool-popover';
 import { ruledAnswerBlock } from '../pdf/ruled-text';
 import { labelOverlay } from './overlay-label';
 import type { ChoiceField, ChoiceWidget } from '../pdf/choice-engine';
+import { lineQuads } from '../pdf/mark-engine';
+import type { PdfMark } from '../pdf/mark-engine';
+
+const MARK_COLORS: { name: string; color: PdfColor }[] = [
+  { name: 'Yellow', color: [1, 0.85, 0.1] },
+  { name: 'Green', color: [0.45, 0.9, 0.45] },
+  { name: 'Blue', color: [0.45, 0.75, 1] },
+  { name: 'Pink', color: [1, 0.55, 0.75] },
+];
+const MARK_UI = '.pfs-mark-ui';
 
 interface AnswerLine {
   page: number;
@@ -63,6 +73,7 @@ interface PageLayer {
   layer: HTMLElement;
   controls: Map<string, FieldControl>;
   choices?: Map<string, ChoiceControl>;
+  marks?: Map<string, HTMLElement>;
   ink: InkLayer;
   cancelPlacement?: () => void;
   placing?: () => boolean;
@@ -137,6 +148,16 @@ export class TextEditor extends Component {
   private answerLines: AnswerLine[] = [];
   private answerFields = new Set<string>();
   private releaseEditing?: () => void;
+  private markColor: PdfColor = MARK_COLORS[0]!.color;
+  private selectionBar?: { element: HTMLElement; quads: Map<PageLayer, Rect[]> };
+  private markPopover?: {
+    id: string;
+    element: HTMLElement;
+    entry: PageLayer;
+    textarea: HTMLTextAreaElement;
+    created: boolean;
+  };
+  private markClickPages = new WeakSet<HTMLElement>();
 
   /** Attach document-local editing controls and shortcut ownership to the shared session registry. */
   constructor(app: App, native: EditorSurface, sessions: VaultSessions, state?: EditorState) {
@@ -222,6 +243,7 @@ export class TextEditor extends Component {
       ['marker', 'Highlighter', 'highlighter'],
       ['scribble', 'Pen', 'pencil'],
       ['eraser', 'Eraser', 'eraser'],
+      ['note', 'Add comment note', 'message-square-plus'],
     ] as const) {
       this.tools.set(
         tool,
@@ -293,6 +315,38 @@ export class TextEditor extends Component {
     this.message.setAttribute('role', 'status');
     this.mountToolbar();
     this.register(() => this.menu?.hide());
+    // Text highlights: show the highlight bar after a text selection on a PDF page.
+    const queueBar = () => doc.defaultView!.setTimeout(() => this.updateSelectionBar(), 0);
+    this.registerDomEvent(doc, 'pointerup', queueBar);
+    this.registerDomEvent(doc, 'keyup', (event) => {
+      if (event.shiftKey || event.key === 'Shift') {
+        queueBar();
+      }
+    });
+    this.registerDomEvent(doc, 'selectionchange', () => {
+      if (doc.getSelection()?.isCollapsed !== false) {
+        this.hideSelectionBar();
+      }
+    });
+    this.registerDomEvent(
+      doc,
+      'pointerdown',
+      (event) => {
+        const target = event.target;
+        if (
+          this.markPopover &&
+          !(target instanceof doc.defaultView!.Node && this.markPopover.element.contains(target))
+        ) {
+          this.closeMarkPopover();
+        }
+      },
+      true,
+    );
+    this.register(() => {
+      this.hideSelectionBar();
+      this.markPopover?.element.remove();
+      this.markPopover = undefined;
+    });
     this.registerDomEvent(
       doc,
       'pointerdown',
@@ -316,7 +370,8 @@ export class TextEditor extends Component {
         }
         if (
           !ownControl &&
-          (!inPdf || !target.closest('.pdf-form-studio-box, .pdf-form-studio-ink-control'))
+          (!inPdf ||
+            !target.closest(`.pdf-form-studio-box, .pdf-form-studio-ink-control, ${MARK_UI}`))
         ) {
           this.selected = undefined;
           this.selectedStroke = undefined;
@@ -436,6 +491,7 @@ export class TextEditor extends Component {
               p: 'scribble',
               h: 'marker',
               e: 'eraser',
+              n: 'note',
             };
             const tool = shortcut[event.key.toLowerCase()];
             if (tool) {
@@ -807,6 +863,8 @@ export class TextEditor extends Component {
       active.blur();
     }
     this.tool = tool;
+    this.hideSelectionBar();
+    this.closeMarkPopover();
     this.selected = retain;
     this.selectedStroke = undefined;
     this.updateStatus();
@@ -2220,9 +2278,10 @@ export class TextEditor extends Component {
             error: (error) => this.showError(error),
           }),
         );
-        entry = { page, layer, controls: new Map(), choices: new Map(), ink };
+        entry = { page, layer, controls: new Map(), choices: new Map(), marks: new Map(), ink };
         this.layers.set(page.div, entry);
         this.bindPlacement(entry);
+        this.bindMarks(page.div, layer);
       }
       entry.page = page;
       entry.layer.dataset.tool = this.tool;
@@ -2293,6 +2352,7 @@ export class TextEditor extends Component {
         );
       }
       this.refreshChoices(entry);
+      this.refreshMarks(entry);
       // Explicit reload/recovery can replace pages. Restore focus only when
       // the user has not deliberately moved it elsewhere.
       const active = page.div.ownerDocument.activeElement;
@@ -2318,6 +2378,420 @@ export class TextEditor extends Component {
     }
     this.selection?.update(pages);
     this.popover?.refreshSpacing();
+  }
+
+  /** Convert a client point to PDF coordinates on one page layer. */
+  private pdfPoint(entry: PageLayer, clientX: number, clientY: number): [number, number] {
+    const box = entry.layer.getBoundingClientRect();
+    const { viewport } = entry.page;
+    const x = ((clientX - box.left) * viewport.width) / (box.width || viewport.width);
+    const y = ((clientY - box.top) * viewport.height) / (box.height || viewport.height);
+    const [px, py] = viewport.convertToPdfPoint(x, y);
+    return [px!, py!];
+  }
+
+  private hideSelectionBar(): void {
+    this.selectionBar?.element.remove();
+    this.selectionBar = undefined;
+  }
+
+  /** Offer highlight colours and a comment button next to selected PDF text. */
+  private updateSelectionBar(): void {
+    const doc = this.native.element.ownerDocument;
+    const selection = doc.getSelection();
+    const session = this.session;
+    if (
+      this.tool !== 'select' ||
+      !session ||
+      session.status === 'conflict' ||
+      session.replacing ||
+      !selection ||
+      selection.isCollapsed ||
+      !selection.rangeCount
+    ) {
+      this.hideSelectionBar();
+      return;
+    }
+    const inText = (node: Node | null) => {
+      const element = node?.nodeType === 1 ? (node as Element) : node?.parentElement;
+      return (
+        !!element &&
+        this.native.element.contains(element) &&
+        !!element.closest('.pfs-text-layer, .textLayer')
+      );
+    };
+    if (!inText(selection.anchorNode) && !inText(selection.focusNode)) {
+      this.hideSelectionBar();
+      return;
+    }
+    const rects = [...selection.getRangeAt(0).getClientRects()].filter(
+      (rect) => rect.width > 0.5 && rect.height > 0.5,
+    );
+    const quads = new Map<PageLayer, Rect[]>();
+    let last: { entry: PageLayer; x: number; y: number } | undefined;
+    for (const entry of this.layers.values()) {
+      const box = entry.layer.getBoundingClientRect();
+      if (!box.width || !box.height) {
+        continue;
+      }
+      const sx = entry.page.viewport.width / box.width;
+      const sy = entry.page.viewport.height / box.height;
+      const own: Rect[] = [];
+      for (const rect of rects) {
+        const cx = (rect.left + rect.right) / 2;
+        const cy = (rect.top + rect.bottom) / 2;
+        if (cx < box.left || cx > box.right || cy < box.top || cy > box.bottom) {
+          continue;
+        }
+        const start: [number, number] = [(rect.left - box.left) * sx, (rect.top - box.top) * sy];
+        const end: [number, number] = [(rect.right - box.left) * sx, (rect.bottom - box.top) * sy];
+        own.push(pdfRectangle(entry.page.viewport, start, end));
+        last = { entry, x: start[0], y: end[1] };
+      }
+      const lines = lineQuads(own);
+      if (lines.length) {
+        quads.set(entry, lines);
+      }
+    }
+    if (!last || !quads.size) {
+      this.hideSelectionBar();
+      return;
+    }
+    this.hideSelectionBar();
+    const bar = doc.createElement('div');
+    bar.className = 'pfs-selection-bar pfs-mark-ui';
+    bar.setAttribute('role', 'toolbar');
+    bar.setAttribute('aria-label', 'Highlight selected text');
+    for (const { name, color } of MARK_COLORS) {
+      const swatch = doc.createElement('button');
+      swatch.type = 'button';
+      swatch.className = 'pfs-mark-swatch';
+      swatch.style.backgroundColor = cssColor(color);
+      swatch.classList.toggle(
+        'is-active',
+        color.every((v, i) => v === this.markColor[i]),
+      );
+      setTooltip(swatch, `Highlight (${name.toLowerCase()})`);
+      swatch.addEventListener('click', () => {
+        this.markColor = color;
+        this.createHighlights(quads, false);
+      });
+      bar.append(swatch);
+    }
+    const comment = doc.createElement('button');
+    comment.type = 'button';
+    comment.className = 'clickable-icon pfs-mark-comment-button';
+    setIcon(comment, 'message-square-plus');
+    setTooltip(comment, 'Highlight and comment');
+    comment.addEventListener('click', () => this.createHighlights(quads, true));
+    bar.append(comment);
+    // Keep the text selection while pressing the bar.
+    for (const type of ['pointerdown', 'mousedown'] as const) {
+      bar.addEventListener(type, (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      });
+    }
+    const width = last.entry.page.viewport.width;
+    bar.style.left = `${Math.max(0, Math.min(last.x, width - 190))}px`;
+    bar.style.top = `${last.y + 6}px`;
+    last.entry.layer.append(bar);
+    this.selectionBar = { element: bar, quads };
+  }
+
+  private createHighlights(quads: Map<PageLayer, Rect[]>, comment: boolean): void {
+    const created: { entry: PageLayer; mark: PdfMark }[] = [];
+    try {
+      for (const [entry, rects] of quads) {
+        created.push({
+          entry,
+          mark: this.session!.addMark({
+            page: entry.page.number,
+            kind: 'highlight',
+            quads: rects,
+            color: this.markColor,
+          }),
+        });
+      }
+    } catch (error) {
+      this.showError(error);
+    }
+    this.native.element.ownerDocument.getSelection()?.removeAllRanges();
+    this.hideSelectionBar();
+    this.refresh();
+    this.scheduleSave();
+    const last = created.at(-1);
+    if (comment && last) {
+      this.openMarkPopover(last.entry, last.mark.id, false);
+    }
+  }
+
+  /** Clicks on a highlight open its comment; the note tool places a new note. */
+  private bindMarks(div: HTMLElement, layer: HTMLElement): void {
+    layer.addEventListener('pointerdown', (event) => {
+      const entry = this.layers.get(div);
+      if (this.tool !== 'note' || event.target !== layer || event.button !== 0 || !entry) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      try {
+        const mark = this.session!.addMark({
+          page: entry.page.number,
+          kind: 'note',
+          at: this.pdfPoint(entry, event.clientX, event.clientY),
+          color: MARK_COLORS[0]!.color,
+        });
+        this.setTool('select');
+        this.openMarkPopover(entry, mark.id, true);
+      } catch (error) {
+        this.showError(error);
+      }
+    });
+    if (this.markClickPages.has(div)) {
+      return;
+    }
+    this.markClickPages.add(div);
+    this.registerDomEvent(div, 'click', (event) => {
+      const entry = this.layers.get(div);
+      const target = event.target as Element;
+      if (
+        !entry ||
+        this.tool !== 'select' ||
+        div.ownerDocument.getSelection()?.isCollapsed === false ||
+        target.closest(`.pdf-form-studio-box, .pfs-choice, ${MARK_UI}`)
+      ) {
+        return;
+      }
+      const [x, y] = this.pdfPoint(entry, event.clientX, event.clientY);
+      const mark = this.session?.snapshot.marks?.find(
+        (item) =>
+          item.page === entry.page.number &&
+          item.kind === 'highlight' &&
+          item.quads.some((q) => x >= q[0] && x <= q[2] && y >= q[1] && y <= q[3]),
+      );
+      if (mark) {
+        this.openMarkPopover(entry, mark.id, false);
+      }
+    });
+  }
+
+  /** Paint this page's highlights and notes; the background render omits them. */
+  private refreshMarks(entry: PageLayer): void {
+    const doc = entry.layer.ownerDocument;
+    const elements = (entry.marks ??= new Map());
+    const marks = (this.session?.snapshot.marks ?? []).filter(
+      (mark) => mark.page === entry.page.number,
+    );
+    const ids = new Set(marks.map((mark) => mark.id));
+    for (const [id, element] of elements) {
+      if (!ids.has(id)) {
+        element.remove();
+        elements.delete(id);
+      }
+    }
+    const { viewport } = entry.page;
+    const drawing = this.tool === 'marker' || this.tool === 'scribble' || this.tool === 'eraser';
+    for (const mark of marks) {
+      const signature = JSON.stringify([
+        mark.quads,
+        mark.rect,
+        mark.color,
+        mark.opacity,
+        mark.comment,
+        viewport.width,
+        viewport.height,
+        viewport.rotation,
+      ]);
+      let element = elements.get(mark.id);
+      if (!element) {
+        element = mark.kind === 'note' ? doc.createElement('button') : doc.createElement('div');
+        element.dataset.markId = mark.id;
+        entry.layer.prepend(element);
+        elements.set(mark.id, element);
+      }
+      element.classList.toggle('is-passive', drawing);
+      if (element.dataset.signature === signature) {
+        continue;
+      }
+      element.dataset.signature = signature;
+      element.replaceChildren();
+      const color = cssColor(mark.color);
+      const open = (event: Event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this.openMarkPopover(entry, mark.id, false);
+      };
+      if (mark.kind === 'note') {
+        const [left, top, right, bottom] = screenRectangle(viewport, mark.rect);
+        element.className = 'pfs-mark-note pfs-mark-ui';
+        (element as HTMLButtonElement).type = 'button';
+        Object.assign(element.style, {
+          left: `${left}px`,
+          top: `${top}px`,
+          width: `${right - left}px`,
+          height: `${bottom - top}px`,
+          backgroundColor: color,
+        });
+        setIcon(element, 'sticky-note');
+        setTooltip(element, mark.comment || 'Comment');
+        element.onclick = open;
+        continue;
+      }
+      element.className = 'pfs-mark-highlight';
+      for (const quad of mark.quads) {
+        const [left, top, right, bottom] = screenRectangle(viewport, quad);
+        const band = doc.createElement('div');
+        band.className = 'pfs-mark-quad';
+        Object.assign(band.style, {
+          left: `${left}px`,
+          top: `${top}px`,
+          width: `${right - left}px`,
+          height: `${bottom - top}px`,
+          backgroundColor: color,
+          opacity: String(Math.min(1, mark.opacity + 0.15)),
+        });
+        element.append(band);
+      }
+      if (mark.comment) {
+        const [, top, right] = screenRectangle(viewport, mark.quads[0]!);
+        const badge = doc.createElement('button');
+        badge.type = 'button';
+        badge.className = 'pfs-mark-badge pfs-mark-ui';
+        badge.style.left = `${right - 6}px`;
+        badge.style.top = `${top - 10}px`;
+        setIcon(badge, 'message-square');
+        setTooltip(badge, mark.comment);
+        badge.addEventListener('click', open);
+        element.append(badge);
+      }
+    }
+    const popover = this.markPopover;
+    if (popover && popover.entry === entry) {
+      const mark = marks.find((item) => item.id === popover.id);
+      if (!mark) {
+        popover.element.remove();
+        this.markPopover = undefined;
+      } else {
+        this.placeMarkPopover(popover.element, entry, mark);
+        if (doc.activeElement !== popover.textarea && popover.textarea.value !== mark.comment) {
+          popover.textarea.value = mark.comment;
+        }
+      }
+    }
+  }
+
+  private placeMarkPopover(element: HTMLElement, entry: PageLayer, mark: PdfMark): void {
+    const [left, , , bottom] = screenRectangle(entry.page.viewport, mark.rect);
+    element.style.left = `${Math.max(0, Math.min(left, entry.page.viewport.width - 260))}px`;
+    element.style.top = `${bottom + 6}px`;
+  }
+
+  private openMarkPopover(entry: PageLayer, id: string, created: boolean): void {
+    this.closeMarkPopover();
+    const mark = this.session?.snapshot.marks?.find((item) => item.id === id);
+    if (!mark) {
+      return;
+    }
+    const doc = entry.layer.ownerDocument;
+    const element = doc.createElement('div');
+    element.className = 'pfs-mark-popover pfs-mark-ui';
+    element.setAttribute('role', 'dialog');
+    element.setAttribute('aria-label', mark.kind === 'note' ? 'Comment note' : 'Highlight comment');
+    const textarea = doc.createElement('textarea');
+    textarea.className = 'pfs-mark-text';
+    textarea.placeholder = 'Add a comment…';
+    textarea.value = mark.comment;
+    textarea.spellcheck = true;
+    textarea.addEventListener('input', () => {
+      try {
+        this.session!.updateMark(id, { comment: textarea.value });
+        this.scheduleSave();
+      } catch (error) {
+        this.showError(error);
+      }
+    });
+    const row = doc.createElement('div');
+    row.className = 'pfs-mark-row';
+    for (const { name, color } of MARK_COLORS) {
+      const swatch = doc.createElement('button');
+      swatch.type = 'button';
+      swatch.className = 'pfs-mark-swatch';
+      swatch.style.backgroundColor = cssColor(color);
+      setTooltip(swatch, name);
+      swatch.addEventListener('click', () => {
+        try {
+          this.session!.updateMark(id, { color });
+          if (mark.kind === 'highlight') {
+            this.markColor = color;
+          }
+          this.scheduleSave();
+        } catch (error) {
+          this.showError(error);
+        }
+      });
+      row.append(swatch);
+    }
+    const spacer = doc.createElement('span');
+    spacer.className = 'pfs-mark-spacer';
+    row.append(spacer);
+    const remove = doc.createElement('button');
+    remove.type = 'button';
+    remove.className = 'clickable-icon pfs-mark-delete';
+    setIcon(remove, 'trash-2');
+    setTooltip(remove, mark.kind === 'note' ? 'Delete note' : 'Delete highlight');
+    remove.addEventListener('click', () => {
+      try {
+        this.session!.deleteMark(id);
+        this.scheduleSave();
+      } catch (error) {
+        this.showError(error);
+      }
+      this.closeMarkPopover();
+    });
+    const done = doc.createElement('button');
+    done.type = 'button';
+    done.className = 'clickable-icon pfs-mark-done';
+    setIcon(done, 'check');
+    setTooltip(done, 'Done');
+    done.addEventListener('click', () => this.closeMarkPopover());
+    row.append(remove, done);
+    element.append(textarea, row);
+    element.addEventListener('keydown', (event) => {
+      event.stopPropagation();
+      if (event.key === 'Escape' || (event.key === 'Enter' && (event.metaKey || event.ctrlKey))) {
+        event.preventDefault();
+        this.closeMarkPopover();
+      }
+    });
+    for (const type of ['pointerdown', 'mousedown', 'click', 'dblclick'] as const) {
+      element.addEventListener(type, (event) => event.stopPropagation());
+    }
+    this.placeMarkPopover(element, entry, mark);
+    entry.layer.append(element);
+    this.markPopover = { id, element, entry, textarea, created };
+    textarea.focus({ preventScroll: true });
+  }
+
+  private closeMarkPopover(): void {
+    const popover = this.markPopover;
+    if (!popover) {
+      return;
+    }
+    this.markPopover = undefined;
+    popover.element.remove();
+    const mark = this.session?.snapshot.marks?.find((item) => item.id === popover.id);
+    // A new note closed without text is discarded instead of leaving an empty comment.
+    if (popover.created && mark?.kind === 'note' && !mark.comment.trim()) {
+      try {
+        this.session!.deleteMark(mark.id);
+      } catch {
+        /* The document is being replaced. */
+      }
+    }
+    if (this.session?.dirty) {
+      this.scheduleSave();
+    }
   }
 
   /** Paint checkboxes, radio buttons, dropdowns and list boxes for one page. */
