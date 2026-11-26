@@ -71,6 +71,8 @@ const built = await build({
       showAtPosition() { globalThis.lastMenu = this; }
     }
     export class Modal extends Component {}
+    export class ItemView extends Component {}
+    export const normalizePath = (path) => path;
     export class Notice { constructor(text) { throw new Error(text); } }
     export function setTooltip(el, text, options = {}) { el.setAttribute('aria-label', text); el.setAttribute('data-tooltip-classes', (options.classes ?? []).join(' ')); }
     export function setIcon(el) { el.append(el.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'svg')); }

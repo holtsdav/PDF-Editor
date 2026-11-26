@@ -16,6 +16,7 @@ import type { EditorTool } from './ink-layer';
 import { cssColor, fontFaces, normalizeSymbols } from '../pdf/text-format';
 import type { FontFamily, PdfColor, TextFormat } from '../pdf/text-format';
 import { RecoveryInfo } from './recovery-info';
+import { exportMarks } from './annotation-view';
 import { RecoveryPreview } from './recovery-preview';
 import { ToolPopover } from './tool-popover';
 import { ruledAnswerBlock } from '../pdf/ruled-text';
@@ -41,13 +42,18 @@ const SHAPE_KINDS: { kind: ShapeKind; label: string; icon: string }[] = [
   { kind: 'line', label: 'Line', icon: 'minus' },
   { kind: 'arrow', label: 'Arrow', icon: 'move-up-right' },
 ];
-const SHAPE_COLORS: { name: string; color: PdfColor }[] = [
+/** One palette for lines: shapes, underlines and strikethroughs (yellow only fills shapes). */
+const LINE_COLORS: { name: string; color: PdfColor }[] = [
   { name: 'Red', color: [0.85, 0.15, 0.15] },
   { name: 'Blue', color: [0.15, 0.4, 0.85] },
   { name: 'Green', color: [0.15, 0.6, 0.25] },
   { name: 'Orange', color: [0.95, 0.55, 0.1] },
-  { name: 'Yellow', color: [1, 0.85, 0.1] },
   { name: 'Black', color: [0.1, 0.1, 0.1] },
+];
+const SHAPE_COLORS: { name: string; color: PdfColor }[] = [
+  ...LINE_COLORS.slice(0, 4),
+  { name: 'Yellow', color: [1, 0.85, 0.1] },
+  LINE_COLORS[4]!,
 ];
 const SHAPE_WIDTHS = [1, 2, 4];
 import type { PdfMark } from '../pdf/mark-engine';
@@ -57,13 +63,6 @@ const MARK_COLORS: { name: string; color: PdfColor }[] = [
   { name: 'Green', color: [0.45, 0.9, 0.45] },
   { name: 'Blue', color: [0.45, 0.75, 1] },
   { name: 'Pink', color: [1, 0.55, 0.75] },
-];
-/** Colours for underline and strikeout lines (pale highlight colours would vanish). */
-const LINE_COLORS: { name: string; color: PdfColor }[] = [
-  { name: 'Red', color: [0.85, 0.15, 0.15] },
-  { name: 'Blue', color: [0.15, 0.4, 0.85] },
-  { name: 'Green', color: [0.15, 0.6, 0.25] },
-  { name: 'Black', color: [0.1, 0.1, 0.1] },
 ];
 const colorsFor = (kind: MarkKind) =>
   kind === 'underline' || kind === 'strikeout' ? LINE_COLORS : MARK_COLORS;
@@ -379,6 +378,9 @@ export class TextEditor extends Component {
         button(this.toolbar, 'Insert image…', 'image-plus', () => this.chooseImageFile());
       }
     }
+    const separator = () =>
+      this.toolbar.createSpan({ cls: 'pfs-toolbar-separator', attr: { 'aria-hidden': 'true' } });
+    separator();
     // Highlight the PDF text selected on the page, with a colour menu.
     const highlightGroup = doc.createElement('div');
     highlightGroup.className = 'pdf-form-studio-highlight-controls';
@@ -429,6 +431,8 @@ export class TextEditor extends Component {
     // Lists and indentation for the selected text box.
     this.listGroup = doc.createElement('div');
     this.listGroup.className = 'pdf-form-studio-list-controls';
+    // Its separator lives inside the group, so it disappears with it.
+    this.listGroup.createSpan({ cls: 'pfs-toolbar-separator', attr: { 'aria-hidden': 'true' } });
     this.listGroup.setAttribute('role', 'group');
     this.listGroup.setAttribute('aria-label', 'Lists and indentation');
     this.toolbar.append(this.listGroup);
@@ -451,6 +455,7 @@ export class TextEditor extends Component {
       element.addEventListener('pointerdown', (event) => event.preventDefault());
       element.addEventListener('mousedown', (event) => event.preventDefault());
     }
+    separator();
     this.editControls = doc.createElement('div');
     this.editControls.className = 'pdf-form-studio-edit-controls';
     this.toolbar.append(this.editControls);
@@ -474,6 +479,8 @@ export class TextEditor extends Component {
       },
       false,
     );
+    // Autosave makes this rare: it lives in the More options menu (and Ctrl+S).
+    this.saveButton.remove();
     this.removeButton = button(
       this.editControls,
       withKeys('Delete selection', 'Delete'),
@@ -2208,7 +2215,13 @@ export class TextEditor extends Component {
         this.selection.remove();
         return;
       }
-      if (this.selectedStroke) {
+      if (this.selectedShape) {
+        this.deleteShapeSelection(this.selectedShape);
+        this.scheduleSave();
+      } else if (this.selectedImage) {
+        this.deleteImageSelection(this.selectedImage);
+        this.scheduleSave();
+      } else if (this.selectedStroke) {
         this.session?.deleteStroke(this.selectedStroke);
         this.selectedStroke = undefined;
         this.scheduleSave();
@@ -2286,6 +2299,14 @@ export class TextEditor extends Component {
         );
       }
       setAttr(button, 'aria-pressed', String(this.tool === tool));
+      if (tool === 'shape') {
+        // The shape tool shows the shape it will draw.
+        const icon = SHAPE_KINDS.find((item) => item.kind === this.shapeStyle.kind)!.icon;
+        if (button.dataset.icon !== icon) {
+          button.dataset.icon = icon;
+          setIcon(button, icon);
+        }
+      }
       setProp(button, 'disabled', !session || blocked);
     }
     setProp(this.editControls, 'hidden', false);
@@ -2296,18 +2317,26 @@ export class TextEditor extends Component {
     setProp(
       this.removeButton,
       'disabled',
-      (!this.selection?.objects.length && !selected?.owned && !stroke) ||
+      (!this.selection?.objects.length &&
+        !selected?.owned &&
+        !stroke &&
+        !this.selectedShape &&
+        !this.selectedImage) ||
         !!selected?.readOnly ||
         !!stroke?.readOnly ||
         blocked,
     );
-    setProp(this.removeButton, 'hidden', false);
+    setProp(this.removeButton, 'hidden', this.removeButton.disabled);
     const removeLabel = withKeys(
       this.selection?.objects.length
         ? 'Delete selection'
         : stroke
           ? 'Delete drawing'
-          : 'Delete text box',
+          : this.selectedShape
+            ? 'Delete shape'
+            : this.selectedImage
+              ? 'Delete image'
+              : 'Delete text box',
       'Delete',
     );
     if (this.removeButton.dataset.label !== removeLabel) {
@@ -2386,65 +2415,82 @@ export class TextEditor extends Component {
       this.session?.status === 'conflict' ||
       this.session?.replacing ||
       this.session?.status === 'saving';
-    menu.addItem((item) =>
-      item
-        .setTitle('Floating toolbar')
-        .setIcon('pin')
-        .setChecked(this.sessions.preferences.floatingToolbar)
-        .onClick(() => {
-          void this.sessions
-            .updatePreferences({
-              ...this.sessions.preferences,
-              floatingToolbar: !this.sessions.preferences.floatingToolbar,
-            })
-            .catch((error) => this.showError(error));
-        }),
+    const commands = (
+      this.app as unknown as {
+        commands?: { executeCommandById(id: string): boolean };
+      }
+    ).commands;
+    const item = (
+      section: string,
+      title: string,
+      icon: string,
+      run: () => void,
+      options: { disabled?: boolean; checked?: boolean } = {},
+    ) =>
+      menu.addItem((entry) => {
+        entry.setTitle(title).setIcon(icon).setSection(section).onClick(run);
+        if (options.disabled) {
+          entry.setDisabled(true);
+        }
+        if (options.checked !== undefined) {
+          entry.setChecked(options.checked);
+        }
+      });
+    item('file', withKeys('Save', 'Mod+S'), 'save', () => void this.save(), {
+      disabled: !this.session?.dirty || !!blocked,
+    });
+    item('file', 'Reload PDF', 'refresh-cw', () => this.requestReload(), {
+      disabled: !this.session,
+    });
+    item('marks', 'Show highlights and comments', 'highlighter', () =>
+      commands?.executeCommandById('pdf-editor:show-pdf-highlights'),
     );
-    menu.addSeparator();
-    menu.addItem((item) =>
-      item
-        .setTitle('Reload PDF')
-        .setIcon('refresh-cw')
-        .setDisabled(!this.session)
-        .onClick(() => this.requestReload()),
+    item(
+      'marks',
+      'Export highlights and comments to a note',
+      'file-output',
+      () => void exportMarks(this.app, this.sessions, file),
     );
-    menu.addSeparator();
-    menu.addItem((item) =>
-      item
-        .setTitle('Recovery copies…')
-        .setIcon('shield-check')
-        .onClick(() => {
-          const modal = new RecoveryInfo(this.app, this.sessions, file);
+    item(
+      'view',
+      'Floating toolbar',
+      'pin',
+      () => {
+        void this.sessions
+          .updatePreferences({
+            ...this.sessions.preferences,
+            floatingToolbar: !this.sessions.preferences.floatingToolbar,
+          })
+          .catch((error) => this.showError(error));
+      },
+      { checked: this.sessions.preferences.floatingToolbar },
+    );
+    item(
+      'backups',
+      'Preview original PDF',
+      'folder-open',
+      () => {
+        if (original) {
+          const modal = new RecoveryPreview(this.app, () => this.sessions.readRecovery(file));
           this.register(() => modal.close());
           modal.open();
-        }),
+        }
+      },
+      { disabled: !original },
     );
-    menu.addItem((item) =>
-      item
-        .setTitle('Preview original PDF')
-        .setIcon('folder-open')
-        .setDisabled(!original)
-        .onClick(() => {
-          if (original) {
-            const modal = new RecoveryPreview(this.app, () => this.sessions.readRecovery(file));
-            this.register(() => modal.close());
-            modal.open();
-          }
-        }),
-    );
-    menu.addItem((item) =>
-      item
-        .setTitle('Restore original backup…')
-        .setIcon('history')
-        .setDisabled(!original || blocked)
-        .onClick(() => this.requestRestore('original')),
-    );
-    menu.addItem((item) =>
-      item
-        .setTitle('Undo last restore…')
-        .setIcon('undo-2')
-        .setDisabled(!recovery || blocked)
-        .onClick(() => this.requestRestore('recovery')),
+    item('backups', 'Restore original…', 'history', () => this.requestRestore('original'), {
+      disabled: !original || !!blocked,
+    });
+    item('backups', 'Undo last restore…', 'undo-2', () => this.requestRestore('recovery'), {
+      disabled: !recovery || !!blocked,
+    });
+    item('backups', 'Recovery copies…', 'shield-check', () => {
+      const modal = new RecoveryInfo(this.app, this.sessions, file);
+      this.register(() => modal.close());
+      modal.open();
+    });
+    item('exit', "Open in Obsidian's PDF viewer", 'book-open', () =>
+      commands?.executeCommandById('pdf-editor:toggle-pdf-editing'),
     );
     const bounds = anchor.getBoundingClientRect();
     menu.showAtPosition({ x: bounds.left, y: bounds.bottom }, anchor.ownerDocument);
@@ -2477,7 +2523,7 @@ export class TextEditor extends Component {
         ?.checkpoint()
         .then(() => this.session?.save())
         .catch((error) => this.showError(error));
-    }, 900);
+    }, this.sessions.preferences.autosaveDelay);
   }
 
   private releaseFocus(): void {
@@ -2927,7 +2973,7 @@ export class TextEditor extends Component {
     this.highlightButton.style.setProperty('--pdf-tool-color', cssColor(this.markColor));
     setTooltip(
       this.highlightButton,
-      ready ? 'Highlight selected text' : 'Highlight selected text (select text on the PDF first)',
+      ready ? 'Highlight selected text' : 'Select text on the PDF to highlight it',
     );
   }
 
@@ -3029,25 +3075,41 @@ export class TextEditor extends Component {
     menu.className = 'pfs-highlight-colors pfs-mark-ui';
     menu.setAttribute('role', 'menu');
     menu.setAttribute('aria-label', 'Highlight color');
-    for (const { name, color } of MARK_COLORS) {
-      const swatch = doc.createElement('button');
-      swatch.type = 'button';
-      swatch.className = 'pfs-mark-swatch';
-      swatch.setAttribute('role', 'menuitemradio');
-      swatch.setAttribute('aria-checked', String(color.every((v, i) => v === this.markColor[i])));
-      swatch.style.backgroundColor = cssColor(color);
-      setTooltip(swatch, name);
-      swatch.addEventListener('pointerdown', (event) => {
-        event.preventDefault();
-        this.capturePressedSelection();
+    // Two rows: highlight colours, then line colours for underline and strikethrough.
+    const rows = [
+      { title: 'Highlight', colors: MARK_COLORS, line: false },
+      { title: 'Underline and strikethrough', colors: LINE_COLORS, line: true },
+    ];
+    for (const { title, colors, line } of rows) {
+      const row = menu.createDiv({
+        cls: 'pfs-highlight-colors-row',
+        attr: { 'aria-label': title },
       });
-      swatch.addEventListener('mousedown', (event) => event.preventDefault());
-      swatch.addEventListener('click', () => {
-        this.markColor = color;
-        this.closeHighlightColors();
-        this.highlightSelection('color');
-      });
-      menu.append(swatch);
+      for (const { name, color } of colors) {
+        const current = line ? this.lineColor : this.markColor;
+        const swatch = doc.createElement('button');
+        swatch.type = 'button';
+        swatch.className = line ? 'pfs-mark-swatch is-line' : 'pfs-mark-swatch';
+        swatch.setAttribute('role', 'menuitemradio');
+        swatch.setAttribute('aria-checked', String(color.every((v, i) => v === current[i])));
+        swatch.style.backgroundColor = cssColor(color);
+        setTooltip(swatch, line ? `${name} lines` : `Highlight ${name.toLowerCase()}`);
+        swatch.addEventListener('pointerdown', (event) => {
+          event.preventDefault();
+          this.capturePressedSelection();
+        });
+        swatch.addEventListener('mousedown', (event) => event.preventDefault());
+        swatch.addEventListener('click', () => {
+          this.closeHighlightColors();
+          if (line) {
+            this.lineColor = color;
+            return;
+          }
+          this.markColor = color;
+          this.highlightSelection('color');
+        });
+        row.append(swatch);
+      }
     }
     const box = anchor.getBoundingClientRect();
     const view = doc.defaultView!;
@@ -3186,6 +3248,9 @@ export class TextEditor extends Component {
       });
       bar.append(swatch);
     }
+    const divider = () =>
+      bar.createSpan({ cls: 'pfs-bar-separator', attr: { 'aria-hidden': 'true' } });
+    divider();
     const comment = doc.createElement('button');
     comment.type = 'button';
     comment.className = 'clickable-icon pfs-mark-comment-button';
@@ -3193,6 +3258,7 @@ export class TextEditor extends Component {
     setTooltip(comment, 'Highlight and comment');
     comment.addEventListener('click', () => this.createHighlights(quads, 'comment'));
     bar.append(comment);
+    divider();
     for (const [kind, icon, label] of [
       ['underline', 'underline', 'Underline'],
       ['strikeout', 'strikethrough', 'Strike through'],
@@ -3214,7 +3280,8 @@ export class TextEditor extends Component {
       const remove = doc.createElement('button');
       remove.type = 'button';
       remove.className = 'clickable-icon pfs-mark-remove-button';
-      setIcon(remove, 'eraser');
+      divider();
+      setIcon(remove, 'x');
       setTooltip(remove, 'Remove highlight from selection');
       remove.addEventListener('click', () => this.createHighlights(quads, 'toggle'));
       bar.append(remove);
@@ -3263,6 +3330,7 @@ export class TextEditor extends Component {
           kind: 'highlight',
           quads: rects,
           color: this.markColor,
+          opacity: this.sessions.preferences.highlightOpacity / 100,
         });
         opened = { entry, id: mark.id };
       }
@@ -4780,10 +4848,23 @@ export class TextEditor extends Component {
     element.className = 'pfs-mark-popover pfs-mark-ui';
     element.setAttribute('role', 'dialog');
     element.setAttribute('aria-label', mark.kind === 'note' ? 'Note' : 'Comment');
-    if (mark.foreign) {
+    // Who and when: other apps' author, and the last change for every mark.
+    const changed = /^D:(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})/.exec(mark.modified);
+    const when =
+      changed && changed[1] !== '1970'
+        ? new Date(
+            Number(changed[1]),
+            Number(changed[2]) - 1,
+            Number(changed[3]),
+            Number(changed[4]),
+            Number(changed[5]),
+          ).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+        : '';
+    const who = mark.foreign ? mark.author || 'Made in another app' : '';
+    if (who || when) {
       const meta = doc.createElement('div');
       meta.className = 'pfs-mark-meta';
-      meta.textContent = mark.author ? `By ${mark.author}` : 'Made in another app';
+      meta.textContent = [who && mark.author ? `By ${who}` : who, when].filter(Boolean).join(' · ');
       element.append(meta);
     }
     const textarea = doc.createElement('textarea');
@@ -4827,9 +4908,17 @@ export class TextEditor extends Component {
     row.append(spacer);
     const remove = doc.createElement('button');
     remove.type = 'button';
-    remove.className = 'clickable-icon pfs-mark-delete';
+    remove.className = 'clickable-icon pfs-mark-delete mod-warning';
     setIcon(remove, 'trash-2');
-    setTooltip(remove, mark.kind === 'note' ? 'Delete note' : 'Delete highlight');
+    setTooltip(
+      remove,
+      {
+        note: 'Delete note',
+        highlight: 'Delete highlight',
+        underline: 'Delete underline',
+        strikeout: 'Delete strikethrough',
+      }[mark.kind],
+    );
     remove.addEventListener('click', () => {
       try {
         this.session!.deleteMark(id);
@@ -4843,7 +4932,7 @@ export class TextEditor extends Component {
     done.type = 'button';
     done.className = 'clickable-icon pfs-mark-done';
     setIcon(done, 'check');
-    setTooltip(done, 'Done');
+    setTooltip(done, withKeys('Done', 'Mod+Enter'));
     done.addEventListener('click', () => this.closeMarkPopover());
     row.append(remove, done);
     element.append(textarea, row);

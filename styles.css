@@ -53,8 +53,8 @@
   color: var(--icon-color-hover);
 }
 .pdf-form-studio-toolbar .pdf-form-studio-icon[aria-pressed='true'] {
-  background: var(--background-modifier-hover);
-  color: var(--text-accent);
+  background: var(--background-modifier-active-hover);
+  color: var(--interactive-accent);
 }
 .pdf-form-studio-toolbar .pdf-form-studio-icon:disabled {
   opacity: 0.35;
@@ -1340,6 +1340,7 @@ button.pfs-choice.is-round {
   position: fixed;
   z-index: var(--layer-menu, 65);
   display: flex;
+  flex-direction: column;
   gap: 6px;
   padding: 6px;
   background: var(--background-primary);
@@ -1581,4 +1582,28 @@ button.pfs-choice.is-round {
 }
 .pfs-shapes-live.is-active {
   will-change: transform;
+}
+
+/* Groups in the toolbar and the selection bar. */
+.pfs-toolbar-separator,
+.pfs-bar-separator {
+  flex: 0 0 auto;
+  align-self: center;
+  width: 1px;
+  height: 18px;
+  margin: 0 4px;
+  background: var(--background-modifier-border);
+}
+.pfs-highlight-colors-row {
+  display: flex;
+  gap: 6px;
+}
+/* Line colours are shown as lines, highlight colours as fills. */
+.pfs-mark-swatch.is-line {
+  background-clip: content-box;
+  padding: 7px 0;
+  box-sizing: border-box;
+}
+.pfs-mark-delete.mod-warning {
+  color: var(--text-error);
 }
