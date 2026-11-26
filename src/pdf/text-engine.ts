@@ -121,6 +121,13 @@ export interface TextChanges {
   deletedImages?: Set<string>;
 }
 
+/** Thrown when a background save is abandoned because newer edits arrived. */
+export class SaveCancelled extends Error {
+  constructor() {
+    super('Save superseded by newer edits.');
+  }
+}
+
 /** Autosave runs while the user types: let input and painting in between save phases. */
 const yieldToInput = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
@@ -548,7 +555,14 @@ export async function writeTextPdf(
   seed: Uint8Array,
   changes: TextChanges,
   fontBytes: PdfFonts,
+  cancelled?: () => boolean,
 ): Promise<Uint8Array> {
+  const pause = async () => {
+    await yieldToInput();
+    if (cancelled?.()) {
+      throw new SaveCancelled();
+    }
+  };
   let tracking: ReturnType<typeof trackChanges> | undefined;
   let bytes: Uint8Array;
   let pdf: PDFDocument;
@@ -556,7 +570,7 @@ export async function writeTextPdf(
     pdf = await loadWritable(seed, (loaded) => {
       tracking = trackChanges(loaded, seed);
     });
-    await yieldToInput();
+    await pause();
     pdf.registerFontkit(fontkit);
     const form = pdf.getForm();
     const fields = fieldIndex(form);
@@ -858,16 +872,16 @@ export async function writeTextPdf(
       await writeImages(pdf, changes.images ?? new Map(), changes.deletedImages ?? new Set());
     }
     await pdf.flush();
-    await yieldToInput();
+    await pause();
     // Embedded fonts may only resolve after flush; expand the captured refs then.
     pruneReplacedObjects(pdf, referencedObjects(pdf, [...replaced]));
-    await yieldToInput();
+    await pause();
     // Append only what changed to the original bytes; rewrite the file when that is not possible.
     bytes = incrementalBytes(seed, pdf, tracking!.tracker) ?? (await pdf.save(pdfSaveOptions(pdf)));
   } finally {
     tracking?.stop();
   }
-  await yieldToInput();
+  await pause();
   // Reopen and verify logical values, widget appearances, and page count before any vault write.
   const verified = await loadPdfDocument(bytes);
   const saved = fieldIndex(verified.getForm());

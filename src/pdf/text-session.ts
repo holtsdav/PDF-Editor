@@ -1,4 +1,10 @@
-import { FIELD_PREFIX, readTextPdf, renderTextPdf, writeTextPdf } from './text-engine.ts';
+import {
+  FIELD_PREFIX,
+  SaveCancelled,
+  readTextPdf,
+  renderTextPdf,
+  writeTextPdf,
+} from './text-engine.ts';
 import type {
   AddedField,
   BoxUpdate,
@@ -1757,20 +1763,26 @@ export class TextSession {
         ) {
           return;
         }
-        let revision: number;
-        let baseline: Uint8Array;
+        const revision = this.revision;
+        const baseline = this.baseline;
         let bytes: Uint8Array;
-        do {
-          revision = this.revision;
-          baseline = this.baseline;
+        // While the user keeps typing, give up instead of rebuilding the PDF after
+        // every keystroke; the next pause in typing schedules a fresh checkpoint.
+        const superseded = () => revision !== this.revision || baseline !== this.baseline;
+        try {
           bytes =
             this.candidate?.revision === revision
               ? this.candidate.bytes
-              : await writeTextPdf(this.seed, this.cloneChanges(), this.font);
-          if (epoch !== this.editEpoch || !this.dirty || this.conflicted) {
+              : await writeTextPdf(this.seed, this.cloneChanges(), this.font, superseded);
+        } catch (error) {
+          if (error instanceof SaveCancelled) {
             return;
           }
-        } while (revision !== this.revision || baseline !== this.baseline);
+          throw error;
+        }
+        if (epoch !== this.editEpoch || !this.dirty || this.conflicted || superseded()) {
+          return;
+        }
         this.candidate = { revision, bytes };
         await this.store.draft.write({ baselineHash: await hash(baseline), bytes });
         if (epoch === this.editEpoch && baseline === this.baseline) {
@@ -1997,9 +2009,12 @@ export class TextSession {
         if (epoch !== undefined && epoch !== this.editEpoch) {
           return;
         }
+        // Edits made while this save ran stay unsaved for the next autosave. Writing
+        // this complete, verified revision now (instead of rebuilding the PDF again
+        // and again while the user types) keeps typing during a save smooth.
       } while (
-        revision !== this.revision ||
-        (generation !== undefined && !this.interactions.isIdle(generation))
+        generation !== undefined &&
+        (revision !== this.revision || !this.interactions.isIdle(generation))
       );
       await this.store.write(output);
       if (!equalBytes(await this.store.read(), output)) {
