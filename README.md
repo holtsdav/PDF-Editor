@@ -24,6 +24,10 @@ Select printed text and press the highlight button in the toolbar (or the bar ne
 
 Draw rectangles, ellipses (outline or filled), lines and arrows with the shape tool; choose kind, colour and width in its menu. Select a shape to move it, resize it from its handles, turn rectangles and ellipses with the round handle (**Shift** snaps to 15°), nudge it with the arrow keys or delete it. Shapes are saved as standard PDF annotations.
 
+Paste a picture with **Ctrl/Cmd + V**, for example a screenshot taken with your system's tool, or insert an image file from the toolbar. Pictures can be moved, resized in proportion (**Shift** for free resizing), turned in 90° steps, locked, copied and duplicated, and are saved as standard stamp annotations.
+
+Right-click shapes, pictures, highlights, notes, text boxes, drawings or an empty spot on the page for a menu with cut, copy, paste, duplicate, delete, turn, flip, lock, colours and comments.
+
 Enable **Snap to text** in the highlighter options to follow printed text. When text is unavailable, highlighting falls back to freehand. Optional drawing assistance smooths strokes and snaps held lines and shapes.
 
 ### Edit inside your notes
