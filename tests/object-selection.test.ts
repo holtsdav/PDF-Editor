@@ -5,6 +5,7 @@ import { PDFDocument } from 'pdf-lib';
 import { TextSession } from '../src/pdf/text-session.ts';
 import type { PdfObject } from '../src/pdf/text-session.ts';
 import { readTextPdf } from '../src/pdf/text-engine.ts';
+import { png } from './fixtures/pictures.ts';
 const font = new Uint8Array(
   await readFile(new URL('../assets/fonts/NotoSans-Regular.ttf', import.meta.url)),
 );
@@ -160,4 +161,37 @@ test('copy and paste create independent text and ink with one undo step', async 
   f.session.redoStroke();
   assert.equal(f.session.snapshot.fields.length, 3);
   assert.equal(f.session.snapshot.strokes.length, 2);
+});
+
+test('shapes and pictures copy, paste, move and delete as group members; locked ones are refused', async () => {
+  const f = await fixture();
+  const shape = f.session.addShape({
+    page: 1,
+    kind: 'arrow',
+    start: [300, 300],
+    end: [400, 360],
+    color: [1, 0, 0],
+    width: 2,
+  });
+  const picture = f.session.addImage({ page: 1, box: [300, 100, 360, 130], bytes: png(4, 2) });
+  const group: PdfObject[] = [
+    ...f.objects,
+    { kind: 'shape', id: shape.id },
+    { kind: 'image', id: picture.id },
+  ];
+  const created = f.session.pasteObjects(f.session.copyObjects(group));
+  assert.deepEqual(
+    created.map((item) => item.kind),
+    ['text', 'ink', 'shape', 'image'],
+  );
+  assert.deepEqual(f.session.snapshot.shapes![1]!.end, [412, 348]);
+  assert.deepEqual(f.session.snapshot.images![1]!.box, [312, 88, 372, 118]);
+  f.session.moveObjects(created, [-12, 12]);
+  assert.deepEqual(f.session.snapshot.shapes![1]!.start, shape.start);
+  f.session.deleteObjects(created.slice(2));
+  await f.session.save();
+  const saved = await readTextPdf(f.bytes());
+  assert.deepEqual([saved.shapes!.length, saved.images!.length], [1, 1]);
+  f.session.updateShape(shape.id, { locked: true });
+  assert.throws(() => f.session.moveObjects([{ kind: 'shape', id: shape.id }], [5, 5]), /group/);
 });

@@ -14,6 +14,7 @@ import type { VaultSessions } from '../src/pdf/vault-sessions.ts';
 import type { App } from 'obsidian';
 import { authoredForms, prefixBlank } from './fixtures/authored-forms.ts';
 import { orphanForms } from './fixtures/orphan-forms.ts';
+import { png } from './fixtures/pictures.ts';
 import { getDocument, OPS } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { bindSurfaceInput } from '../src/ui/surface-input.ts';
 
@@ -45,7 +46,28 @@ const built = await build({
       unload() { this.onunload?.(); for (const child of this.children) child.unload(); for (const fn of this.cleanups.splice(0).reverse()) fn(); }
     }
     export class Scope { constructor(parent) { this.parent = parent; this.handlers = []; } register(modifiers, key, func) { const handler = { modifiers, key, func }; this.handlers.push(handler); return handler; } }
-    export class Menu { hide() {} }
+    export class Menu {
+      items = [];
+      hide() { this.hidden?.(); }
+      onHide(fn) { this.hidden = fn; return this; }
+      addSeparator() { return this; }
+      addItem(build) {
+        const item = { title: '', disabled: false, checked: undefined, click: () => {} };
+        const api = {
+          setTitle(t) { item.title = t; return api; },
+          setIcon() { return api; },
+          setSection() { return api; },
+          setDisabled(d) { item.disabled = d; return api; },
+          setChecked(c) { item.checked = c; return api; },
+          onClick(fn) { item.click = fn; return api; },
+        };
+        build(api);
+        this.items.push(item);
+        return this;
+      }
+      showAtMouseEvent() { globalThis.lastMenu = this; }
+      showAtPosition() { globalThis.lastMenu = this; }
+    }
     export class Modal extends Component {}
     export class Notice { constructor(text) { throw new Error(text); } }
     export function setTooltip(el, text, options = {}) { el.setAttribute('aria-label', text); el.setAttribute('data-tooltip-classes', (options.classes ?? []).join(' ')); }
@@ -886,6 +908,24 @@ test('click and drag Text placement each return to Select after one box', async 
 test('blank-space marquee selects mixed objects, moves as one group, cancels and undoes atomically', async () => {
   const f = await fixture();
   try {
+    // Shapes and pictures join groups too; a separate arrow and picture are added by Shift+click.
+    const shape = f.session.addShape({
+      page: 1,
+      kind: 'rectangle',
+      box: [200, 640, 260, 670],
+      color: [1, 0, 0],
+      width: 2,
+    });
+    const arrow = f.session.addShape({
+      page: 1,
+      kind: 'arrow',
+      start: [400, 300],
+      end: [500, 350],
+      color: [0, 0, 1],
+      width: 2,
+    });
+    const picture = f.session.addImage({ page: 1, box: [400, 100, 460, 130], bytes: png(4, 2) });
+    f.editor.refresh();
     const text = f.session.add(1, [80, 580, 180, 610], 14, true);
     f.session.setValue(text.name, 'Group answer');
     const stroke = f.session.addStroke(
@@ -902,7 +942,24 @@ test('blank-space marquee selects mixed objects, moves as one group, cancels and
     f.pointer(page, 'pointerdown', 60, 160);
     f.pointer(page, 'pointermove', 310, 240);
     f.pointer(page, 'pointerup', 310, 240);
-    assert.equal(f.doc.querySelectorAll('.is-multi-selected').length, 2);
+    assert.equal(f.doc.querySelectorAll('.is-multi-selected').length, 3);
+    for (const [selector, x, y] of [
+      [`[data-shape-id="${arrow.id}"] .pfs-shape-hit`, 450, 475],
+      [`[data-image-id="${picture.id}"]`, 430, 685],
+    ] as const) {
+      const down = f.pointer(f.doc.querySelector(selector)!, 'pointerdown', x, y, true);
+      assert.equal(down.defaultPrevented, true);
+    }
+    assert.deepEqual(
+      (f.editor as unknown as { selection: { objects: { kind: string }[] } }).selection.objects
+        .map((item) => item.kind)
+        .sort(),
+      ['image', 'ink', 'shape', 'shape', 'text'],
+    );
+    // Back to the marquee group for the move below.
+    f.pointer(page, 'pointerdown', 60, 160);
+    f.pointer(page, 'pointermove', 310, 240);
+    f.pointer(page, 'pointerup', 310, 240);
     const originalText = [...text.widgets[0]!.rect];
     const originalInk = structuredClone(stroke.points);
     const frame = f.doc.querySelector('.pdf-form-studio-box')!;
@@ -923,6 +980,8 @@ test('blank-space marquee selects mixed objects, moves as one group, cancels and
       f.session.snapshot.strokes[0]!.points,
       originalInk.map(([x, y]) => [x + 30, y - 20]),
     );
+    assert.deepEqual(f.session.snapshot.shapes![0]!.box, [230, 620, 290, 650]);
+    assert.equal(f.session.snapshot.shapes![0]!.id, shape.id);
     f.doc.body.dispatchEvent(f.key('z', { metaKey: true }));
     assert.deepEqual(f.session.snapshot.fields[0]!.widgets[0]!.rect, originalText);
     assert.deepEqual(f.session.snapshot.strokes[0]!.points, originalInk);
@@ -931,12 +990,19 @@ test('blank-space marquee selects mixed objects, moves as one group, cancels and
     const reopened = await readTextPdf(f.bytes());
     assert.equal(reopened.fields[0]!.value, 'Group answer');
     assert.equal(reopened.strokes.length, 1);
+    assert.equal(reopened.shapes!.length, 2);
     f.doc.body.dispatchEvent(f.key('Delete'));
     assert.equal(f.session.snapshot.fields.length, 0);
     assert.equal(f.session.snapshot.strokes.length, 0);
+    assert.deepEqual(
+      f.session.snapshot.shapes!.map((item) => item.id),
+      [arrow.id],
+    );
     f.session.undoStroke();
     assert.equal(f.session.snapshot.fields.length, 1);
     assert.equal(f.session.snapshot.strokes.length, 1);
+    assert.equal(f.session.snapshot.shapes!.length, 2);
+    assert.equal(f.session.snapshot.images!.length, 1);
   } finally {
     f.dispose();
   }
@@ -2075,5 +2141,798 @@ test('snapped marker preview and saved PDF use the selected thickness as a minim
     } finally {
       f.dispose();
     }
+  }
+});
+
+test('checkboxes, radio buttons and dropdowns are clickable on the page and autosave', async () => {
+  const pdf = await PDFDocument.create();
+  const page = pdf.addPage([600, 800]);
+  const form = pdf.getForm();
+  form.createCheckBox('agree').addToPage(page, { x: 40, y: 700, width: 16, height: 16 });
+  const radio = form.createRadioGroup('size');
+  radio.addOptionToPage('small', page, { x: 40, y: 650, width: 14, height: 14 });
+  radio.addOptionToPage('large', page, { x: 90, y: 650, width: 14, height: 14 });
+  const dropdown = form.createDropdown('country');
+  dropdown.addOptions(['Germany', 'Austria']);
+  dropdown.addToPage(page, { x: 40, y: 600, width: 160, height: 20 });
+  const locked = form.createCheckBox('locked');
+  locked.addToPage(page, { x: 40, y: 550, width: 16, height: 16 });
+  locked.enableReadOnly();
+  const f = await fixture(1, false, 0, await pdf.save());
+  try {
+    const checkbox = f.doc.querySelector<HTMLButtonElement>('button.pfs-choice-checkbox')!;
+    assert.ok(checkbox, 'editable checkbox is painted');
+    assert.equal(
+      f.doc.querySelectorAll('button.pfs-choice-checkbox').length,
+      1,
+      'read-only stays in background',
+    );
+    assert.equal(checkbox.getAttribute('aria-checked'), 'false');
+    // Placed over the PDF widget rectangle, including pdf-lib's half-border padding.
+    assert.deepEqual(
+      [checkbox.style.left, checkbox.style.top, checkbox.style.width, checkbox.style.height],
+      ['39.5px', '83.5px', '17px', '17px'],
+    );
+    checkbox.click();
+    assert.equal(checkbox.getAttribute('aria-checked'), 'true');
+    assert.equal(checkbox.textContent, '✔');
+    checkbox.click();
+    assert.equal(checkbox.getAttribute('aria-checked'), 'false');
+    checkbox.click();
+
+    const radios = [...f.doc.querySelectorAll<HTMLButtonElement>('button.pfs-choice-radio')];
+    assert.equal(radios.length, 2);
+    radios[1]!.click();
+    assert.deepEqual(
+      radios.map((button) => button.getAttribute('aria-checked')),
+      ['false', 'true'],
+    );
+    radios[0]!.click();
+    assert.deepEqual(
+      radios.map((button) => button.getAttribute('aria-checked')),
+      ['true', 'false'],
+    );
+
+    const select = f.doc.querySelector<HTMLSelectElement>('select.pfs-choice-select')!;
+    assert.deepEqual(
+      [...select.options].map((option) => option.value),
+      ['', 'Germany', 'Austria'],
+    );
+    select.value = 'Austria';
+    select.dispatchEvent(new f.doc.defaultView!.Event('change', { bubbles: true }));
+    assert.equal(
+      f.session.snapshot.choices!.find((field) => field.name === 'country')!.value,
+      'Austria',
+    );
+
+    // Undo reverts the last choice and the control follows.
+    f.session.undoStroke();
+    f.editor.refresh();
+    assert.equal(select.value, '');
+
+    select.value = 'Germany';
+    select.dispatchEvent(new f.doc.defaultView!.Event('change', { bubbles: true }));
+    await pause(1100);
+    await f.session.save();
+    assert.equal(f.session.status, 'saved');
+    const saved = (await PDFDocument.load(f.bytes())).getForm();
+    assert.equal(saved.getCheckBox('agree').isChecked(), true);
+    assert.equal(saved.getRadioGroup('size').getSelected(), 'small');
+    assert.deepEqual(saved.getDropdown('country').getSelected(), ['Germany']);
+    assert.equal(saved.getCheckBox('locked').isChecked(), false);
+  } finally {
+    f.dispose();
+  }
+});
+
+test('selected PDF text is highlighted, commented and saved; notes are placed with the note tool', async () => {
+  const f = await fixture();
+  try {
+    const page = f.doc.querySelector<HTMLElement>('#page')!;
+    const textLayer = f.doc.createElement('div');
+    textLayer.className = 'textLayer pfs-text-layer';
+    const span = f.doc.createElement('span');
+    span.textContent = 'Important sentence';
+    textLayer.append(span);
+    page.prepend(textLayer);
+    // jsdom has no layout: the selection covers one text line at y 100-114 (viewport px).
+    const range = f.doc.createRange();
+    range.selectNodeContents(span);
+    Object.assign(f.doc.defaultView!.Range.prototype, {
+      getClientRects: () => [
+        { left: 50, right: 150, top: 100, bottom: 114, width: 100, height: 14 },
+        { left: 150, right: 220, top: 100.5, bottom: 113.5, width: 70, height: 13 },
+      ],
+    });
+    const selection = f.doc.getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    f.pointer(span, 'pointerup');
+    await pause(5);
+    const bar = f.doc.querySelector<HTMLElement>('.pfs-selection-bar')!;
+    assert.ok(bar, 'highlight bar appears next to the selection');
+    const swatches = [...bar.querySelectorAll<HTMLButtonElement>('.pfs-mark-swatch')];
+    assert.equal(swatches.length, 4);
+    swatches[1]!.click(); // green
+    assert.equal(f.doc.querySelector('.pfs-selection-bar'), null);
+    const marks = f.session.snapshot.marks!;
+    assert.equal(marks.length, 1);
+    // Two selection rectangles on one line become one PDF quad (y flipped).
+    assert.deepEqual(marks[0]!.quads, [[50, 686, 220, 700]]);
+    assert.deepEqual(marks[0]!.color, [0.45, 0.9, 0.45]);
+    assert.equal(f.doc.querySelectorAll('.pfs-mark-quad').length, 1);
+
+    // Clicking the highlighted text opens its comment box.
+    const click = new f.doc.defaultView!.MouseEvent('click', {
+      bubbles: true,
+      clientX: 100,
+      clientY: 107,
+    });
+    span.dispatchEvent(click);
+    const popover = f.doc.querySelector<HTMLElement>('.pfs-mark-popover')!;
+    assert.ok(popover, 'comment box opens');
+    const textarea = popover.querySelector<HTMLTextAreaElement>('textarea')!;
+    // After focus leaves (e.g. another window), clicking back into the comment must work.
+    textarea.blur();
+    assert.equal(f.pointer(textarea, 'pointerdown', 100, 130).defaultPrevented, false);
+    assert.ok(f.doc.querySelector('.pfs-mark-popover'), 'comment box stays open');
+    textarea.value = 'Prüfungsrelevant';
+    textarea.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true }));
+    popover.querySelector<HTMLButtonElement>('.pfs-mark-done')!.click();
+    assert.equal(f.doc.querySelector('.pfs-mark-popover'), null);
+    assert.ok(f.doc.querySelector('.pfs-mark-badge'), 'commented highlights show a badge');
+
+    // Note tool: click places a note and opens its comment box.
+    f.tool('Add comment note');
+    const layer = f.doc.querySelector<HTMLElement>('.pdf-form-studio-layer')!;
+    assert.equal(layer.dataset.tool, 'note');
+    f.pointer(layer, 'pointerdown', 400, 200);
+    const notePopover = f.doc.querySelector<HTMLElement>('.pfs-mark-popover')!;
+    assert.ok(notePopover);
+    const noteText = notePopover.querySelector<HTMLTextAreaElement>('textarea')!;
+    noteText.value = 'Frage klären';
+    noteText.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true }));
+    notePopover.querySelector<HTMLButtonElement>('.pfs-mark-done')!.click();
+    assert.ok(f.doc.querySelector('.pfs-mark-note'));
+
+    // A note closed without text is discarded.
+    f.tool('Add comment note');
+    f.pointer(layer, 'pointerdown', 300, 300);
+    f.doc.querySelector<HTMLButtonElement>('.pfs-mark-popover .pfs-mark-done')!.click();
+    assert.equal(f.session.snapshot.marks!.length, 2);
+
+    await f.session.save();
+    const saved = await PDFDocument.load(f.bytes());
+    const annotations = await (
+      await (await getDocument({ data: f.bytes().slice() }).promise).getPage(1)
+    ).getAnnotations();
+    assert.deepEqual(
+      annotations
+        .filter((item) => item.subtype !== 'Popup')
+        .map((item) => [item.subtype, item.contentsObj?.str]),
+      [
+        ['Highlight', 'Prüfungsrelevant'],
+        ['Text', 'Frage klären'],
+      ],
+    );
+    assert.equal(saved.getPageCount(), 1);
+  } finally {
+    f.dispose();
+  }
+});
+
+test('toolbar list buttons and keys make bulleted and numbered lists and indent text boxes', async () => {
+  const f = await fixture();
+  try {
+    const group = f.doc.querySelector<HTMLElement>('.pdf-form-studio-list-controls')!;
+    assert.ok(group, 'list buttons live in the toolbar');
+    assert.equal(group.hidden, true, 'hidden while no text box is selected');
+    const field = f.session.add(1, [80, 500, 400, 640], 14, true);
+    f.editor.refresh();
+    const input = f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!;
+    // assert.equal narrows literal types; read the live value through a function.
+    const text = (): string => input.value;
+    input.focus();
+    input.value = 'Milk\nEggs';
+    input.dispatchEvent(new f.doc.defaultView!.Event('input'));
+    assert.equal(group.hidden, false, 'shown while typing in a text box');
+
+    // f.tool presses like a real click: pointerdown, focus moves to the button, then click.
+    input.setSelectionRange(0, input.value.length);
+    f.tool('Numbered list');
+    assert.equal(text(), '1. Milk\n2. Eggs');
+    assert.equal(f.doc.activeElement, input, 'typing continues in the text box');
+    assert.equal(input.readOnly, false);
+
+    // Enter at the end continues numbering.
+    input.setSelectionRange(input.value.length, input.value.length);
+    const enter = f.key('Enter');
+    input.dispatchEvent(enter);
+    assert.equal(enter.defaultPrevented, true);
+    assert.equal(text(), '1. Milk\n2. Eggs\n3. ');
+    input.setRangeText('Bread', input.selectionStart, input.selectionEnd, 'end');
+    input.dispatchEvent(new f.doc.defaultView!.Event('input'));
+
+    // Tab nests the current item; the toolbar buttons change indentation too.
+    input.dispatchEvent(f.key('Tab'));
+    assert.equal(text(), '1. Milk\n2. Eggs\n    a. Bread');
+    f.tool('Decrease indent');
+    assert.equal(text(), '1. Milk\n2. Eggs\n3. Bread');
+    f.tool('Increase indent');
+    input.setSelectionRange(0, input.value.length);
+    f.tool('Bulleted list');
+    assert.equal(text(), '• Milk\n• Eggs\n    – Bread');
+    assert.equal(f.session.snapshot.fields.find((item) => item.name === field.name)!.value, text());
+
+    // A selected (not focused) box is still a target; without a caret all lines change.
+    input.blur();
+    f.tool('Bulleted list');
+    assert.equal(text(), 'Milk\nEggs\n    Bread');
+
+    // One undo step per list action.
+    f.session.undoStroke();
+    assert.equal(
+      f.session.snapshot.fields.find((item) => item.name === field.name)!.value,
+      '• Milk\n• Eggs\n    – Bread',
+    );
+    await f.session.save();
+    const saved = (await PDFDocument.load(f.bytes())).getForm().getTextField(field.name);
+    assert.equal(saved.getText(), '• Milk\n• Eggs\n    – Bread');
+
+    // Clicking outside the box hides the buttons again.
+    const outside = f.doc.querySelector<HTMLButtonElement>('#outside')!;
+    f.pointer(outside, 'pointerdown');
+    outside.focus();
+    await pause(5);
+    assert.equal(group.hidden, true);
+  } finally {
+    f.dispose();
+  }
+});
+
+test('the toolbar highlight button highlights selected PDF text in the chosen colour', async () => {
+  const f = await fixture();
+  try {
+    const page = f.doc.querySelector<HTMLElement>('#page')!;
+    const textLayer = f.doc.createElement('div');
+    textLayer.className = 'textLayer pfs-text-layer';
+    const span = f.doc.createElement('span');
+    span.textContent = 'Printed sentence';
+    textLayer.append(span);
+    page.prepend(textLayer);
+    Object.assign(f.doc.defaultView!.Range.prototype, {
+      getClientRects: () => [
+        { left: 50, right: 200, top: 100, bottom: 114, width: 150, height: 14 },
+      ],
+    });
+    const button = f.doc.querySelector<HTMLButtonElement>('.pfs-highlight-button')!;
+    assert.ok(button, 'highlight button sits in the toolbar');
+    assert.equal(button.disabled, true, 'disabled without a text selection');
+    const select = () => {
+      const range = f.doc.createRange();
+      range.selectNodeContents(span);
+      f.doc.getSelection()!.removeAllRanges();
+      f.doc.getSelection()!.addRange(range);
+    };
+    // jsdom reports selection changes asynchronously; wait until the button is ready.
+    const ready = async () => {
+      for (let i = 0; i < 100 && button.disabled; i++) {
+        await pause(5);
+      }
+      assert.equal(button.disabled, false);
+    };
+    select();
+    await ready();
+    // Pick blue from the colour menu: with text selected this highlights immediately.
+    f.tool('Highlight colour');
+    // The menu is a document-level portal: inside the scrolling toolbar it would be clipped.
+    const menu = f.doc.querySelector<HTMLElement>('.pfs-highlight-colors')!;
+    assert.equal(menu.parentElement, f.doc.body);
+    assert.equal(f.doc.querySelector('.pdf-form-studio-toolbar .pfs-highlight-colors'), null);
+    const blue = f.doc.querySelectorAll<HTMLButtonElement>(
+      '.pfs-highlight-colors .pfs-mark-swatch',
+    )[2]!;
+    f.pointer(blue, 'pointerdown');
+    blue.click();
+    assert.equal(f.doc.querySelector('.pfs-highlight-colors'), null);
+    assert.deepEqual(
+      f.session.snapshot.marks!.map((mark) => mark.color),
+      [[0.45, 0.75, 1]],
+    );
+    // Pressing the main button on that text again removes the highlight (toggle).
+    const press = (element: HTMLElement) => {
+      f.pointer(element, 'pointerdown');
+      element.focus();
+      element.click();
+    };
+    select();
+    await ready();
+    press(button);
+    assert.equal(f.session.snapshot.marks!.length, 0);
+    assert.equal(f.doc.getSelection()!.isCollapsed, true);
+    // The main button reuses the chosen colour on unhighlighted text.
+    select();
+    await ready();
+    press(button);
+    assert.deepEqual(
+      f.session.snapshot.marks!.map((mark) => mark.color),
+      [[0.45, 0.75, 1]],
+    );
+    // Highlight + comment on highlighted text opens its comment box.
+    select();
+    await ready();
+    press(
+      f.doc.querySelector<HTMLButtonElement>(
+        'button[aria-label="Highlight selected text and comment"]',
+      )!,
+    );
+    assert.ok(f.doc.querySelector('.pfs-mark-popover textarea'));
+    assert.equal(f.session.snapshot.marks!.length, 1);
+    // Underline and strikethrough buttons add red lines; pressing again removes them.
+    f.doc.querySelector<HTMLButtonElement>('.pfs-mark-done')?.click();
+    for (const label of ['Underline selected text', 'Strike through selected text']) {
+      select();
+      await ready();
+      press(f.doc.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!);
+    }
+    assert.deepEqual(
+      f.session.snapshot.marks!.map((mark) => [mark.kind, mark.color]),
+      [
+        ['highlight', [0.45, 0.75, 1]],
+        ['underline', [0.85, 0.15, 0.15]],
+        ['strikeout', [0.85, 0.15, 0.15]],
+      ],
+    );
+    select();
+    await ready();
+    press(f.doc.querySelector<HTMLButtonElement>('button[aria-label="Underline selected text"]')!);
+    assert.deepEqual(
+      f.session.snapshot.marks!.map((mark) => mark.kind),
+      ['highlight', 'strikeout'],
+    );
+  } finally {
+    f.dispose();
+  }
+});
+
+test('pressing highlight again on highlighted text removes that highlight', async () => {
+  const f = await fixture();
+  try {
+    const page = f.doc.querySelector<HTMLElement>('#page')!;
+    const textLayer = f.doc.createElement('div');
+    textLayer.className = 'textLayer pfs-text-layer';
+    const span = f.doc.createElement('span');
+    span.textContent = 'Printed sentence';
+    textLayer.append(span);
+    page.prepend(textLayer);
+    let rects = [{ left: 50, right: 200, top: 100, bottom: 114, width: 150, height: 14 }];
+    Object.assign(f.doc.defaultView!.Range.prototype, { getClientRects: () => rects });
+    const button = f.doc.querySelector<HTMLButtonElement>('.pfs-highlight-button')!;
+    const select = async () => {
+      const range = f.doc.createRange();
+      range.selectNodeContents(span);
+      f.doc.getSelection()!.removeAllRanges();
+      f.doc.getSelection()!.addRange(range);
+      f.pointer(span, 'pointerup');
+      for (let i = 0; i < 100 && button.disabled; i++) {
+        await pause(5);
+      }
+      await pause(5);
+    };
+    const press = (element: HTMLElement) => {
+      f.pointer(element, 'pointerdown');
+      element.focus();
+      element.click();
+    };
+    await select();
+    assert.equal(button.getAttribute('aria-pressed'), 'false');
+    press(button);
+    assert.equal(f.session.snapshot.marks!.length, 1);
+
+    // Same text again: the button shows pressed, the bar offers removing, pressing removes.
+    await select();
+    assert.equal(button.getAttribute('aria-pressed'), 'true');
+    assert.ok(f.doc.querySelector('.pfs-selection-bar .pfs-mark-remove-button'));
+    press(button);
+    assert.equal(f.session.snapshot.marks!.length, 0);
+
+    // Partial removal keeps the rest; undo brings the removed part back.
+    await select();
+    press(button);
+    rects = [{ left: 120, right: 200, top: 100, bottom: 114, width: 80, height: 14 }];
+    await select();
+    press(f.doc.querySelector<HTMLButtonElement>('.pfs-selection-bar .pfs-mark-remove-button')!);
+    assert.deepEqual(f.session.snapshot.marks![0]!.quads, [[50, 686, 120, 700]]);
+    f.session.undoStroke();
+    assert.deepEqual(f.session.snapshot.marks![0]!.quads, [[50, 686, 200, 700]]);
+
+    // A different colour from the bar re-colours instead of removing.
+    rects = [{ left: 50, right: 200, top: 100, bottom: 114, width: 150, height: 14 }];
+    await select();
+    press(f.doc.querySelectorAll<HTMLButtonElement>('.pfs-selection-bar .pfs-mark-swatch')[1]!);
+    assert.deepEqual(
+      f.session.snapshot.marks!.map((mark) => mark.color),
+      [[0.45, 0.9, 0.45]],
+    );
+    // "Highlight and comment" on highlighted text opens the existing comment.
+    await select();
+    press(f.doc.querySelector<HTMLButtonElement>('.pfs-selection-bar .pfs-mark-comment-button')!);
+    assert.equal(f.session.snapshot.marks!.length, 1);
+    assert.ok(f.doc.querySelector('.pfs-mark-popover'));
+  } finally {
+    f.dispose();
+  }
+});
+
+test('shapes are drawn by dragging, then selected, moved, resized, restyled and deleted', async () => {
+  const f = await fixture();
+  try {
+    const layer = f.doc.querySelector<HTMLElement>('.pdf-form-studio-layer')!;
+    // Choose "Ellipse, filled, blue, 4 pt" in the shape menu.
+    f.tool('Shape options');
+    const pick = (label: string) => {
+      const element = f.doc.querySelector<HTMLButtonElement>(
+        `.pfs-shape-menu [aria-label="${label}"]`,
+      )!;
+      assert.ok(element, label);
+      f.pointer(element, 'pointerdown');
+      element.click();
+    };
+    pick('Ellipse');
+    pick('Filled');
+    pick('Blue');
+    pick('4 pt line');
+    f.pointer(f.doc.body, 'pointerdown');
+    assert.equal(f.doc.querySelector('.pfs-shape-menu'), null, 'menu closes on outside click');
+    assert.equal(layer.dataset.tool, 'shape');
+
+    // Drag from (100,100) to (200,160) in viewport pixels = PDF y flipped on a 800 pt page.
+    f.pointer(layer, 'pointerdown', 100, 100);
+    f.pointer(layer, 'pointermove', 200, 160);
+    assert.ok(f.doc.querySelector('.pfs-shape.is-preview ellipse'), 'live preview while dragging');
+    f.pointer(layer, 'pointerup', 200, 160);
+    const [ellipse] = f.session.snapshot.shapes!;
+    assert.deepEqual(
+      [ellipse!.kind, ellipse!.box, ellipse!.fill, ellipse!.color, ellipse!.width],
+      ['ellipse', [100, 640, 200, 700], [0.15, 0.4, 0.85], [0.15, 0.4, 0.85], 4],
+    );
+    // Like Word: the new shape is selected, with handles, and the select tool is back.
+    assert.equal(layer.dataset.tool, 'select');
+    assert.equal(f.doc.querySelectorAll('.pfs-shape-handle:not(.pfs-shape-rotate)').length, 4);
+
+    // Drag the shape by 20/10 px.
+    const hit = f.doc.querySelector('.pfs-shape-hit')!;
+    // Pressing repaints the selection, so later events come from wherever the pointer is.
+    f.pointer(hit, 'pointerdown', 150, 130);
+    f.pointer(f.doc.body, 'pointermove', 170, 140);
+    f.pointer(f.doc.body, 'pointerup', 170, 140);
+    assert.deepEqual(f.session.snapshot.shapes![0]!.box, [120, 630, 220, 690]);
+    // Resize from the south-east handle.
+    const se = f.doc.querySelector('.pfs-shape-handle[data-handle="se"]')!;
+    f.pointer(se, 'pointerdown', 220, 170);
+    f.pointer(f.doc.body, 'pointermove', 260, 200);
+    f.pointer(f.doc.body, 'pointerup', 260, 200);
+    assert.deepEqual(f.session.snapshot.shapes![0]!.box, [120, 600, 260, 690]);
+    // Arrow keys nudge the selected shape instead of turning pages.
+    const right = f.key('ArrowRight', { shiftKey: true });
+    f.doc.body.dispatchEvent(right);
+    assert.equal(right.defaultPrevented, true);
+    assert.deepEqual(f.session.snapshot.shapes![0]!.box, [130, 600, 270, 690]);
+    // Restyle the selected shape from the menu: outline only, red.
+    f.tool('Shape options');
+    pick('Outline only');
+    pick('Red');
+    assert.equal(f.session.snapshot.shapes![0]!.fill, undefined);
+    assert.deepEqual(f.session.snapshot.shapes![0]!.color, [0.85, 0.15, 0.15]);
+    f.pointer(f.doc.querySelector('.pfs-shape-hit')!, 'pointerdown', 130, 150);
+    f.pointer(f.doc.body, 'pointerup', 130, 150);
+
+    // An arrow, with Shift snapping to 45°.
+    f.tool('Shape options');
+    pick('Arrow');
+    f.pointer(f.doc.body, 'pointerdown');
+    f.pointer(layer, 'pointerdown', 300, 300);
+    f.pointer(layer, 'pointermove', 400, 310, true);
+    f.pointer(layer, 'pointerup', 400, 310, true);
+    const arrow = f.session.snapshot.shapes![1]!;
+    assert.equal(arrow.kind, 'arrow');
+    assert.ok(Math.abs(arrow.end![1] - arrow.start![1]) < 0.001, 'snapped horizontal');
+    assert.ok(f.doc.querySelector('.pfs-shape polygon'), 'arrow head painted');
+
+    // Delete removes the selected shape; undo brings it back; the PDF keeps both.
+    const del = f.key('Delete');
+    f.doc.body.dispatchEvent(del);
+    assert.equal(f.session.snapshot.shapes!.length, 1);
+    f.session.undoStroke();
+    assert.equal(f.session.snapshot.shapes!.length, 2);
+    await f.session.save();
+    const document = await getDocument({ data: f.bytes().slice() }).promise;
+    const annotations = await (await document.getPage(1)).getAnnotations();
+    assert.deepEqual(
+      annotations.map((item) => item.subtype),
+      ['Circle', 'Line'],
+    );
+    await document.destroy();
+  } finally {
+    f.dispose();
+  }
+});
+
+test('a dash pasted from Word (U+F02D) is replaced in place and the text box saves', async () => {
+  const f = await fixture();
+  try {
+    const field = f.session.add(1, [80, 500, 400, 640], 14, true);
+    f.editor.refresh();
+    const input = f.doc.querySelector<HTMLTextAreaElement>(`[data-pdf-field="${field.name}"]`)!;
+    input.focus();
+    input.value = ' Punkt eins\n Punkt zwei';
+    input.setSelectionRange(5, 5);
+    input.dispatchEvent(new f.doc.defaultView!.Event('input'));
+    assert.equal(input.value, '– Punkt eins\n• Punkt zwei');
+    assert.equal(input.selectionStart, 5, 'caret stays where it was');
+    await f.session.save();
+    assert.equal(f.session.status, 'saved');
+    const saved = (await PDFDocument.load(f.bytes())).getForm().getTextField(field.name);
+    assert.equal(saved.getText(), '– Punkt eins\n• Punkt zwei');
+    // An unknown special-font symbol still stops the save, with a clear explanation.
+    f.session.setValue(field.name, 'Symbol ');
+    await assert.rejects(f.session.save(), /special-font symbol \(U\+F0FC/);
+  } finally {
+    f.dispose();
+  }
+});
+
+test('a selected rectangle turns with its rotation handle, snapping with Shift', async () => {
+  const f = await fixture();
+  try {
+    const shape = f.session.addShape({
+      page: 1,
+      kind: 'rectangle',
+      box: [100, 640, 200, 700],
+      color: [0.85, 0.15, 0.15],
+      width: 2,
+    });
+    f.editor.refresh();
+    // Select it, then drag the round handle above the top edge to the right of the centre.
+    f.pointer(f.doc.querySelector('.pfs-shape-hit')!, 'pointerdown', 101, 130);
+    f.pointer(f.doc.body, 'pointerup', 101, 130);
+    const knob = f.doc.querySelector('.pfs-shape-rotate')!;
+    assert.ok(knob, 'rotation handle shown');
+    f.pointer(knob, 'pointerdown', 150, 76);
+    f.pointer(f.doc.body, 'pointermove', 250, 131);
+    assert.match(
+      f.doc.querySelector('.pfs-shape')!.getAttribute('transform') ?? '',
+      /rotate\(/,
+      'live preview while turning',
+    );
+    f.pointer(f.doc.body, 'pointerup', 250, 131);
+    // Pointer right of the centre on screen: turned a quarter clockwise, about -90° in PDF terms.
+    const turned = f.session.snapshot.shapes![0]!.rotation!;
+    assert.ok(Math.abs(turned + 90) < 1, String(turned));
+    // Shift snaps to 15° steps.
+    const again = f.doc.querySelector('.pfs-shape-rotate')!;
+    f.pointer(again, 'pointerdown', 0, 0);
+    f.pointer(f.doc.body, 'pointermove', 236, 175, true);
+    f.pointer(f.doc.body, 'pointerup', 236, 175, true);
+    assert.ok(Number.isInteger(f.session.snapshot.shapes![0]!.rotation! / 15), 'snapped to 15°');
+    // The box itself is unchanged by turning, undo restores the angle, and it saves.
+    assert.deepEqual(f.session.snapshot.shapes![0]!.box, [100, 640, 200, 700]);
+    f.session.undoStroke();
+    assert.ok(Math.abs(f.session.snapshot.shapes![0]!.rotation! + 90) < 1);
+    await f.session.save();
+    const saved = (await readTextPdf(f.bytes())).shapes!;
+    assert.equal(saved[0]!.id, shape.id);
+    assert.ok(Math.abs(saved[0]!.rotation! + 90) < 1);
+  } finally {
+    f.dispose();
+  }
+});
+
+test('the right-click menu copies, pastes, turns, flips, locks and deletes shapes', async () => {
+  const f = await fixture();
+  const menu = (target: Element, x: number, y: number) => {
+    target.dispatchEvent(
+      new f.doc.defaultView!.MouseEvent('contextmenu', {
+        bubbles: true,
+        cancelable: true,
+        clientX: x,
+        clientY: y,
+      }),
+    );
+    const items = (globalThis as { lastMenu?: { items: MenuItem[] } }).lastMenu!.items;
+    return (title: string) => {
+      const item = items.find((entry) => entry.title === title);
+      assert.ok(item, `${title} in ${items.map((entry) => entry.title).join(', ')}`);
+      return item;
+    };
+  };
+  type MenuItem = { title: string; disabled: boolean; checked?: boolean; click: () => void };
+  try {
+    f.session.addShape({
+      page: 1,
+      kind: 'rectangle',
+      box: [100, 640, 200, 700],
+      color: [0.85, 0.15, 0.15],
+      width: 2,
+    });
+    f.session.addShape({
+      page: 1,
+      kind: 'arrow',
+      start: [300, 500],
+      end: [400, 500],
+      color: [0.15, 0.4, 0.85],
+      width: 2,
+    });
+    f.editor.refresh();
+    const [rect, arrow] = f.session.snapshot.shapes!;
+    // Rotate right is a quarter turn clockwise (-90° in PDF terms); flipping mirrors it.
+    let pick = menu(f.doc.querySelector(`[data-shape-id="${rect!.id}"] .pfs-shape-hit`)!, 101, 130);
+    pick('Rotate 90° right').click();
+    assert.equal(f.session.snapshot.shapes![0]!.rotation, -90);
+    pick = menu(f.doc.querySelector(`[data-shape-id="${rect!.id}"] .pfs-shape-hit`)!, 150, 130);
+    pick('Flip horizontally').click();
+    assert.equal(f.session.snapshot.shapes![0]!.rotation, 90);
+    // Lines turn and mirror their end points around the middle.
+    pick = menu(f.doc.querySelector(`[data-shape-id="${arrow!.id}"] .pfs-shape-hit`)!, 350, 300);
+    pick('Rotate 90° left').click();
+    assert.deepEqual(f.session.snapshot.shapes![1]!.start, [350, 450]);
+    assert.deepEqual(f.session.snapshot.shapes![1]!.end, [350, 550]);
+    pick = menu(f.doc.querySelector(`[data-shape-id="${arrow!.id}"] .pfs-shape-hit`)!, 350, 300);
+    pick('Flip vertically').click();
+    assert.deepEqual(f.session.snapshot.shapes![1]!.start, [350, 550]);
+    // Copy, then paste on the empty page where the click was: the top-left lands there.
+    pick = menu(f.doc.querySelector(`[data-shape-id="${arrow!.id}"] .pfs-shape-hit`)!, 350, 300);
+    pick('Copy').click();
+    const layer = f.doc.querySelector<HTMLElement>('#page .pdf-form-studio-layer')!;
+    pick = menu(layer, 50, 700);
+    pick('Paste here').click();
+    const pasted = f.session.snapshot.shapes![2]!;
+    assert.deepEqual(
+      [pasted.start, pasted.end],
+      [
+        [50, 100],
+        [50, 0],
+      ],
+    );
+    // Locked shapes cannot be deleted or changed until unlocked; the lock is saved.
+    pick = menu(f.doc.querySelector(`[data-shape-id="${rect!.id}"] .pfs-shape-hit`)!, 150, 130);
+    pick('Lock').click();
+    pick = menu(f.doc.querySelector(`[data-shape-id="${rect!.id}"] .pfs-shape-hit`)!, 150, 130);
+    assert.equal(pick('Delete').disabled, true);
+    assert.throws(() => f.session.deleteShape(rect!.id), /locked/);
+    assert.equal(f.doc.querySelectorAll('.pfs-shape-handle').length, 0, 'no handles while locked');
+    await f.session.save();
+    const saved = (await readTextPdf(f.bytes())).shapes!;
+    assert.equal(saved.length, 3);
+    assert.equal(saved[0]!.locked, true);
+    pick = menu(f.doc.querySelector(`[data-shape-id="${rect!.id}"] .pfs-shape-hit`)!, 150, 130);
+    pick('Unlock').click();
+    pick = menu(f.doc.querySelector(`[data-shape-id="${rect!.id}"] .pfs-shape-hit`)!, 150, 130);
+    pick('Delete').click();
+    assert.equal(f.session.snapshot.shapes!.length, 2);
+    // On the empty page: add a note, then recolour it from its own menu.
+    pick = menu(layer, 500, 100);
+    pick('Add note here').click();
+    const note = f.session.snapshot.marks!.at(-1)!;
+    assert.equal(note.kind, 'note');
+    f.editor.refresh();
+    pick = menu(f.doc.querySelector(`button[data-mark-id="${note.id}"]`)!, 500, 100);
+    pick('Green').click();
+    assert.deepEqual(f.session.snapshot.marks!.at(-1)!.color, [0.45, 0.9, 0.45]);
+  } finally {
+    f.dispose();
+  }
+});
+
+test('the right-click menu copies a text box to the clicked spot and Ctrl+D duplicates shapes', async () => {
+  const f = await fixture();
+  const items = () =>
+    (globalThis as { lastMenu?: { items: { title: string; click: () => void }[] } }).lastMenu!
+      .items;
+  const open = (target: Element, x: number, y: number) =>
+    target.dispatchEvent(
+      new f.doc.defaultView!.MouseEvent('contextmenu', {
+        bubbles: true,
+        cancelable: true,
+        clientX: x,
+        clientY: y,
+      }),
+    );
+  try {
+    const field = f.session.add(1, [80, 500, 340, 540], 14, true);
+    f.session.setValue(field.name, 'Copy me');
+    f.editor.refresh();
+    open(f.doc.querySelector('.pdf-form-studio-box')!, 100, 280);
+    assert.deepEqual(
+      items().map((item) => item.title),
+      ['Cut', 'Copy', 'Paste', 'Duplicate', 'Delete', 'Select all on page'],
+    );
+    items()
+      .find((item) => item.title === 'Copy')!
+      .click();
+    open(f.doc.querySelector('#page .pdf-form-studio-layer')!, 200, 100);
+    items()
+      .find((item) => item.title === 'Paste here')!
+      .click();
+    const copy = f.session.snapshot.fields.at(-1)!;
+    assert.notEqual(copy.name, field.name);
+    assert.equal(copy.value, 'Copy me');
+    assert.deepEqual(copy.widgets[0]!.rect, [200, 660, 460, 700]);
+    // Ctrl+D on a selected shape duplicates it, slightly offset, and selects the copy.
+    const shape = f.session.addShape({
+      page: 1,
+      kind: 'ellipse',
+      box: [100, 100, 160, 140],
+      color: [0.1, 0.1, 0.1],
+      width: 1,
+    });
+    f.editor.refresh();
+    f.pointer(
+      f.doc.querySelector(`[data-shape-id="${shape.id}"] .pfs-shape-hit`)!,
+      'pointerdown',
+      130,
+      680,
+    );
+    f.pointer(f.doc.body, 'pointerup', 130, 680);
+    f.doc.body.dispatchEvent(f.key('d', { ctrlKey: true }));
+    const shapes = f.session.snapshot.shapes!;
+    assert.equal(shapes.length, 2);
+    assert.deepEqual(shapes[1]!.box, [112, 88, 172, 128]);
+  } finally {
+    f.dispose();
+  }
+});
+
+test('pasted pictures are placed, moved, resized, turned, locked and saved', async () => {
+  const f = await fixture();
+  try {
+    const layer = f.doc.querySelector<HTMLElement>('#page .pdf-form-studio-layer')!;
+    // A 200 × 100 px screenshot pasted onto the page becomes a 150 × 75 pt picture.
+    const paste = new f.doc.defaultView!.Event('paste', { bubbles: true, cancelable: true });
+    const file = new f.doc.defaultView!.File([png(200, 100)], 'shot.png', { type: 'image/png' });
+    Object.defineProperty(paste, 'clipboardData', { value: { files: [file] } });
+    layer.dispatchEvent(paste);
+    assert.equal(paste.defaultPrevented, true);
+    await pause(20);
+    const [image] = f.session.snapshot.images!;
+    assert.deepEqual(image!.box, [225, 362.5, 375, 437.5], 'centred on the page');
+    assert.equal(f.doc.querySelectorAll('.pfs-image.is-selected .pfs-image-handle').length, 4);
+    // Drag it; then the south-east handle resizes in proportion (Shift frees it).
+    f.pointer(f.doc.querySelector('.pfs-image')!, 'pointerdown', 300, 400);
+    f.pointer(f.doc.body, 'pointermove', 280, 380);
+    f.pointer(f.doc.body, 'pointerup', 280, 380);
+    assert.deepEqual(f.session.snapshot.images![0]!.box, [205, 382.5, 355, 457.5]);
+    f.pointer(f.doc.querySelector('.pfs-image-handle.is-se')!, 'pointerdown', 355, 417.5);
+    f.pointer(f.doc.body, 'pointerup', 505, 492.5);
+    assert.deepEqual(f.session.snapshot.images![0]!.box, [205, 307.5, 505, 457.5]);
+    // Ctrl+D duplicates; Delete removes the selected copy.
+    f.doc.body.dispatchEvent(f.key('d', { ctrlKey: true }));
+    assert.equal(f.session.snapshot.images!.length, 2);
+    f.doc.body.dispatchEvent(f.key('Delete'));
+    assert.equal(f.session.snapshot.images!.length, 1);
+    // The right-click menu turns it a quarter clockwise about its centre, then locks it.
+    const menu = (title: string) => {
+      f.doc
+        .querySelector('.pfs-image')!
+        .dispatchEvent(
+          new f.doc.defaultView!.MouseEvent('contextmenu', { bubbles: true, cancelable: true }),
+        );
+      const items = (globalThis as { lastMenu?: { items: { title: string; click(): void }[] } })
+        .lastMenu!.items;
+      items.find((item) => item.title === title)!.click();
+    };
+    menu('Rotate 90° right');
+    const turned = f.session.snapshot.images![0]!;
+    assert.deepEqual([turned.box, turned.rotation], [[280, 232.5, 430, 532.5], 270]);
+    assert.match(f.doc.querySelector<HTMLElement>('.pfs-image img')!.style.transform, /90deg/);
+    menu('Lock');
+    f.pointer(f.doc.querySelector('.pfs-image')!, 'pointerdown', 350, 400);
+    f.pointer(f.doc.body, 'pointerup', 300, 300);
+    assert.deepEqual(f.session.snapshot.images![0]!.box, turned.box, 'locked pictures stay put');
+    await f.session.save();
+    const saved = (await readTextPdf(f.bytes())).images!;
+    assert.deepEqual([saved.length, saved[0]!.rotation, saved[0]!.locked], [1, 270, true]);
+  } finally {
+    f.dispose();
   }
 });

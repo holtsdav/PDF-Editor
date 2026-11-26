@@ -1,3 +1,4 @@
+import { setAttr } from './dom';
 import { Component } from 'obsidian';
 import type { NativePage } from '../compat/native-pdf';
 import { strokeBounds } from '../pdf/ink-engine';
@@ -15,7 +16,7 @@ import type { RecognizedShape } from '../pdf/ink-assist';
 import { HeldShape } from '../pdf/held-shape';
 import { labelSvgOverlay } from './overlay-label';
 
-export type EditorTool = 'select' | 'text' | 'marker' | 'scribble' | 'eraser';
+export type EditorTool = 'select' | 'text' | 'marker' | 'scribble' | 'eraser' | 'note' | 'shape';
 interface InkOptions {
   tool(): EditorTool;
   width(kind: InkKind): number;
@@ -248,7 +249,7 @@ export class InkLayer extends Component {
         this.controls.delete(id);
       }
     }
-    this.svg.setAttribute('viewBox', `0 0 ${page.viewport.width} ${page.viewport.height}`);
+    setAttr(this.svg, 'viewBox', `0 0 ${page.viewport.width} ${page.viewport.height}`);
     for (const stroke of strokes) {
       let control = this.controls.get(stroke.id);
       if (!control) {

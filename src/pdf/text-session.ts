@@ -1,4 +1,10 @@
-import { FIELD_PREFIX, readTextPdf, renderTextPdf, writeTextPdf } from './text-engine.ts';
+import {
+  FIELD_PREFIX,
+  SaveCancelled,
+  readTextPdf,
+  renderTextPdf,
+  writeTextPdf,
+} from './text-engine.ts';
 import type {
   AddedField,
   BoxUpdate,
@@ -8,7 +14,13 @@ import type {
   TextSnapshot,
 } from './text-engine.ts';
 import { hash } from './recovery.ts';
-import { validColor, validSpacing, spacedWidth, textGraphemes } from './text-format.ts';
+import {
+  normalizeSymbols,
+  validColor,
+  validSpacing,
+  spacedWidth,
+  textGraphemes,
+} from './text-format.ts';
 import type { PdfColor, PdfFonts, TextFormat } from './text-format.ts';
 import type { BackupPurpose } from './recovery.ts';
 import { InteractionGate } from './interaction-gate.ts';
@@ -20,6 +32,24 @@ import fontkit from '@pdf-lib/fontkit';
 import type { Font } from '@pdf-lib/fontkit';
 import type { FontFamily } from './text-format.ts';
 import { wrapText } from './wrap-text.ts';
+import { readInk } from './ink-engine.ts';
+import { loadPdfDocument } from './pdf-load.ts';
+import type { ChoiceField } from './choice-engine.ts';
+import {
+  MARK_PREFIX,
+  isTextMark,
+  NOTE_SIZE,
+  pdfDate,
+  quadsOverlap,
+  subtractQuads,
+  unionRect,
+  validateMark,
+} from './mark-engine.ts';
+import type { MarkKind, PdfMark, TextMarkKind } from './mark-engine.ts';
+import { SHAPE_PREFIX, shapeRect, validateShape } from './shape-engine.ts';
+import type { PdfShape, Point as ShapePoint, ShapeKind } from './shape-engine.ts';
+import { IMAGE_PREFIX, storeImage, validateImage } from './image-engine.ts';
+import type { PdfImage, QuarterTurn } from './image-engine.ts';
 
 const MAX_HISTORY_ENTRIES = 50;
 
@@ -35,6 +65,17 @@ export interface PdfStore {
 }
 type TextState = {
   fields: TextField[];
+  choiceFields?: ChoiceField[];
+  choices?: Map<string, string>;
+  markList?: PdfMark[];
+  marks?: Map<string, PdfMark>;
+  deletedMarks?: Set<string>;
+  shapeList?: PdfShape[];
+  shapes?: Map<string, PdfShape>;
+  deletedShapes?: Set<string>;
+  imageList?: PdfImage[];
+  images?: Map<string, PdfImage>;
+  deletedImages?: Set<string>;
   values: TextChanges['values'];
   added: TextChanges['added'];
   boxes: TextChanges['boxes'];
@@ -42,7 +83,7 @@ type TextState = {
   formats: TextChanges['formats'];
 };
 export interface PdfObject {
-  kind: 'text' | 'ink';
+  kind: 'text' | 'ink' | 'shape' | 'image';
   id: string;
 }
 export type CopiedPdfObject =
@@ -70,7 +111,28 @@ export type CopiedPdfObject =
       width: number;
       color: PdfColor;
       opacity: number;
-    };
+    }
+  | { kind: 'shape'; page: number; rect: Rect; shape: PdfShape }
+  | { kind: 'image'; page: number; rect: Rect; image: PdfImage };
+
+/** Area a shape covers for group moves: its (turned) box, or the line between its ends. */
+export function shapeArea(shape: PdfShape): Rect {
+  if (shape.box) {
+    return shapeRect(shape);
+  }
+  const [a, b] = [shape.start!, shape.end!];
+  return [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[0], b[0]), Math.max(a[1], b[1])];
+}
+export function shiftShape(shape: PdfShape, dx: number, dy: number): PdfShape {
+  const next = structuredClone(shape);
+  if (next.box) {
+    next.box = [next.box[0] + dx, next.box[1] + dy, next.box[2] + dx, next.box[3] + dy];
+  } else {
+    next.start = [next.start![0] + dx, next.start![1] + dy];
+    next.end = [next.end![0] + dx, next.end![1] + dy];
+  }
+  return next;
+}
 type UndoEntry =
   | { kind: 'objects'; state: TextState; strokes: InkStroke[] }
   | { kind: 'ink'; strokes: InkStroke[] }
@@ -82,7 +144,32 @@ export interface PdfDraft {
 }
 export type SaveStatus = 'saved' | 'unsaved' | 'saving' | 'error' | 'conflict';
 export function equalBytes(a: Uint8Array, b: Uint8Array): boolean {
-  return a.length === b.length && a.every((value, index) => value === b[index]);
+  if (a.length !== b.length) {
+    return false;
+  }
+  if (a === b) {
+    return true;
+  }
+  // Saves compare whole PDFs several times; a plain loop over 32-bit words is ~50× faster
+  // than Array.prototype.every with a callback.
+  let i = 0;
+  if (a.byteOffset % 4 === 0 && b.byteOffset % 4 === 0) {
+    const words = a.length >>> 2;
+    const x = new Uint32Array(a.buffer, a.byteOffset, words);
+    const y = new Uint32Array(b.buffer, b.byteOffset, words);
+    for (; i < words; i++) {
+      if (x[i] !== y[i]) {
+        return false;
+      }
+    }
+    i = words << 2;
+  }
+  for (; i < a.length; i++) {
+    if (a[i] !== b[i]) {
+      return false;
+    }
+  }
+  return true;
 }
 const emptyChanges = (): TextChanges => ({
   values: new Map(),
@@ -92,6 +179,13 @@ const emptyChanges = (): TextChanges => ({
   strokes: new Map(),
   deletedStrokes: new Set(),
   formats: new Map(),
+  choices: new Map(),
+  marks: new Map(),
+  deletedMarks: new Set(),
+  shapes: new Map(),
+  deletedShapes: new Set(),
+  images: new Map(),
+  deletedImages: new Set(),
 });
 
 /** One session per vault PDF; every view shares its model and serialized writer. */
@@ -244,8 +338,396 @@ export class TextSession {
     return this.status === 'conflict';
   }
 
-  setValue(name: string, value: string): void {
+  /** Set a checkbox/radio on-state or a dropdown/list export value ('' turns it off or clears it). */
+  setChoice(name: string, value: string): void {
     this.assertAvailable();
+    if (this.status === 'conflict') {
+      throw new Error('Reload the PDF before editing after an external change.');
+    }
+    const field = this.snapshot.choices?.find((field) => field.name === name);
+    if (!field || field.readOnly) {
+      throw new Error('This form field is not editable.');
+    }
+    const valid =
+      value === '' ||
+      (field.kind === 'checkbox' || field.kind === 'radio'
+        ? field.widgets.some((widget) => widget.onValue === value)
+        : field.options.some((option) => option.value === value));
+    if (!valid) {
+      throw new Error(`"${value}" is not an option of this field.`);
+    }
+    if (field.value === value) {
+      return;
+    }
+    this.rememberText(`choice:${name}`, false);
+    field.value = value;
+    (this.changes.choices ??= new Map()).set(name, value);
+    this.changed();
+  }
+
+  /** Add a text highlight (quads in PDF points) or a comment note at a point. */
+  addMark(input: {
+    page: number;
+    kind: MarkKind;
+    quads?: Rect[];
+    at?: [number, number];
+    color: PdfColor;
+    opacity?: number;
+    comment?: string;
+  }): PdfMark {
+    this.assertEditable();
+    const bounds = this.snapshot.pages[input.page - 1];
+    if (!bounds) {
+      throw new Error('The page no longer exists.');
+    }
+    let rect: Rect;
+    let quads: Rect[] = [];
+    if (isTextMark(input.kind)) {
+      quads = (input.quads ?? []).map(
+        (quad) =>
+          [
+            Math.max(bounds[0], quad[0]),
+            Math.max(bounds[1], quad[1]),
+            Math.min(bounds[2], quad[2]),
+            Math.min(bounds[3], quad[3]),
+          ] as Rect,
+      );
+      quads = quads.filter((quad) => quad[2] > quad[0] && quad[3] > quad[1]);
+      if (!quads.length) {
+        throw new Error('Select some text on the PDF page to highlight it.');
+      }
+      rect = unionRect(quads);
+    } else {
+      const [x, y] = input.at ?? [bounds[0] + 20, bounds[3] - 20];
+      const left = Math.min(Math.max(bounds[0], x), bounds[2] - NOTE_SIZE);
+      const top = Math.max(Math.min(bounds[3], y), bounds[1] + NOTE_SIZE);
+      rect = [left, top - NOTE_SIZE, left + NOTE_SIZE, top];
+    }
+    const mark: PdfMark = {
+      id: `${MARK_PREFIX}${crypto.randomUUID()}`,
+      page: input.page,
+      kind: input.kind,
+      quads,
+      rect,
+      color: [...input.color] as PdfColor,
+      opacity: input.kind === 'highlight' ? (input.opacity ?? 0.45) : 1,
+      comment: input.comment ?? '',
+      modified: pdfDate(),
+    };
+    validateMark(mark, bounds);
+    this.rememberText(`mark:${mark.id}`, false);
+    (this.snapshot.marks ??= []).push(mark);
+    (this.changes.marks ??= new Map()).set(mark.id, structuredClone(mark));
+    this.changed();
+    return mark;
+  }
+
+  /** Change a highlight's comment or colour; typing in one comment merges into one undo step. */
+  updateMark(id: string, update: { comment?: string; color?: PdfColor }): void {
+    this.assertEditable();
+    const mark = this.snapshot.marks?.find((item) => item.id === id);
+    if (!mark) {
+      throw new Error('This highlight no longer exists.');
+    }
+    if (update.color && !validColor(update.color)) {
+      throw new Error('Invalid colour.');
+    }
+    if (
+      (update.comment === undefined || update.comment === mark.comment) &&
+      (!update.color || update.color.every((value, i) => value === mark.color[i]))
+    ) {
+      return;
+    }
+    this.rememberText(update.color ? `mark:${id}` : `mark-comment:${id}`, !update.color);
+    if (update.comment !== undefined) {
+      mark.comment = update.comment;
+    }
+    if (update.color) {
+      mark.color = [...update.color] as PdfColor;
+    }
+    mark.modified = pdfDate();
+    (this.changes.marks ??= new Map()).set(id, structuredClone(mark));
+    this.changed();
+  }
+
+  /** Draw a rectangle/ellipse (box) or a line/arrow (start → end), in PDF points. */
+  addShape(input: {
+    page: number;
+    kind: ShapeKind;
+    box?: Rect;
+    start?: ShapePoint;
+    end?: ShapePoint;
+    color: PdfColor;
+    fill?: PdfColor;
+    width: number;
+    opacity?: number;
+    rotation?: number;
+  }): PdfShape {
+    this.assertEditable();
+    const bounds = this.snapshot.pages[input.page - 1];
+    if (!bounds) {
+      throw new Error('The page no longer exists.');
+    }
+    const boxed = input.kind === 'rectangle' || input.kind === 'ellipse';
+    const shape: PdfShape = {
+      id: `${SHAPE_PREFIX}${crypto.randomUUID()}`,
+      page: input.page,
+      kind: input.kind,
+      ...(boxed
+        ? { box: [...input.box!] as Rect }
+        : { start: [...input.start!] as ShapePoint, end: [...input.end!] as ShapePoint }),
+      color: [...input.color] as PdfColor,
+      ...(boxed && input.fill ? { fill: [...input.fill] as PdfColor } : {}),
+      width: input.width,
+      opacity: input.opacity ?? 1,
+      modified: pdfDate(),
+      ...(boxed && input.rotation ? { rotation: input.rotation } : {}),
+    };
+    validateShape(shape, bounds);
+    this.rememberText(`shape:${shape.id}`, false);
+    (this.snapshot.shapes ??= []).push(shape);
+    (this.changes.shapes ??= new Map()).set(shape.id, structuredClone(shape));
+    this.changed();
+    return shape;
+  }
+
+  /** Move, resize or restyle a shape (one undo step each). */
+  updateShape(
+    id: string,
+    update: Partial<Pick<PdfShape, 'box' | 'start' | 'end' | 'color' | 'width' | 'rotation'>> & {
+      fill?: PdfColor | null;
+      locked?: boolean;
+    },
+  ): void {
+    this.assertEditable();
+    const shape = this.snapshot.shapes?.find((item) => item.id === id);
+    if (!shape) {
+      throw new Error('This shape no longer exists.');
+    }
+    const next: PdfShape = structuredClone(shape);
+    if (update.box) {
+      next.box = [...update.box] as Rect;
+    }
+    if (update.start) {
+      next.start = [...update.start] as ShapePoint;
+    }
+    if (update.end) {
+      next.end = [...update.end] as ShapePoint;
+    }
+    if (update.color) {
+      next.color = [...update.color] as PdfColor;
+    }
+    if (update.width !== undefined) {
+      next.width = update.width;
+    }
+    const geometry =
+      !!update.box || !!update.start || !!update.end || update.rotation !== undefined;
+    if (shape.locked && update.locked !== false && geometry) {
+      throw new Error('This shape is locked. Unlock it to move, resize or rotate it.');
+    }
+    if (update.locked !== undefined) {
+      if (update.locked) {
+        next.locked = true;
+      } else {
+        delete next.locked;
+      }
+    }
+    if (update.rotation !== undefined && next.box) {
+      // Keep angles in (-180, 180]; an unrotated shape stores no angle.
+      const turn = ((((update.rotation + 180) % 360) + 360) % 360) - 180;
+      if (Math.abs(turn) < 0.01) {
+        delete next.rotation;
+      } else {
+        next.rotation = turn === -180 ? 180 : Math.round(turn * 100) / 100;
+      }
+    }
+    if (update.fill === null) {
+      delete next.fill;
+    } else if (update.fill && (next.kind === 'rectangle' || next.kind === 'ellipse')) {
+      next.fill = [...update.fill] as PdfColor;
+    }
+    next.modified = pdfDate();
+    validateShape(next, this.snapshot.pages[shape.page - 1]!);
+    if (JSON.stringify({ ...next, modified: '' }) === JSON.stringify({ ...shape, modified: '' })) {
+      return;
+    }
+    this.rememberText(`shape:${id}`, false);
+    Object.assign(shape, next);
+    if (!next.fill) {
+      delete shape.fill;
+    }
+    if (!next.rotation) {
+      delete shape.rotation;
+    }
+    if (!next.locked) {
+      delete shape.locked;
+    }
+    (this.changes.shapes ??= new Map()).set(id, structuredClone(shape));
+    this.changed();
+  }
+
+  deleteShape(id: string): void {
+    this.assertEditable();
+    const shape = this.snapshot.shapes?.find((item) => item.id === id);
+    if (!shape) {
+      return;
+    }
+    if (shape.locked) {
+      throw new Error('This shape is locked. Unlock it before deleting it.');
+    }
+    this.rememberText(`shape:${id}`, false);
+    this.snapshot.shapes = (this.snapshot.shapes ?? []).filter((item) => item.id !== id);
+    this.changes.shapes?.delete(id);
+    (this.changes.deletedShapes ??= new Set()).add(id);
+    this.changed();
+  }
+
+  /** Place a PNG or JPEG picture (one undo step). */
+  addImage(input: {
+    page: number;
+    box: Rect;
+    bytes?: Uint8Array;
+    source?: string;
+    rotation?: QuarterTurn;
+  }): PdfImage {
+    this.assertEditable();
+    const bounds = this.snapshot.pages[input.page - 1];
+    if (!bounds) {
+      throw new Error('The page no longer exists.');
+    }
+    const image: PdfImage = {
+      id: `${IMAGE_PREFIX}${crypto.randomUUID()}`,
+      page: input.page,
+      box: [...input.box] as Rect,
+      ...(input.rotation ? { rotation: input.rotation } : {}),
+      source: input.bytes ? storeImage(input.bytes) : input.source!,
+      modified: pdfDate(),
+    };
+    validateImage(image, bounds);
+    this.rememberText(`image:${image.id}`, false);
+    (this.snapshot.images ??= []).push(image);
+    (this.changes.images ??= new Map()).set(image.id, structuredClone(image));
+    this.changed();
+    return image;
+  }
+
+  /** Move, resize, turn or lock a picture (one undo step each). */
+  updateImage(id: string, update: { box?: Rect; rotation?: QuarterTurn; locked?: boolean }): void {
+    this.assertEditable();
+    const image = this.snapshot.images?.find((item) => item.id === id);
+    if (!image) {
+      throw new Error('This picture no longer exists.');
+    }
+    if (image.locked && update.locked !== false && (update.box || update.rotation !== undefined)) {
+      throw new Error('This picture is locked. Unlock it to move, resize or turn it.');
+    }
+    const next: PdfImage = structuredClone(image);
+    if (update.box) {
+      next.box = [...update.box] as Rect;
+    }
+    if (update.rotation !== undefined) {
+      next.rotation = (((update.rotation % 360) + 360) % 360) as QuarterTurn;
+    }
+    if (update.locked !== undefined) {
+      next.locked = update.locked || undefined;
+    }
+    if (!next.rotation) {
+      delete next.rotation;
+    }
+    if (!next.locked) {
+      delete next.locked;
+    }
+    if (JSON.stringify({ ...next, modified: '' }) === JSON.stringify({ ...image, modified: '' })) {
+      return;
+    }
+    next.modified = pdfDate();
+    validateImage(next, this.snapshot.pages[image.page - 1]!);
+    this.rememberText(`image:${id}`, false);
+    for (const key of ['rotation', 'locked'] as const) {
+      delete image[key];
+    }
+    Object.assign(image, next);
+    (this.changes.images ??= new Map()).set(id, structuredClone(image));
+    this.changed();
+  }
+
+  deleteImage(id: string): void {
+    this.assertEditable();
+    const image = this.snapshot.images?.find((item) => item.id === id);
+    if (!image) {
+      return;
+    }
+    if (image.locked) {
+      throw new Error('This picture is locked. Unlock it before deleting it.');
+    }
+    this.rememberText(`image:${id}`, false);
+    this.snapshot.images = (this.snapshot.images ?? []).filter((item) => item.id !== id);
+    this.changes.images?.delete(id);
+    (this.changes.deletedImages ??= new Set()).add(id);
+    this.changed();
+  }
+
+  /** Highlights on this page that the selection touches. */
+  highlightsAt(page: number, cuts: Rect[], kind: TextMarkKind = 'highlight'): PdfMark[] {
+    return (this.snapshot.marks ?? []).filter(
+      (mark) => mark.page === page && mark.kind === kind && quadsOverlap(mark.quads, cuts),
+    );
+  }
+
+  /**
+   * Remove the selected parts of highlights on a page as one undo step. Marks left
+   * without any highlighted text are deleted; the rest keep their colour and comment.
+   */
+  eraseHighlights(page: number, cuts: Rect[], kind: TextMarkKind = 'highlight'): number {
+    this.assertEditable();
+    const touched = this.highlightsAt(page, cuts, kind);
+    if (!touched.length) {
+      return 0;
+    }
+    this.rememberText(`mark-erase:${page}`, false);
+    const bounds = this.snapshot.pages[page - 1]!;
+    for (const mark of touched) {
+      const quads = subtractQuads(mark.quads, cuts);
+      if (!quads.length) {
+        this.snapshot.marks = this.snapshot.marks!.filter((item) => item.id !== mark.id);
+        this.changes.marks?.delete(mark.id);
+        (this.changes.deletedMarks ??= new Set()).add(mark.id);
+        continue;
+      }
+      mark.quads = quads;
+      mark.rect = unionRect(quads);
+      mark.modified = pdfDate();
+      validateMark(mark, bounds);
+      (this.changes.marks ??= new Map()).set(mark.id, structuredClone(mark));
+    }
+    this.changed();
+    return touched.length;
+  }
+
+  deleteMark(id: string): void {
+    this.assertEditable();
+    const mark = this.snapshot.marks?.find((item) => item.id === id);
+    if (!mark) {
+      return;
+    }
+    this.rememberText(`mark:${id}`, false);
+    this.snapshot.marks = this.snapshot.marks!.filter((item) => item.id !== id);
+    this.changes.marks?.delete(id);
+    (this.changes.deletedMarks ??= new Set()).add(id);
+    this.changed();
+  }
+
+  private assertEditable(): void {
+    this.assertAvailable();
+    if (this.status === 'conflict') {
+      throw new Error('Reload the PDF before editing after an external change.');
+    }
+  }
+
+  /** `separate` starts a new undo step instead of merging with recent typing (list actions). */
+  setValue(name: string, value: string, separate = false): void {
+    this.assertAvailable();
+    value = normalizeSymbols(value);
     if (this.status === 'conflict') {
       throw new Error('Reload the PDF before editing after an external change.');
     }
@@ -256,7 +738,7 @@ export class TextSession {
     if (field.value === value) {
       return;
     }
-    this.rememberText(name);
+    this.rememberText(name, !separate);
     field.value = value;
     this.changes.values.set(name, value);
     this.fitRuledField(name);
@@ -614,9 +1096,33 @@ export class TextSession {
   }
 
   private textState(): TextState {
-    const { values, added, boxes, deleted, formats } = this.changes;
+    const {
+      values,
+      added,
+      boxes,
+      deleted,
+      formats,
+      choices,
+      marks,
+      deletedMarks,
+      shapes,
+      deletedShapes,
+      images,
+      deletedImages,
+    } = this.changes;
     return structuredClone({
       fields: this.snapshot.fields,
+      choiceFields: this.snapshot.choices,
+      choices,
+      markList: this.snapshot.marks,
+      marks,
+      deletedMarks,
+      shapeList: this.snapshot.shapes,
+      shapes,
+      deletedShapes,
+      imageList: this.snapshot.images,
+      images,
+      deletedImages,
       values,
       added,
       boxes,
@@ -646,8 +1152,22 @@ export class TextSession {
       this.restoreInk(entry.strokes);
       return;
     }
-    const { fields, ...changes } = structuredClone(entry.state);
+    const { fields, choiceFields, markList, shapeList, imageList, ...changes } = structuredClone(
+      entry.state,
+    );
     this.snapshot.fields = fields;
+    if (choiceFields) {
+      this.snapshot.choices = choiceFields;
+    }
+    if (markList) {
+      this.snapshot.marks = markList;
+    }
+    if (shapeList) {
+      this.snapshot.shapes = shapeList;
+    }
+    if (imageList) {
+      this.snapshot.images = imageList;
+    }
     Object.assign(this.changes, changes);
     if (entry.kind === 'objects') {
       this.restoreInk(entry.strokes);
@@ -796,6 +1316,20 @@ export class TextSession {
           }
           return { object, page: field.widgets[0]!.page, rect: field.widgets[0]!.rect };
         }
+        if (object.kind === 'shape') {
+          const shape = this.snapshot.shapes?.find((item) => item.id === object.id);
+          if (!shape || shape.locked) {
+            throw new Error('This shape cannot be edited as part of a group.');
+          }
+          return { object, page: shape.page, rect: shapeArea(shape) };
+        }
+        if (object.kind === 'image') {
+          const image = this.snapshot.images?.find((item) => item.id === object.id);
+          if (!image || image.locked) {
+            throw new Error('This picture cannot be edited as part of a group.');
+          }
+          return { object, page: image.page, rect: [...image.box] as Rect };
+        }
         if (object.kind !== 'ink') {
           throw new Error('Invalid object selection.');
         }
@@ -825,6 +1359,18 @@ export class TextSession {
           ...(field.lineSpacing !== undefined ? { lineSpacing: field.lineSpacing } : {}),
           ...(field.ruled ? { ruled: { ...field.ruled } } : {}),
         };
+      }
+      if (object.kind === 'shape') {
+        const shape = this.snapshot.shapes!.find((item) => item.id === object.id)!;
+        const copy = structuredClone(shape);
+        delete copy.locked;
+        return { kind: 'shape', page, rect: [...rect] as Rect, shape: copy };
+      }
+      if (object.kind === 'image') {
+        const image = this.snapshot.images!.find((item) => item.id === object.id)!;
+        const copy = structuredClone(image);
+        delete copy.locked;
+        return { kind: 'image', page, rect: [...rect] as Rect, image: copy };
       }
       const stroke = this.snapshot.strokes.find((stroke) => stroke.id === object.id)!;
       return {
@@ -897,6 +1443,10 @@ export class TextSession {
           },
           bounds,
         );
+      } else if (item.kind === 'shape') {
+        validateShape({ ...item.shape, id: SHAPE_PREFIX + 'copy', page: item.page }, bounds);
+      } else if (item.kind === 'image') {
+        validateImage({ ...item.image, id: IMAGE_PREFIX + 'copy', page: item.page }, bounds);
       } else {
         throw new Error('Invalid copied PDF object.');
       }
@@ -953,6 +1503,28 @@ export class TextSession {
           ...(item.lineSpacing !== undefined ? { lineSpacing: item.lineSpacing } : {}),
         });
         created.push({ kind: 'text', id: name });
+      } else if (item.kind === 'shape') {
+        const shape: PdfShape = {
+          ...shiftShape(item.shape, dx, dy),
+          id: SHAPE_PREFIX + globalThis.crypto.randomUUID(),
+          page: item.page,
+          modified: pdfDate(),
+        };
+        (this.snapshot.shapes ??= []).push(shape);
+        (this.changes.shapes ??= new Map()).set(shape.id, structuredClone(shape));
+        created.push({ kind: 'shape', id: shape.id });
+      } else if (item.kind === 'image') {
+        const box = item.image.box;
+        const image: PdfImage = {
+          ...structuredClone(item.image),
+          id: IMAGE_PREFIX + globalThis.crypto.randomUUID(),
+          page: item.page,
+          box: [box[0] + dx, box[1] + dy, box[2] + dx, box[3] + dy],
+          modified: pdfDate(),
+        };
+        (this.snapshot.images ??= []).push(image);
+        (this.changes.images ??= new Map()).set(image.id, structuredClone(image));
+        created.push({ kind: 'image', id: image.id });
       } else {
         const id = INK_PREFIX + globalThis.crypto.randomUUID();
         const bounds = this.snapshot.pages[item.page - 1]!;
@@ -1021,6 +1593,21 @@ export class TextSession {
           ...(field.ruled ? { ruled: { ...field.ruled } } : {}),
         });
         this.changes.values.set(object.id, field.value);
+      } else if (object.kind === 'shape') {
+        const index = this.snapshot.shapes!.findIndex((item) => item.id === object.id);
+        const next = { ...shiftShape(this.snapshot.shapes![index]!, dx, dy), modified: pdfDate() };
+        this.snapshot.shapes![index] = next;
+        (this.changes.shapes ??= new Map()).set(object.id, structuredClone(next));
+      } else if (object.kind === 'image') {
+        const index = this.snapshot.images!.findIndex((item) => item.id === object.id);
+        const image = this.snapshot.images![index]!;
+        const next: PdfImage = {
+          ...structuredClone(image),
+          box: [rect[0] + dx, rect[1] + dy, rect[2] + dx, rect[3] + dy],
+          modified: pdfDate(),
+        };
+        this.snapshot.images![index] = next;
+        (this.changes.images ??= new Map()).set(object.id, structuredClone(next));
       } else {
         const index = this.snapshot.strokes.findIndex((stroke) => stroke.id === object.id);
         const stroke = this.snapshot.strokes[index]!;
@@ -1053,6 +1640,14 @@ export class TextSession {
         this.changes.formats.delete(object.id);
         this.snapshot.fields = this.snapshot.fields.filter((field) => field.name !== object.id);
         this.removedField(field);
+      } else if (object.kind === 'shape') {
+        this.snapshot.shapes = (this.snapshot.shapes ?? []).filter((item) => item.id !== object.id);
+        this.changes.shapes?.delete(object.id);
+        (this.changes.deletedShapes ??= new Set()).add(object.id);
+      } else if (object.kind === 'image') {
+        this.snapshot.images = (this.snapshot.images ?? []).filter((item) => item.id !== object.id);
+        this.changes.images?.delete(object.id);
+        (this.changes.deletedImages ??= new Set()).add(object.id);
       } else {
         this.changes.strokes.delete(object.id);
         if (this.seedStrokeIds.has(object.id)) {
@@ -1168,20 +1763,26 @@ export class TextSession {
         ) {
           return;
         }
-        let revision: number;
-        let baseline: Uint8Array;
+        const revision = this.revision;
+        const baseline = this.baseline;
         let bytes: Uint8Array;
-        do {
-          revision = this.revision;
-          baseline = this.baseline;
+        // While the user keeps typing, give up instead of rebuilding the PDF after
+        // every keystroke; the next pause in typing schedules a fresh checkpoint.
+        const superseded = () => revision !== this.revision || baseline !== this.baseline;
+        try {
           bytes =
             this.candidate?.revision === revision
               ? this.candidate.bytes
-              : await writeTextPdf(this.seed, this.cloneChanges(), this.font);
-          if (epoch !== this.editEpoch || !this.dirty || this.conflicted) {
+              : await writeTextPdf(this.seed, this.cloneChanges(), this.font, superseded);
+        } catch (error) {
+          if (error instanceof SaveCancelled) {
             return;
           }
-        } while (revision !== this.revision || baseline !== this.baseline);
+          throw error;
+        }
+        if (epoch !== this.editEpoch || !this.dirty || this.conflicted || superseded()) {
+          return;
+        }
         this.candidate = { revision, bytes };
         await this.store.draft.write({ baselineHash: await hash(baseline), bytes });
         if (epoch === this.editEpoch && baseline === this.baseline) {
@@ -1347,6 +1948,7 @@ export class TextSession {
     try {
       let revision: number;
       let output: Uint8Array;
+      let saved: TextChanges;
       do {
         if (generation !== undefined) {
           await this.waitForInteraction(generation);
@@ -1356,6 +1958,7 @@ export class TextSession {
         }
         revision = this.revision;
         const changes = this.cloneChanges();
+        saved = changes;
         if (!equalBytes(await this.store.read(), this.baseline)) {
           return this.conflict();
         }
@@ -1406,9 +2009,12 @@ export class TextSession {
         if (epoch !== undefined && epoch !== this.editEpoch) {
           return;
         }
+        // Edits made while this save ran stay unsaved for the next autosave. Writing
+        // this complete, verified revision now (instead of rebuilding the PDF again
+        // and again while the user types) keeps typing during a save smooth.
       } while (
-        revision !== this.revision ||
-        (generation !== undefined && !this.interactions.isIdle(generation))
+        generation !== undefined &&
+        (revision !== this.revision || !this.interactions.isIdle(generation))
       );
       await this.store.write(output);
       if (!equalBytes(await this.store.read(), output)) {
@@ -1416,16 +2022,19 @@ export class TextSession {
       }
       this.baseline = output;
       this.draftRevision = -1;
-      const savedSnapshot = await readTextPdf(output);
-      for (const field of savedSnapshot.fields) {
-        this.persistedFieldNames.add(field.name);
+      // The output was verified by writeTextPdf; avoid re-reading the whole document.
+      // New boxes are now persisted; only drawings need their saved annotation refs.
+      for (const name of saved!.added.keys()) {
+        if (!saved!.deleted.has(name)) {
+          this.persistedFieldNames.add(name);
+        }
       }
       if (this.snapshot.strokes.length) {
-        const saved = new Map(
-          savedSnapshot.strokes.map((stroke) => [stroke.id, stroke.annotationId]),
+        const ids = new Map(
+          readInk(await loadPdfDocument(output)).map((stroke) => [stroke.id, stroke.annotationId]),
         );
         for (const stroke of this.snapshot.strokes) {
-          stroke.annotationId = saved.get(stroke.id);
+          stroke.annotationId = ids.get(stroke.id);
         }
       }
       this.savedRevision = revision;

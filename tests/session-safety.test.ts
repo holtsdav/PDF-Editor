@@ -202,3 +202,31 @@ test('new text box arguments are validated before mutating the session', async (
   assert.equal(session.dirty, false);
   assert.equal(session.snapshot.fields.length, 1);
 });
+
+test('typing during a save or checkpoint does not rebuild the PDF on every keystroke', async () => {
+  const f = await fixture();
+  const session = await TextSession.open(f.store, font);
+  session.setValue('Answer', 'A');
+  // Keystrokes while the save runs: it writes the revision it started with once,
+  // and the newer text stays unsaved for the next autosave.
+  const saving = session.save();
+  for (const value of ['AB', 'ABC', 'ABCD']) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    session.setValue('Answer', value);
+  }
+  await saving;
+  assert.equal(f.writes(), 1);
+  assert.equal(session.status, 'unsaved');
+  assert.equal((await readTextPdf(f.bytes())).fields[0]!.value === 'ABCD', false);
+  // A checkpoint overtaken by typing is abandoned instead of restarting.
+  session.setValue('Answer', 'ABCDX');
+  const draft = f.draft();
+  const checkpoint = session.checkpoint();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  session.setValue('Answer', 'ABCDE');
+  await checkpoint;
+  assert.equal(f.draft(), draft);
+  await session.save();
+  assert.equal((await readTextPdf(f.bytes())).fields[0]!.value, 'ABCDE');
+  assert.equal(session.status, 'saved');
+});

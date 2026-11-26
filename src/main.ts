@@ -1,4 +1,5 @@
 import { FuzzySuggestModal, Modal, Notice, Plugin, TFile } from 'obsidian';
+import type { View } from 'obsidian';
 import { PdfInspectionModal } from './ui/pdf-inspection-modal';
 import { findNativePdfs, watchNativePdfs } from './compat/native-pdf';
 import { PdfSurface } from './ui/pdf-surface';
@@ -7,6 +8,7 @@ import { isRecoveryPath, loadBackups } from './pdf/recovery';
 import { loadToolPreferences } from './pdf/tool-preferences';
 import { PdfSettingsTab } from './ui/plugin-settings';
 import { watchPdfImportCleanup } from './compat/pdf-import';
+import { ANNOTATION_VIEW, AnnotationView, exportMarks } from './ui/annotation-view';
 import type { BackupRecord } from './pdf/recovery';
 import fontBytes from '../assets/fonts/NotoSans-Regular.ttf';
 import serifBytes from '../assets/fonts/NotoSerif-Regular.ttf';
@@ -47,6 +49,53 @@ export default class PdfEditor extends Plugin {
   private backups: Record<string, BackupRecord> = {};
   private preferences = loadToolPreferences(null);
   private persistence: Promise<void> = Promise.resolve();
+  /** Per-PDF choice made in this session; falls back to the openInEditor preference. */
+  private editingOverrides = new Map<string, boolean>();
+  private headerActions = new WeakMap<View, HTMLElement>();
+
+  private wantsEditor(file: TFile): boolean {
+    return this.editingOverrides.get(file.path) ?? this.sessions.preferences.openInEditor;
+  }
+
+  private toggleEditing(file: TFile): void {
+    const next = !this.wantsEditor(file);
+    this.editingOverrides.set(file.path, next);
+    this.scanEditors();
+    new Notice(
+      next
+        ? `Editing ${file.name}. Switch back to use Obsidian's viewer and PDF++.`
+        : `${file.name} is back in Obsidian's PDF viewer. Your edits were saved.`,
+    );
+  }
+
+  /** Pencil button in every PDF tab header that switches between the native viewer and the editor. */
+  private syncHeaderActions(): void {
+    for (const leaf of this.app.workspace.getLeavesOfType('pdf')) {
+      const view = leaf.view as View & { file?: TFile | null };
+      let action = this.headerActions.get(view);
+      if (!action && typeof (view as { addAction?: unknown }).addAction === 'function') {
+        action = (
+          view as View & {
+            addAction(icon: string, title: string, callback: () => void): HTMLElement;
+          }
+        ).addAction('pencil', 'Edit PDF form', () => {
+          if (view.file) {
+            this.toggleEditing(view.file);
+          }
+        });
+        this.headerActions.set(view, action);
+        this.register(() => action?.remove());
+      }
+      if (action && view.file) {
+        const on = this.wantsEditor(view.file);
+        action.toggleClass('is-active', on);
+        action.setAttribute(
+          'aria-label',
+          on ? "Back to Obsidian's PDF viewer (PDF++)" : 'Edit PDF form',
+        );
+      }
+    }
+  }
 
   async onload(): Promise<void> {
     const saved: unknown = await this.loadData();
@@ -90,6 +139,52 @@ export default class PdfEditor extends Plugin {
         this.sessions.root,
       ),
     );
+    this.registerView(
+      ANNOTATION_VIEW,
+      (leaf) =>
+        new AnnotationView(leaf, {
+          sessions: this.sessions,
+          reveal: (file, page) => void this.revealPage(file, page),
+        }),
+    );
+    this.addRibbonIcon(
+      'highlighter',
+      'PDF highlights and comments',
+      () => void this.showAnnotations(),
+    );
+    this.addCommand({
+      id: 'show-pdf-highlights',
+      name: 'Show highlights and comments of the PDF',
+      callback: () => void this.showAnnotations(),
+    });
+    this.addCommand({
+      id: 'export-pdf-highlights',
+      name: 'Export highlights and comments of the current PDF to a note',
+      checkCallback: (checking) => {
+        const file = this.app.workspace.getActiveFile();
+        if (file?.extension.toLowerCase() !== 'pdf') {
+          return false;
+        }
+        if (!checking) {
+          void exportMarks(this.app, this.sessions, file);
+        }
+        return true;
+      },
+    });
+    this.addCommand({
+      id: 'toggle-pdf-editing',
+      name: "Toggle editing for the current PDF (switch with Obsidian's viewer and PDF++)",
+      checkCallback: (checking) => {
+        const file = this.app.workspace.getActiveFile();
+        if (file?.extension.toLowerCase() !== 'pdf') {
+          return false;
+        }
+        if (!checking) {
+          this.toggleEditing(file);
+        }
+        return true;
+      },
+    });
     this.addCommand({
       id: 'inspect-pdf-form-fields',
       name: 'Inspect PDF form fields',
@@ -137,6 +232,11 @@ export default class PdfEditor extends Plugin {
     );
     this.registerEvent(
       this.app.vault.on('rename', (file, oldPath) => {
+        const override = this.editingOverrides.get(oldPath);
+        if (override !== undefined) {
+          this.editingOverrides.delete(oldPath);
+          this.editingOverrides.set(file.path, override);
+        }
         void this.sessions.renamed(file, oldPath).catch((error) => new Notice(String(error)));
       }),
     );
@@ -145,6 +245,18 @@ export default class PdfEditor extends Plugin {
         if (!(file instanceof TFile) || file.extension.toLowerCase() !== 'pdf') {
           return;
         }
+        menu.addItem((item) =>
+          item
+            .setTitle(this.wantsEditor(file) ? "Open in Obsidian's PDF viewer" : 'Edit PDF form')
+            .setIcon('pencil')
+            .onClick(() => this.toggleEditing(file)),
+        );
+        menu.addItem((item) =>
+          item
+            .setTitle('Export highlights and comments to a note')
+            .setIcon('file-output')
+            .onClick(() => void exportMarks(this.app, this.sessions, file)),
+        );
         menu.addItem((item) =>
           item
             .setTitle('Inspect PDF form fields')
@@ -156,8 +268,10 @@ export default class PdfEditor extends Plugin {
   }
 
   private scanEditors(): void {
+    this.syncHeaderActions();
     const viewers = findNativePdfs(this.app).filter(
-      (viewer) => !isRecoveryPath(viewer.file.path, this.sessions.root),
+      (viewer) =>
+        !isRecoveryPath(viewer.file.path, this.sessions.root) && this.wantsEditor(viewer.file),
     );
     const alive = new Set(viewers.map((viewer) => viewer.identity));
     for (const [identity, recent] of this.recentEditors) {
@@ -201,6 +315,40 @@ export default class PdfEditor extends Plugin {
         this.editors.set(viewer.identity, editor);
       }
       editor.refresh();
+    }
+  }
+
+  private async showAnnotations(): Promise<void> {
+    const existing = this.app.workspace.getLeavesOfType(ANNOTATION_VIEW)[0];
+    const leaf = existing ?? this.app.workspace.getRightLeaf(false);
+    if (!leaf) {
+      return;
+    }
+    if (!existing) {
+      await leaf.setViewState({ type: ANNOTATION_VIEW, active: true });
+    }
+    await this.app.workspace.revealLeaf(leaf);
+  }
+
+  /** Jump to a page: in the open editor if there is one, otherwise via Obsidian's viewer. */
+  private async revealPage(file: TFile, page: number): Promise<void> {
+    const leaf = this.app.workspace
+      .getLeavesOfType('pdf')
+      .find((item) => (item.view as { file?: TFile | null }).file === file);
+    const surfaces = [...this.editors.values()].filter((editor) => editor.file === file);
+    if (leaf) {
+      this.app.workspace.setActiveLeaf(leaf, { focus: true });
+    }
+    if (surfaces.length) {
+      for (const surface of surfaces) {
+        surface.goToPage(page);
+      }
+      return;
+    }
+    if (leaf) {
+      await leaf.openFile(file, { eState: { subpath: `#page=${page}` } });
+    } else {
+      await this.app.workspace.openLinkText(`${file.path}#page=${page}`, '', 'tab');
     }
   }
 
