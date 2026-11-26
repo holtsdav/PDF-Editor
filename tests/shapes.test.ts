@@ -185,3 +185,34 @@ test('rotated rectangles and ellipses keep their angle and draw turned in other 
   session.updateShape(rectangle.id, { rotation: 0 });
   assert.equal(session.snapshot.shapes![0]!.rotation, undefined);
 });
+
+test('bringing a shape to the front or back is saved as annotation order', async () => {
+  const { session, bytes } = await open();
+  const ids = [0, 1, 2].map(
+    (i) =>
+      session.addShape({
+        page: 1,
+        kind: 'rectangle',
+        box: [40 + i * 20, 40, 140 + i * 20, 140],
+        color: [i / 2, 0, 0],
+        width: 1,
+      }).id,
+  );
+  await session.save();
+  session.reorder('shape', ids[0]!, 'front');
+  session.reorder('shape', ids[2]!, 'back');
+  assert.deepEqual(
+    session.snapshot.shapes!.map((shape) => shape.id),
+    [ids[2], ids[1], ids[0]],
+  );
+  await session.save();
+  assert.deepEqual(
+    (await readTextPdf(bytes())).shapes!.map((shape) => shape.id),
+    [ids[2], ids[1], ids[0]],
+  );
+  session.undoStroke();
+  assert.deepEqual(
+    session.snapshot.shapes!.map((shape) => shape.id),
+    [ids[1], ids[2], ids[0]],
+  );
+});

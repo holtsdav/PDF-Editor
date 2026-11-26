@@ -56,7 +56,9 @@ const built = await build({
         const api = {
           setTitle(t) { item.title = t; return api; },
           setIcon() { return api; },
-          setSection() { return api; },
+          setSection(section) { item.section = section; return api; },
+          setWarning(warning) { item.warning = warning; return api; },
+          setIsLabel(isLabel) { item.isLabel = isLabel; return api; },
           setDisabled(d) { item.disabled = d; return api; },
           setChecked(c) { item.checked = c; return api; },
           onClick(fn) { item.click = fn; return api; },
@@ -2763,14 +2765,14 @@ test('the right-click menu copies, pastes, turns, flips, locks and deletes shape
     const [rect, arrow] = f.session.snapshot.shapes!;
     // Rotate right is a quarter turn clockwise (-90° in PDF terms); flipping mirrors it.
     let pick = menu(f.doc.querySelector(`[data-shape-id="${rect!.id}"] .pfs-shape-hit`)!, 101, 130);
-    pick('Rotate 90° right').click();
+    pick('Rotate right 90°').click();
     assert.equal(f.session.snapshot.shapes![0]!.rotation, -90);
     pick = menu(f.doc.querySelector(`[data-shape-id="${rect!.id}"] .pfs-shape-hit`)!, 150, 130);
     pick('Flip horizontally').click();
     assert.equal(f.session.snapshot.shapes![0]!.rotation, 90);
     // Lines turn and mirror their end points around the middle.
     pick = menu(f.doc.querySelector(`[data-shape-id="${arrow!.id}"] .pfs-shape-hit`)!, 350, 300);
-    pick('Rotate 90° left').click();
+    pick('Rotate left 90°').click();
     assert.deepEqual(f.session.snapshot.shapes![1]!.start, [350, 450]);
     assert.deepEqual(f.session.snapshot.shapes![1]!.end, [350, 550]);
     pick = menu(f.doc.querySelector(`[data-shape-id="${arrow!.id}"] .pfs-shape-hit`)!, 350, 300);
@@ -2781,7 +2783,7 @@ test('the right-click menu copies, pastes, turns, flips, locks and deletes shape
     pick('Copy').click();
     const layer = f.doc.querySelector<HTMLElement>('#page .pdf-form-studio-layer')!;
     pick = menu(layer, 50, 700);
-    pick('Paste here').click();
+    pick('Paste').click();
     const pasted = f.session.snapshot.shapes![2]!;
     assert.deepEqual(
       [pasted.start, pasted.end],
@@ -2794,7 +2796,13 @@ test('the right-click menu copies, pastes, turns, flips, locks and deletes shape
     pick = menu(f.doc.querySelector(`[data-shape-id="${rect!.id}"] .pfs-shape-hit`)!, 150, 130);
     pick('Lock').click();
     pick = menu(f.doc.querySelector(`[data-shape-id="${rect!.id}"] .pfs-shape-hit`)!, 150, 130);
-    assert.equal(pick('Delete').disabled, true);
+    const lockedItems = (globalThis as { lastMenu?: { items: { title: string }[] } }).lastMenu!
+      .items;
+    assert.deepEqual(
+      lockedItems.map((item) => item.title),
+      ['Copy', 'Paste', 'Duplicate', 'Unlock'],
+      'locked shapes only offer copying and unlocking',
+    );
     assert.throws(() => f.session.deleteShape(rect!.id), /locked/);
     assert.equal(f.doc.querySelectorAll('.pfs-shape-handle').length, 0, 'no handles while locked');
     await f.session.save();
@@ -2808,7 +2816,7 @@ test('the right-click menu copies, pastes, turns, flips, locks and deletes shape
     assert.equal(f.session.snapshot.shapes!.length, 2);
     // On the empty page: add a note, then recolour it from its own menu.
     pick = menu(layer, 500, 100);
-    pick('Add note here').click();
+    pick('Note here').click();
     const note = f.session.snapshot.marks!.at(-1)!;
     assert.equal(note.kind, 'note');
     f.editor.refresh();
@@ -2841,14 +2849,23 @@ test('the right-click menu copies a text box to the clicked spot and Ctrl+D dupl
     open(f.doc.querySelector('.pdf-form-studio-box')!, 100, 280);
     assert.deepEqual(
       items().map((item) => item.title),
-      ['Cut', 'Copy', 'Paste', 'Duplicate', 'Delete', 'Select all on page'],
+      [
+        'Edit text',
+        'Properties…',
+        'Cut',
+        'Copy',
+        'Paste',
+        'Duplicate',
+        'Select all on page',
+        'Delete',
+      ],
     );
     items()
       .find((item) => item.title === 'Copy')!
       .click();
     open(f.doc.querySelector('#page .pdf-form-studio-layer')!, 200, 100);
     items()
-      .find((item) => item.title === 'Paste here')!
+      .find((item) => item.title === 'Paste')!
       .click();
     const copy = f.session.snapshot.fields.at(-1)!;
     assert.notEqual(copy.name, field.name);
@@ -2917,7 +2934,7 @@ test('pasted pictures are placed, moved, resized, turned, locked and saved', asy
         .lastMenu!.items;
       items.find((item) => item.title === title)!.click();
     };
-    menu('Rotate 90° right');
+    menu('Rotate right 90°');
     const turned = f.session.snapshot.images![0]!;
     assert.deepEqual([turned.box, turned.rotation], [[280, 232.5, 430, 532.5], 270]);
     assert.match(f.doc.querySelector<HTMLElement>('.pfs-image img')!.style.transform, /90deg/);
@@ -2928,6 +2945,67 @@ test('pasted pictures are placed, moved, resized, turned, locked and saved', asy
     await f.session.save();
     const saved = (await readTextPdf(f.bytes())).images!;
     assert.deepEqual([saved.length, saved[0]!.rotation, saved[0]!.locked], [1, 270, true]);
+  } finally {
+    f.dispose();
+  }
+});
+
+test('the group menu aligns and distributes objects and puts Delete last, as a warning', async () => {
+  const f = await fixture();
+  try {
+    const boxes = [
+      [60, 600, 160, 630],
+      [250, 500, 330, 530],
+      [420, 400, 560, 430],
+    ].map((rect, i) => {
+      const field = f.session.add(1, rect as [number, number, number, number], 12, true);
+      f.session.setValue(field.name, `Box ${i}`);
+      return field.name;
+    });
+    f.editor.refresh();
+    const page = f.doc.querySelector('#page')!;
+    f.pointer(page, 'pointerdown', 20, 120);
+    f.pointer(page, 'pointermove', 590, 420);
+    f.pointer(page, 'pointerup', 590, 420);
+    const open = () => {
+      f.doc
+        .querySelector('.pdf-form-studio-box')!
+        .dispatchEvent(
+          new f.doc.defaultView!.MouseEvent('contextmenu', { bubbles: true, cancelable: true }),
+        );
+      return (
+        globalThis as {
+          lastMenu?: { items: { title: string; warning?: boolean; click(): void }[] };
+        }
+      ).lastMenu!.items;
+    };
+    const items = open();
+    assert.equal(items.at(-1)!.title, 'Delete 3 objects');
+    assert.equal(items.at(-1)!.warning, true);
+    items.find((item) => item.title === 'Align left')!.click();
+    const left = () =>
+      boxes.map(
+        (name) =>
+          f.session.snapshot.fields.find((field) => field.name === name)!.widgets[0]!.rect[0],
+      );
+    assert.deepEqual(left(), [60, 60, 60]);
+    open()
+      .find((item) => item.title === 'Align top')!
+      .click();
+    open()
+      .find((item) => item.title === 'Distribute vertically')!
+      .click();
+    // All tops aligned, so distributing vertically keeps them; one undo per action.
+    assert.deepEqual(
+      boxes.map(
+        (name) =>
+          f.session.snapshot.fields.find((field) => field.name === name)!.widgets[0]!.rect[3],
+      ),
+      [630, 630, 630],
+    );
+    f.session.undoStroke();
+    f.session.undoStroke();
+    assert.deepEqual(left(), [60, 250, 420]);
   } finally {
     f.dispose();
   }

@@ -377,3 +377,29 @@ test('underline and strikethrough are standard annotations that toggle off again
   );
   await document.destroy();
 });
+
+test('a highlight turns into an underline and back, keeping its comment, as one undo step', async () => {
+  const file = memory(await textPdf());
+  const session = await TextSession.open(file.store, font);
+  const mark = session.addMark({
+    page: 1,
+    kind: 'highlight',
+    quads: [[40, 338, 200, 352]],
+    color: [1, 0.85, 0.1],
+    comment: 'Wichtig',
+  });
+  await session.save();
+  const line = session.convertMark(mark.id, 'underline', [0.85, 0.15, 0.15])!;
+  await session.save();
+  const saved = (await readTextPdf(file.bytes())).marks!;
+  assert.deepEqual(
+    saved.map((item) => [item.kind, item.comment, item.opacity]),
+    [['underline', 'Wichtig', 1]],
+  );
+  session.undoStroke();
+  assert.deepEqual(
+    session.snapshot.marks!.map((item) => [item.id, item.kind]),
+    [[mark.id, 'highlight']],
+  );
+  assert.notEqual(line.id, mark.id);
+});

@@ -704,6 +704,68 @@ export class TextSession {
     return touched.length;
   }
 
+  /**
+   * Bring a shape or image to the front or send it to the back of its page. The whole
+   * page's set is rewritten in the new order, because annotation order is stacking order.
+   */
+  reorder(kind: 'shape' | 'image', id: string, to: 'front' | 'back'): void {
+    this.assertEditable();
+    const list = (kind === 'shape' ? this.snapshot.shapes : this.snapshot.images) as
+      (PdfShape | PdfImage)[] | undefined;
+    const item = list?.find((entry) => entry.id === id);
+    if (!list || !item) {
+      return;
+    }
+    const page = list.filter((entry) => entry.page === item.page);
+    if (page.length < 2 || (to === 'front' ? page.at(-1) : page[0]) === item) {
+      return;
+    }
+    this.rememberText(`${kind}-order`, false);
+    const rest = list.filter((entry) => entry !== item);
+    const next = to === 'front' ? [...rest, item] : [item, ...rest];
+    const changes = (
+      kind === 'shape' ? (this.changes.shapes ??= new Map()) : (this.changes.images ??= new Map())
+    ) as Map<string, PdfShape | PdfImage>;
+    for (const entry of next.filter((entry) => entry.page === item.page)) {
+      changes.delete(entry.id);
+      changes.set(entry.id, structuredClone(entry));
+    }
+    if (kind === 'shape') {
+      this.snapshot.shapes = next as PdfShape[];
+    } else {
+      this.snapshot.images = next as PdfImage[];
+    }
+    this.changed();
+  }
+
+  /** Turn a highlight into an underline or strikethrough (or back), keeping its comment. */
+  convertMark(id: string, kind: TextMarkKind, color: PdfColor): PdfMark | undefined {
+    this.assertEditable();
+    const mark = this.snapshot.marks?.find((item) => item.id === id);
+    if (!mark || mark.kind === kind || !isTextMark(mark.kind)) {
+      return undefined;
+    }
+    const next: PdfMark = {
+      id: `${MARK_PREFIX}${crypto.randomUUID()}`,
+      page: mark.page,
+      kind,
+      quads: structuredClone(mark.quads),
+      rect: [...mark.rect] as Rect,
+      color: [...color] as PdfColor,
+      opacity: kind === 'highlight' ? 0.45 : 1,
+      comment: mark.comment,
+      modified: pdfDate(),
+    };
+    validateMark(next, this.snapshot.pages[mark.page - 1]!);
+    this.rememberText(`mark:${id}`, false);
+    this.snapshot.marks = this.snapshot.marks!.map((item) => (item.id === id ? next : item));
+    this.changes.marks?.delete(id);
+    (this.changes.deletedMarks ??= new Set()).add(id);
+    (this.changes.marks ??= new Map()).set(next.id, structuredClone(next));
+    this.changed();
+    return next;
+  }
+
   deleteMark(id: string): void {
     this.assertEditable();
     const mark = this.snapshot.marks?.find((item) => item.id === id);
@@ -1581,7 +1643,40 @@ export class TextSession {
       return;
     }
     this.rememberObjects();
-    for (const { object, rect, page } of items) {
+    for (const item of items) {
+      this.shiftObject(item, dx, dy);
+    }
+    this.changed();
+  }
+
+  /** Bounds of editable objects, for aligning and distributing a group. */
+  objectRects(objects: PdfObject[]): { object: PdfObject; page: number; rect: Rect }[] {
+    return this.objectItems(objects);
+  }
+
+  /** Move each object by its own offset (align, distribute) as one undo step. */
+  moveEach(moves: { object: PdfObject; delta: Point }[]): void {
+    const items = this.objectItems(moves.map((move) => move.object));
+    const shifts = items.map((item, index) => {
+      const [dx, dy] = this.objectDelta([item.object], moves[index]!.delta);
+      return { item, dx, dy };
+    });
+    if (shifts.every(({ dx, dy }) => Math.abs(dx) + Math.abs(dy) < 0.001)) {
+      return;
+    }
+    this.rememberObjects();
+    for (const { item, dx, dy } of shifts) {
+      this.shiftObject(item, dx, dy);
+    }
+    this.changed();
+  }
+
+  private shiftObject(
+    { object, rect, page }: { object: PdfObject; page: number; rect: Rect },
+    dx: number,
+    dy: number,
+  ): void {
+    {
       if (object.kind === 'text') {
         const field = this.snapshot.fields.find((field) => field.name === object.id)!;
         const next: Rect = [rect[0] + dx, rect[1] + dy, rect[2] + dx, rect[3] + dy];
@@ -1621,7 +1716,6 @@ export class TextSession {
         this.changes.strokes.set(object.id, next);
       }
     }
-    this.changed();
   }
   deleteObjects(objects: PdfObject[]): void {
     const items = this.objectItems(objects);

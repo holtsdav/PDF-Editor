@@ -3446,19 +3446,25 @@ export class TextEditor extends Component {
     this.menu?.hide();
     const menu = (this.menu = new Menu());
     const session = this.session!;
+    // Sections in a fixed order (Obsidian draws a separator between sections):
+    // main action, clipboard, edit, color, arrange, lock, danger.
+    let section = 'main';
     const add = (
       title: string,
       icon: string,
       run: () => void,
-      options: { disabled?: boolean; checked?: boolean } = {},
+      options: { disabled?: boolean; checked?: boolean; warning?: boolean } = {},
     ) =>
       menu.addItem((item) => {
-        item.setTitle(title).setIcon(icon);
+        item.setTitle(title).setIcon(icon).setSection(section);
         if (options.disabled) {
           item.setDisabled(true);
         }
         if (options.checked !== undefined) {
           item.setChecked(options.checked);
+        }
+        if (options.warning) {
+          item.setWarning(true);
         }
         item.onClick(() => {
           try {
@@ -3470,8 +3476,19 @@ export class TextEditor extends Component {
           this.refresh();
         });
       });
-    const canPaste = !!copiedObjects || !!copiedShape;
-    const paste = () => this.pasteCopied(entry.page.number, at);
+    const label = (title: string) =>
+      menu.addItem((item) => item.setTitle(title).setIsLabel(true).setSection(section));
+    const next = (name: string) => {
+      section = name;
+    };
+    const page = entry.page.number;
+    const canPaste = !!copiedObjects || !!copiedShape || this.clipboardReadable();
+    const paste = () => this.pasteHere(page, at);
+    const arrange = (kind: 'shape' | 'image', id: string) => {
+      next('arrange');
+      add('Bring to front', 'bring-to-front', () => session.reorder(kind, id, 'front'));
+      add('Send to back', 'send-to-back', () => session.reorder(kind, id, 'back'));
+    };
     if (target.kind === 'shape') {
       const { shape } = target;
       const locked = !!shape.locked;
@@ -3479,28 +3496,32 @@ export class TextEditor extends Component {
       this.selected = undefined;
       this.selectedStroke = undefined;
       this.selectedImage = undefined;
-      add('Cut', 'scissors', () => this.cutShape(shape.id), { disabled: locked });
+      if (!locked) {
+        add('Properties…', 'sliders-horizontal', () => this.openShapeProperties());
+      }
+      next('clipboard');
+      if (!locked) {
+        add('Cut', 'scissors', () => this.cutShape(shape.id));
+      }
       add('Copy', 'copy', () => this.copyShape(shape.id));
       add('Paste', 'clipboard-paste', paste, { disabled: !canPaste });
       add('Duplicate', 'copy-plus', () => this.duplicateShape(shape.id));
-      add('Delete', 'trash-2', () => this.deleteShapeSelection(shape.id), { disabled: locked });
-      menu.addSeparator();
-      add('Rotate 90° right', 'rotate-cw', () => this.turnShape(shape.id, -90), {
-        disabled: locked,
-      });
-      add('Rotate 90° left', 'rotate-ccw', () => this.turnShape(shape.id, 90), {
-        disabled: locked,
-      });
-      add('Flip horizontally', 'flip-horizontal-2', () => this.flipShape(shape.id, 'x'), {
-        disabled: locked,
-      });
-      add('Flip vertically', 'flip-vertical-2', () => this.flipShape(shape.id, 'y'), {
-        disabled: locked,
-      });
-      menu.addSeparator();
+      if (!locked) {
+        next('edit');
+        add('Rotate right 90°', 'rotate-cw', () => this.turnShape(shape.id, -90));
+        add('Rotate left 90°', 'rotate-ccw', () => this.turnShape(shape.id, 90));
+        add('Flip horizontally', 'flip-horizontal-2', () => this.flipShape(shape.id, 'x'));
+        add('Flip vertically', 'flip-vertical-2', () => this.flipShape(shape.id, 'y'));
+        arrange('shape', shape.id);
+      }
+      next('lock');
       add(locked ? 'Unlock' : 'Lock', locked ? 'unlock' : 'lock', () =>
         session.updateShape(shape.id, { locked: !locked }),
       );
+      if (!locked) {
+        next('danger');
+        add('Delete', 'trash-2', () => this.deleteShapeSelection(shape.id), { warning: true });
+      }
     } else if (target.kind === 'image') {
       const { image } = target;
       const locked = !!image.locked;
@@ -3508,45 +3529,84 @@ export class TextEditor extends Component {
       this.selectedShape = undefined;
       this.selected = undefined;
       this.selectedStroke = undefined;
-      add('Cut', 'scissors', () => this.cutImage(image.id), { disabled: locked });
+      next('clipboard');
+      if (!locked) {
+        add('Cut', 'scissors', () => this.cutImage(image.id));
+      }
       add('Copy', 'copy', () => this.copyImage(image.id));
-      add('Paste picture', 'clipboard-paste', () => this.pasteClipboardImage(), {
-        disabled: !this.clipboardReadable(),
-      });
+      add('Paste', 'clipboard-paste', paste, { disabled: !canPaste });
       add('Duplicate', 'copy-plus', () => this.duplicateImage(image.id));
-      add('Delete', 'trash-2', () => this.deleteImageSelection(image.id), { disabled: locked });
-      menu.addSeparator();
-      add('Rotate 90° right', 'rotate-cw', () => this.turnImage(image.id, -90), {
-        disabled: locked,
-      });
-      add('Rotate 90° left', 'rotate-ccw', () => this.turnImage(image.id, 90), {
-        disabled: locked,
-      });
-      menu.addSeparator();
+      next('edit');
+      if (!locked) {
+        add('Rotate right 90°', 'rotate-cw', () => this.turnImage(image.id, -90));
+        add('Rotate left 90°', 'rotate-ccw', () => this.turnImage(image.id, 90));
+        add('Original size', 'maximize', () => this.originalImageSize(image.id));
+      }
+      add('Save image to vault', 'download', () => void this.saveImageToVault(image.id));
+      if (!locked) {
+        arrange('image', image.id);
+      }
+      next('lock');
       add(locked ? 'Unlock' : 'Lock', locked ? 'unlock' : 'lock', () =>
         session.updateImage(image.id, { locked: !locked }),
       );
+      if (!locked) {
+        next('danger');
+        add('Delete', 'trash-2', () => this.deleteImageSelection(image.id), { warning: true });
+      }
     } else if (target.kind === 'mark') {
       const { mark } = target;
       add(mark.comment ? 'Edit comment…' : 'Add comment…', 'message-square', () =>
         this.openMarkPopover(entry, mark.id, false),
       );
-      menu.addSeparator();
+      if (isTextMark(mark.kind)) {
+        next('clipboard');
+        add('Copy text', 'copy', () => void this.copyMarkText(entry, mark, false));
+        add('Copy as quote with link', 'quote', () => void this.copyMarkText(entry, mark, true));
+      }
+      next('color');
+      label('Color');
       for (const { name, color } of colorsFor(mark.kind)) {
         add(name, 'palette', () => session.updateMark(mark.id, { color }), {
           checked: color.every((value, index) => Math.abs(value - mark.color[index]!) < 0.01),
         });
       }
-      menu.addSeparator();
-      const labels: Record<MarkKind, string> = {
+      if (isTextMark(mark.kind)) {
+        next('edit');
+        for (const [kind, title, icon] of [
+          ['highlight', 'Turn into highlight', 'highlighter'],
+          ['underline', 'Turn into underline', 'underline'],
+          ['strikeout', 'Turn into strikethrough', 'strikethrough'],
+        ] as const) {
+          if (kind !== mark.kind) {
+            add(title, icon, () => {
+              session.convertMark(
+                mark.id,
+                kind,
+                kind === 'highlight' ? this.markColor : this.lineColor,
+              );
+            });
+          }
+        }
+      }
+      next('danger');
+      const deleteLabels: Record<MarkKind, string> = {
         note: 'Delete note',
         highlight: 'Delete highlight',
         underline: 'Delete underline',
         strikeout: 'Delete strikethrough',
       };
-      add(labels[mark.kind], 'trash-2', () => session.deleteMark(mark.id));
+      add(deleteLabels[mark.kind], 'trash-2', () => session.deleteMark(mark.id), {
+        warning: true,
+      });
     } else if (target.kind === 'objects') {
       const { objects } = target;
+      const single = objects.length === 1 ? objects[0]! : undefined;
+      if (single?.kind === 'text') {
+        add('Edit text', 'pencil', () => this.editTextBox(single.id));
+        add('Properties…', 'sliders-horizontal', () => this.openProperties());
+      }
+      next('clipboard');
       add('Cut', 'scissors', () => {
         this.copyObjectsFromMenu(objects);
         this.removeSelection();
@@ -3556,37 +3616,249 @@ export class TextEditor extends Component {
       add('Duplicate', 'copy-plus', () =>
         this.selectCreated(session.pasteObjects(session.copyObjects(objects))),
       );
-      add('Delete', 'trash-2', () => this.removeSelection());
-      menu.addSeparator();
-      add('Select all on page', 'box-select', () => this.selectPage(entry.page.number));
-    } else {
-      add('Paste here', 'clipboard-paste', paste, { disabled: !canPaste });
+      const onPage = objects.filter((object) =>
+        session.objectRects([object]).every((item) => item.page === page),
+      );
+      if (onPage.length > 1) {
+        next('arrange');
+        for (const [mode, title, icon] of [
+          ['left', 'Align left', 'align-start-vertical'],
+          ['center', 'Align center', 'align-center-vertical'],
+          ['right', 'Align right', 'align-end-vertical'],
+          ['top', 'Align top', 'align-start-horizontal'],
+          ['middle', 'Align middle', 'align-center-horizontal'],
+          ['bottom', 'Align bottom', 'align-end-horizontal'],
+        ] as const) {
+          add(title, icon, () => this.alignObjects(entry, onPage, mode));
+        }
+        if (onPage.length > 2) {
+          add('Distribute horizontally', 'align-horizontal-space-around', () =>
+            this.distributeObjects(entry, onPage, 'x'),
+          );
+          add('Distribute vertically', 'align-vertical-space-around', () =>
+            this.distributeObjects(entry, onPage, 'y'),
+          );
+        }
+      }
+      next('select');
+      add('Select all on page', 'box-select', () => this.selectPage(page));
+      if (objects.length > 1) {
+        add('Clear selection', 'x', () => this.selection?.clear());
+      }
+      next('danger');
       add(
-        'Paste picture here',
-        'image',
-        () => this.pasteClipboardImage({ page: entry.page.number, at }),
-        { disabled: !this.clipboardReadable() },
+        objects.length > 1 ? `Delete ${objects.length} objects` : 'Delete',
+        'trash-2',
+        () => this.removeSelection(),
+        { warning: true },
       );
-      add('Insert picture…', 'image-plus', () =>
-        this.chooseImageFile({ page: entry.page.number, at }),
-      );
-      menu.addSeparator();
-      add('Add text box here', 'type', () => this.addTextBoxAt(entry, at));
-      add('Add note here', 'sticky-note', () => {
-        const mark = session.addMark({
-          page: entry.page.number,
-          kind: 'note',
-          at,
-          color: MARK_COLORS[0]!.color,
-        });
+    } else {
+      next('clipboard');
+      add('Paste', 'clipboard-paste', paste, { disabled: !canPaste });
+      next('insert');
+      add('Text box here', 'type', () => this.addTextBoxAt(entry, at));
+      add('Note here', 'sticky-note', () => {
+        const mark = session.addMark({ page, kind: 'note', at, color: MARK_COLORS[0]!.color });
         this.openMarkPopover(entry, mark.id, true);
       });
-      menu.addSeparator();
-      add('Select all on page', 'box-select', () => this.selectPage(entry.page.number));
+      add('Insert image…', 'image-plus', () => this.chooseImageFile({ page, at }));
+      next('select');
+      add('Select all on page', 'box-select', () => this.selectPage(page));
     }
     // Show the menu first; painting the selection can follow.
     menu.showAtMouseEvent(event);
     this.refresh();
+  }
+
+  /** Paste the newest copy at a point: objects copied here, else an image on the clipboard. */
+  private pasteHere(page: number, at: Point): void {
+    const internal =
+      copiedShape ?? (copiedObjects && !copiedObjects.blurred ? copiedObjects : undefined);
+    if (internal || !this.clipboardReadable()) {
+      this.pasteCopied(page, at);
+      return;
+    }
+    void this.pasteClipboardImage({ page, at }, !!copiedObjects).then((placed) => {
+      // No image on the clipboard: fall back to an older copy made here.
+      if (!placed && copiedObjects) {
+        this.pasteCopied(page, at);
+        this.scheduleSave();
+        this.refresh();
+      }
+    });
+  }
+
+  private openShapeProperties(): void {
+    const button = this.toolbar.querySelector<HTMLElement>('.pfs-shape-options-button');
+    if (button && !this.shapeMenu) {
+      this.toggleShapeMenu(button);
+    }
+  }
+
+  private editTextBox(name: string): void {
+    for (const entry of this.layers.values()) {
+      for (const control of entry.controls.values()) {
+        if (control.input.dataset.pdfField === name) {
+          this.selected = name;
+          control.input.focus({ preventScroll: true });
+          return;
+        }
+      }
+    }
+  }
+
+  /** Align a group's edges or centres in screen terms (left is left on a turned page too). */
+  private alignObjects(
+    entry: PageLayer,
+    objects: PdfObject[],
+    mode: 'left' | 'center' | 'right' | 'top' | 'middle' | 'bottom',
+  ): void {
+    const items = this.screenItems(entry, objects);
+    const left = Math.min(...items.map((item) => item.box[0]));
+    const right = Math.max(...items.map((item) => item.box[2]));
+    const top = Math.min(...items.map((item) => item.box[1]));
+    const bottom = Math.max(...items.map((item) => item.box[3]));
+    this.moveOnScreen(
+      entry,
+      items.map(({ object, box }) => {
+        const [x0, y0, x1, y1] = box;
+        const dx =
+          mode === 'left'
+            ? left - x0
+            : mode === 'right'
+              ? right - x1
+              : mode === 'center'
+                ? (left + right) / 2 - (x0 + x1) / 2
+                : 0;
+        const dy =
+          mode === 'top'
+            ? top - y0
+            : mode === 'bottom'
+              ? bottom - y1
+              : mode === 'middle'
+                ? (top + bottom) / 2 - (y0 + y1) / 2
+                : 0;
+        return { object, dx, dy };
+      }),
+    );
+  }
+
+  /** Even gaps between the outermost objects, keeping their order. */
+  private distributeObjects(entry: PageLayer, objects: PdfObject[], axis: 'x' | 'y'): void {
+    const a = axis === 'x' ? 0 : 1;
+    const b = axis === 'x' ? 2 : 3;
+    const items = this.screenItems(entry, objects).sort((p, q) => p.box[a] - q.box[a]);
+    const span = items.at(-1)!.box[b] - items[0]!.box[a];
+    const used = items.reduce((sum, item) => sum + item.box[b] - item.box[a], 0);
+    const gap = (span - used) / (items.length - 1);
+    let cursor = items[0]!.box[a];
+    this.moveOnScreen(
+      entry,
+      items.map(({ object, box }) => {
+        const shift = cursor - box[a];
+        cursor += box[b] - box[a] + gap;
+        return { object, dx: axis === 'x' ? shift : 0, dy: axis === 'y' ? shift : 0 };
+      }),
+    );
+  }
+
+  private screenItems(entry: PageLayer, objects: PdfObject[]) {
+    return this.session!.objectRects(objects).map(({ object, rect }) => ({
+      object,
+      box: screenRectangle(entry.page.viewport, rect) as Rect,
+    }));
+  }
+
+  private moveOnScreen(
+    entry: PageLayer,
+    moves: { object: PdfObject; dx: number; dy: number }[],
+  ): void {
+    const viewport = entry.page.viewport;
+    const [ox, oy] = viewport.convertToPdfPoint(0, 0);
+    this.session!.moveEach(
+      moves.map(({ object, dx, dy }) => {
+        const [px, py] = viewport.convertToPdfPoint(dx, dy);
+        return { object, delta: [px! - ox!, py! - oy!] as Point };
+      }),
+    );
+  }
+
+  /** The printed words under a highlight, read from the page's text layer. */
+  private markText(entry: PageLayer, mark: PdfMark): string {
+    const layer = entry.page.div.querySelector('.pfs-text-layer, .textLayer');
+    const boxes = mark.quads.map((quad) => screenRectangle(entry.page.viewport, quad));
+    const origin = entry.layer.getBoundingClientRect();
+    const scaleX = entry.page.viewport.width / (origin.width || entry.page.viewport.width);
+    const scaleY = entry.page.viewport.height / (origin.height || entry.page.viewport.height);
+    const words: string[] = [];
+    for (const span of layer?.querySelectorAll<HTMLElement>('span') ?? []) {
+      if (span.children.length) {
+        continue;
+      }
+      const r = span.getBoundingClientRect();
+      const x = ((r.left + r.right) / 2 - origin.left) * scaleX;
+      const y = ((r.top + r.bottom) / 2 - origin.top) * scaleY;
+      if (boxes.some(([l, t, rr, b]) => x >= l && x <= rr && y >= t && y <= b)) {
+        words.push(span.textContent ?? '');
+      }
+    }
+    return normalizeSymbols(words.join(' ').replace(/\s+/g, ' ').trim());
+  }
+
+  private async copyMarkText(entry: PageLayer, mark: PdfMark, quote: boolean): Promise<void> {
+    const text = this.markText(entry, mark);
+    const link = `[[${this.native.file.path}#page=${mark.page}|${this.native.file.basename}, p. ${mark.page}]]`;
+    const value = quote ? `> ${text || '…'}\n>\n> — ${link}` : text;
+    await this.native.element.ownerDocument.defaultView?.navigator.clipboard?.writeText(value);
+  }
+
+  private originalImageSize(id: string): void {
+    const session = this.session!;
+    const image = session.snapshot.images?.find((item) => item.id === id);
+    const stored = image && storedImage(image.source);
+    const size = stored && imageSize(stored.bytes);
+    if (!image || !size) {
+      return;
+    }
+    const bounds = session.snapshot.pages[image.page - 1]!;
+    const sideways = image.rotation === 90 || image.rotation === 270;
+    const scale = Math.min(
+      0.75,
+      (bounds[2] - bounds[0]) / (sideways ? size[1] : size[0]),
+      (bounds[3] - bounds[1]) / (sideways ? size[0] : size[1]),
+    );
+    const w = (sideways ? size[1] : size[0]) * scale;
+    const h = (sideways ? size[0] : size[1]) * scale;
+    const [x0, y0, x1, y1] = image.box;
+    const left = Math.max(bounds[0], Math.min(bounds[2] - w, (x0 + x1) / 2 - w / 2));
+    const bottom = Math.max(bounds[1], Math.min(bounds[3] - h, (y0 + y1) / 2 - h / 2));
+    session.updateImage(id, { box: [left, bottom, left + w, bottom + h] });
+  }
+
+  /** Store a pasted image as a file next to the note's attachments. */
+  private async saveImageToVault(id: string): Promise<void> {
+    const image = this.session?.snapshot.images?.find((item) => item.id === id);
+    const stored = image && storedImage(image.source);
+    if (!image || !stored) {
+      return;
+    }
+    try {
+      const extension = stored.mime === 'image/png' ? 'png' : 'jpg';
+      const path = await this.app.fileManager.getAvailablePathForAttachment(
+        `${this.native.file.basename} p${image.page}.${extension}`,
+        this.native.file.path,
+      );
+      await this.app.vault.createBinary(
+        path,
+        stored.bytes.buffer.slice(
+          stored.bytes.byteOffset,
+          stored.bytes.byteOffset + stored.bytes.byteLength,
+        ) as ArrayBuffer,
+      );
+      new Notice(`Saved ${path}`);
+    } catch (error) {
+      this.showError(error);
+    }
   }
 
   private copyObjectsFromMenu(objects: PdfObject[]): void {
@@ -4060,24 +4332,25 @@ export class TextEditor extends Component {
   private async pasteClipboardImage(
     target?: { page: number; at: Point },
     quiet = false,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const clipboard = this.native.element.ownerDocument.defaultView?.navigator.clipboard;
     try {
       for (const item of (await clipboard?.read()) ?? []) {
         const type = item.types.find((entry) => entry.startsWith('image/'));
         if (type) {
           await this.placeImageBlob(await item.getType(type), target);
-          return;
+          return true;
         }
       }
       if (!quiet) {
-        this.showError(new Error('There is no picture in the clipboard.'));
+        this.showError(new Error('There is no image on the clipboard.'));
       }
     } catch (error) {
       if (!quiet) {
         this.showError(error);
       }
     }
+    return false;
   }
 
   private chooseImageFile(target?: { page: number; at: Point }): void {
