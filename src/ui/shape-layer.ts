@@ -44,6 +44,8 @@ const boxed = (kind: ShapeKind) => kind === 'rectangle' || kind === 'ellipse';
 /** Shapes of one page, painted as SVG over the page in viewport pixels. */
 export class ShapeLayer {
   readonly svg: SVGSVGElement;
+  /** Gesture preview on its own compositing layer, so dragging never repaints the page. */
+  private live: SVGSVGElement;
   private page: NativePage;
   private layer: HTMLElement;
   private session: TextSession;
@@ -60,7 +62,9 @@ export class ShapeLayer {
     const doc = layer.ownerDocument;
     this.svg = doc.createElementNS(NS, 'svg');
     this.svg.classList.add('pfs-shapes');
-    layer.prepend(this.svg);
+    this.live = doc.createElementNS(NS, 'svg');
+    this.live.classList.add('pfs-shapes', 'pfs-shapes-live');
+    layer.prepend(this.svg, this.live);
     const listen = <K extends keyof HTMLElementEventMap>(
       target: EventTarget,
       type: K,
@@ -131,7 +135,7 @@ export class ShapeLayer {
         gesture.to = point;
         gesture.shift = event.shiftKey;
       }
-      this.paint(true);
+      this.paint();
     };
     const up = (event: PointerEvent) => {
       const gesture = this.gesture;
@@ -162,6 +166,7 @@ export class ShapeLayer {
       cleanup();
     }
     this.svg.remove();
+    this.live.remove();
   }
 
   get interacting(): boolean {
@@ -172,7 +177,7 @@ export class ShapeLayer {
     this.page = page;
     this.session = session;
     if (!this.svg.isConnected) {
-      this.layer.prepend(this.svg);
+      this.layer.prepend(this.svg, this.live);
     }
     this.paint();
   }
@@ -344,43 +349,75 @@ export class ShapeLayer {
     this.options.changed();
   }
 
-  /** Repaint when shapes, selection, tool or viewport changed (or always during gestures). */
+  /**
+   * Repaint the resting shapes only when they, the selection, tool or viewport change;
+   * a gesture redraws just its own shape in the live layer.
+   */
   private paint(force = false): void {
     const shapes = (this.session.snapshot.shapes ?? []).filter(
       (shape) => shape.page === this.page.number,
     );
     const { viewport } = this.page;
     const selected = this.options.selected();
+    const gesture = this.gesture;
+    const moving = gesture && gesture.type !== 'draw' ? gesture.id : undefined;
     const signature = JSON.stringify([
       shapes,
       selected,
+      moving,
       this.options.tool(),
       viewport.width,
       viewport.height,
       viewport.rotation,
     ]);
-    if (!force && !this.gesture && signature === this.signature) {
+    const doc = this.svg.ownerDocument;
+    // Setting an attribute, even to its current value, makes Chrome repaint the page.
+    const set = (element: Element, name: string, value: string) => {
+      if (element.getAttribute(name) !== value) {
+        element.setAttribute(name, value);
+      }
+    };
+    for (const svg of [this.svg, this.live]) {
+      set(svg, 'width', String(viewport.width));
+      set(svg, 'height', String(viewport.height));
+    }
+    if (this.live.classList.contains('is-active') !== !!gesture) {
+      this.live.classList.toggle('is-active', !!gesture);
+    }
+    if (force || signature !== this.signature) {
+      this.signature = signature;
+      this.svg.dataset.tool = this.options.tool();
+      const fragment = doc.createDocumentFragment();
+      for (const shape of shapes) {
+        if (shape.id === moving) {
+          continue;
+        }
+        const group = this.draw(shape);
+        group.dataset.shapeId = shape.id;
+        fragment.append(group);
+        if (shape.id === selected) {
+          fragment.append(this.selection(shape));
+        }
+      }
+      this.svg.replaceChildren(fragment);
+    }
+    if (!gesture) {
+      if (this.live.firstChild) {
+        this.live.replaceChildren();
+      }
       return;
     }
-    this.signature = signature;
-    this.svg.setAttribute('width', String(viewport.width));
-    this.svg.setAttribute('height', String(viewport.height));
-    this.svg.dataset.tool = this.options.tool();
-    this.svg.replaceChildren();
-    const gesture = this.gesture;
-    for (const original of shapes) {
-      const shape =
-        gesture && gesture.type !== 'draw' && gesture.id === original.id
-          ? this.transformed(original, gesture)
-          : original;
+    const fragment = doc.createDocumentFragment();
+    const original = moving && shapes.find((shape) => shape.id === moving);
+    if (original) {
+      const shape = this.transformed(original, gesture);
       const group = this.draw(shape);
       group.dataset.shapeId = shape.id;
-      this.svg.append(group);
+      fragment.append(group);
       if (shape.id === selected) {
-        this.svg.append(this.selection(shape));
+        fragment.append(this.selection(shape));
       }
-    }
-    if (gesture?.type === 'draw') {
+    } else if (gesture.type === 'draw') {
       const style = this.options.style();
       const start = this.pdf(gesture.start);
       const end = this.pdf(gesture.end);
@@ -399,8 +436,9 @@ export class ShapeLayer {
       };
       const group = this.draw(preview);
       group.classList.add('is-preview');
-      this.svg.append(group);
+      fragment.append(group);
     }
+    this.live.replaceChildren(fragment);
   }
 
   private element<K extends keyof SVGElementTagNameMap>(

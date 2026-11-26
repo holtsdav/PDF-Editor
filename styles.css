@@ -1567,3 +1567,11 @@ button.pfs-choice.is-round {
   top: 100%;
   cursor: nesw-resize;
 }
+
+/* While drawing or dragging, the preview gets its own compositing layer. */
+.pfs-shapes-live {
+  pointer-events: none;
+}
+.pfs-shapes-live.is-active {
+  will-change: transform;
+}

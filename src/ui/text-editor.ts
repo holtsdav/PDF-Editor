@@ -228,7 +228,7 @@ export class TextEditor extends Component {
   private selectedImage?: string;
   private imageUrls = new Map<string, string>();
   /** Page and PDF point under the pointer, for placing pasted pictures. */
-  private hover?: { div: HTMLElement; at: Point };
+  private hover?: { div: HTMLElement; x: number; y: number };
   private pasteSeen = 0;
   private objectPasteAt = 0;
   private shapeMenu?: HTMLElement;
@@ -3255,11 +3255,9 @@ export class TextEditor extends Component {
 
   /** Right-click menu for shapes, highlights, notes, text boxes, drawings and the page. */
   private bindContextMenu(div: HTMLElement): void {
+    // Only remember the pointer here: measuring the page on every move forces layout.
     this.registerDomEvent(div, 'pointermove', (event) => {
-      const entry = this.layers.get(div);
-      if (entry) {
-        this.hover = { div, at: this.pdfPoint(entry, event.clientX, event.clientY) };
-      }
+      this.hover = { div, x: event.clientX, y: event.clientY };
     });
     this.registerDomEvent(div, 'pointerleave', () => {
       if (this.hover?.div === div) {
@@ -3403,7 +3401,7 @@ export class TextEditor extends Component {
       this.selectedShape = shape.id;
       this.selected = undefined;
       this.selectedStroke = undefined;
-      this.refresh();
+      this.selectedImage = undefined;
       add('Cut', 'scissors', () => this.cutShape(shape.id), { disabled: locked });
       add('Copy', 'copy', () => this.copyShape(shape.id));
       add('Paste', 'clipboard-paste', paste, { disabled: !canPaste });
@@ -3429,7 +3427,10 @@ export class TextEditor extends Component {
     } else if (target.kind === 'image') {
       const { image } = target;
       const locked = !!image.locked;
-      this.selectImage(image.id);
+      this.selectedImage = image.id;
+      this.selectedShape = undefined;
+      this.selected = undefined;
+      this.selectedStroke = undefined;
       add('Cut', 'scissors', () => this.cutImage(image.id), { disabled: locked });
       add('Copy', 'copy', () => this.copyImage(image.id));
       add('Paste picture', 'clipboard-paste', () => this.pasteClipboardImage(), {
@@ -3506,7 +3507,9 @@ export class TextEditor extends Component {
       menu.addSeparator();
       add('Select all on page', 'box-select', () => this.selectPage(entry.page.number));
     }
+    // Show the menu first; painting the selection can follow.
     menu.showAtMouseEvent(event);
+    this.refresh();
   }
 
   private copyObjectsFromMenu(objects: PdfObject[]): void {
@@ -4064,7 +4067,7 @@ export class TextEditor extends Component {
     }
     const centre: Point =
       target?.at ??
-      (hovered ? this.hover!.at : undefined) ??
+      (hovered ? this.pdfPoint(hovered, this.hover!.x, this.hover!.y) : undefined) ??
       (same && copy.page === page
         ? [(copy.box[0] + copy.box[2]) / 2 + 12, (copy.box[1] + copy.box[3]) / 2 - 12]
         : this.visibleCentre(entry));

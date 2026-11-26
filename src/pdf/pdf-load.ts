@@ -341,22 +341,25 @@ function populateCatalog(pdf: PDFDocument): void {
 }
 
 /** Honor classic indexes instead of expanding obsolete object streams left by other editors. */
+/** Let input and painting run between chunks of parsing and writing large PDFs. */
+const OBJECTS_PER_TICK = 400;
+
 export async function loadPdfDocument(bytes: Uint8Array): Promise<PDFDocument> {
   const offset = readFooterOffset(bytes);
   if (offset === undefined) {
-    return PDFDocument.load(bytes, { updateMetadata: false });
+    return PDFDocument.load(bytes, { updateMetadata: false, parseSpeed: OBJECTS_PER_TICK });
   }
   if (!hasClassicIndex(bytes, offset)) {
     if (!hasStreamIndex(bytes, offset)) {
       throw new Error('Invalid PDF cross-reference offset.');
     }
-    return PDFDocument.load(bytes, { updateMetadata: false });
+    return PDFDocument.load(bytes, { updateMetadata: false, parseSpeed: OBJECTS_PER_TICK });
   }
 
   const pdf = await PDFDocument.create({ updateMetadata: false });
   const index = readClassicIndex(bytes, offset, pdf.context);
   if (!index) {
-    return PDFDocument.load(bytes, { updateMetadata: false });
+    return PDFDocument.load(bytes, { updateMetadata: false, parseSpeed: OBJECTS_PER_TICK });
   }
   const encryption = inheritedTrailerValue(index.trailers, 'Encrypt');
   if (encryption !== undefined && encryption !== PDFNull) {
@@ -371,6 +374,7 @@ export async function loadPdfDocument(bytes: Uint8Array): Promise<PDFDocument> {
 export function pdfSaveOptions(pdf: PDFDocument): SaveOptions {
   return {
     updateFieldAppearances: false,
+    objectsPerTick: OBJECTS_PER_TICK,
     ...(classicSerialization.has(pdf) ? { useObjectStreams: false } : {}),
   };
 }

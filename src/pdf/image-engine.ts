@@ -1,6 +1,8 @@
 import {
   PDFArray,
   PDFDict,
+  PDFDocument as PdfDocument,
+  PDFObjectCopier,
   PDFHexString,
   PDFName,
   PDFNumber,
@@ -40,6 +42,32 @@ export interface StoredImage {
 }
 
 const store = new Map<string, StoredImage>();
+/**
+ * Encoded image XObjects per source. Decoding and re-compressing a large PNG on every
+ * autosave is slow, so each picture is embedded once into a scratch PDF and its
+ * finished streams are copied into later saves.
+ */
+const encoded = new Map<string, Promise<{ pdf: PdfDocument; ref: PDFRef }>>();
+function encodedImage(source: string): Promise<{ pdf: PdfDocument; ref: PDFRef }> {
+  let result = encoded.get(source);
+  if (!result) {
+    result = (async () => {
+      const stored = store.get(source)!;
+      const scratch = await PdfDocument.create();
+      const image =
+        stored.mime === 'image/png'
+          ? await scratch.embedPng(stored.bytes)
+          : await scratch.embedJpg(stored.bytes);
+      scratch.addPage([1, 1]).drawImage(image);
+      const pdf = await PdfDocument.load(await scratch.save());
+      const xobject = pdf.getPages()[0]!.node.Resources()!.lookup(PDFName.of('XObject'), PDFDict);
+      return { pdf, ref: xobject.get(xobject.keys()[0]!) as PDFRef };
+    })();
+    result.catch(() => encoded.delete(source));
+    encoded.set(source, result);
+  }
+  return result;
+}
 
 export function imageMime(bytes: Uint8Array): ImageMime | undefined {
   if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
@@ -268,12 +296,12 @@ export async function writeImages(
     const stored = store.get(image.source)!;
     let refs = embedded.get(image.source);
     if (!refs) {
-      const picture =
-        stored.mime === 'image/png'
-          ? await pdf.embedPng(stored.bytes)
-          : await pdf.embedJpg(stored.bytes);
+      const cached = await encodedImage(image.source);
+      const copy = PDFObjectCopier.for(cached.pdf.context, context).copy(
+        cached.pdf.context.lookup(cached.ref)!,
+      );
       refs = {
-        image: picture.ref,
+        image: context.register(copy),
         ...(stored.mime === 'image/png'
           ? { data: context.register(context.stream(stored.bytes, { Subtype: 'PFSImage' })) }
           : {}),
