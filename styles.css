@@ -1198,9 +1198,15 @@ button.pfs-choice.is-round {
   inset: 0;
   pointer-events: none;
 }
+.pfs-highlights {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  /* Like a highlighter pen: the colour darkens the paper, printed text stays black. */
+  mix-blend-mode: multiply;
+}
 .pfs-mark-quad {
   position: absolute;
-  mix-blend-mode: multiply;
   pointer-events: none;
 }
 .pfs-mark-badge,
