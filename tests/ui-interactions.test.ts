@@ -2952,6 +2952,47 @@ test('pasted pictures are placed, moved, resized, turned, locked and saved', asy
   }
 });
 
+test('the right-click menu deletes several selected drawings', async () => {
+  const f = await fixture();
+  try {
+    for (const x of [230, 330]) {
+      f.session.addStroke(
+        1,
+        'scribble',
+        [
+          [x, 580],
+          [x + 30, 620],
+          [x + 60, 580],
+        ],
+        2,
+      );
+    }
+    f.editor.refresh();
+    const page = f.doc.querySelector('#page')!;
+    f.pointer(page, 'pointerdown', 210, 160);
+    f.pointer(page, 'pointermove', 410, 240);
+    f.pointer(page, 'pointerup', 410, 240);
+    page.dispatchEvent(
+      new f.doc.defaultView!.MouseEvent('contextmenu', {
+        bubbles: true,
+        cancelable: true,
+        clientX: 260,
+        clientY: 180,
+      }),
+    );
+    const items = (globalThis as { lastMenu?: { items: { title: string; click(): void }[] } })
+      .lastMenu!.items;
+    const remove = items.find((item) => item.title === 'Delete 2 objects');
+    assert.ok(remove, items.map((item) => item.title).join(', '));
+    // Clicking the menu item is a pointerdown outside the editor, which clears the selection.
+    f.pointer(f.doc.body, 'pointerdown', 5, 5);
+    remove.click();
+    assert.equal(f.session.snapshot.strokes.length, 0);
+  } finally {
+    f.dispose();
+  }
+});
+
 test('the group menu aligns and distributes objects and puts Delete last, as a warning', async () => {
   const f = await fixture();
   try {

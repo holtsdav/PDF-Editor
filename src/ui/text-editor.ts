@@ -3675,9 +3675,17 @@ export class TextEditor extends Component {
         add('Properties…', 'sliders-horizontal', () => this.openProperties());
       }
       next('clipboard');
+      // Clicking a menu item is a pointerdown outside the editor, which clears
+      // the selection first, so these actions use the objects the menu opened on.
+      const remove = () => {
+        this.selection?.clear();
+        session.deleteObjects(objects);
+        this.selectedStroke = undefined;
+        this.selected = undefined;
+      };
       add('Cut', 'scissors', () => {
         this.copyObjectsFromMenu(objects);
-        this.removeSelection();
+        remove();
       });
       add('Copy', 'copy', () => this.copyObjectsFromMenu(objects));
       add('Paste', 'clipboard-paste', paste, { disabled: !canPaste });
@@ -3714,12 +3722,9 @@ export class TextEditor extends Component {
         add('Clear selection', 'x', () => this.selection?.clear());
       }
       next('danger');
-      add(
-        objects.length > 1 ? `Delete ${objects.length} objects` : 'Delete',
-        'trash-2',
-        () => this.removeSelection(),
-        { warning: true },
-      );
+      add(objects.length > 1 ? `Delete ${objects.length} objects` : 'Delete', 'trash-2', remove, {
+        warning: true,
+      });
     } else {
       next('clipboard');
       add('Paste', 'clipboard-paste', paste, { disabled: !canPaste });
