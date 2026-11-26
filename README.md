@@ -48,6 +48,8 @@ Select printed text to copy it. Zoom with the viewer controls or **Cmd/Ctrl + wh
 
 Requires **Obsidian 1.13.7+**, desktop only. Windows support is unverified.
 
+Saves are incremental: the original file bytes stay untouched and only changed objects are appended. After many editing sessions the file is rewritten once to stay compact.
+
 **Beta:** Keep backups, edit each PDF in only one app or device at a time, and wait for **Saved** and sync before switching. Existing printed text cannot be rewritten. Encrypted PDFs, XFA forms and documents containing signature fields are not supported for editing.
 
 [MIT license](LICENSE) · [Third-party credits and licenses](THIRD_PARTY_NOTICES.txt)
