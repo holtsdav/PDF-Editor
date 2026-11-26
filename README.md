@@ -12,11 +12,15 @@ Use **Detect answer lines** to find places to type on worksheets. Longer answers
 
 Checkboxes, radio buttons, dropdowns and list boxes in PDF forms can be filled in directly.
 
+Text boxes support bulleted and numbered lists with indentation: use the list buttons in the toolbar, **Ctrl/Cmd + Shift + 8** or **7**, and **Tab** / **Shift + Tab**.
+
 ### Draw and highlight
 
 <img src="assets/demos/ink-and-shapes.gif" alt="Draw, highlight and hold for shapes" width="480">
 
 Draw with the pen or highlighter, then select a mark to move or resize it. Hold **Shift** while dragging a corner to keep its proportions. Press **Escape** to cancel a drag.
+
+Select printed text and press the highlight button in the toolbar (or the bar next to the selection) to highlight it, optionally with a comment; pressing it again on highlighted text removes that part. Add comment notes anywhere with the note tool. Highlights and notes are saved as standard PDF annotations, so other PDF readers show them, and highlights or notes made in other apps can be edited too. The highlighter ribbon button or **Show highlights and comments of the PDF** opens a sidebar listing them by page, and **Export highlights and comments of the current PDF to a note** writes them with page links to a note.
 
 Enable **Snap to text** in the highlighter options to follow printed text. When text is unavailable, highlighting falls back to freehand. Optional drawing assistance smooths strokes and snaps held lines and shapes.
 
