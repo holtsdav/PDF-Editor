@@ -20,6 +20,7 @@ import { RecoveryPreview } from './recovery-preview';
 import { ToolPopover } from './tool-popover';
 import { ruledAnswerBlock } from '../pdf/ruled-text';
 import { labelOverlay } from './overlay-label';
+import { setAttr, setProp, setStyle, setText } from './dom';
 import type { ChoiceField, ChoiceWidget } from '../pdf/choice-engine';
 import { isTextMark, lineQuads, textLine } from '../pdf/mark-engine';
 import type { MarkKind, TextMarkKind } from '../pdf/mark-engine';
@@ -226,6 +227,7 @@ export class TextEditor extends Component {
   };
   private selectedShape?: string;
   private selectedImage?: string;
+  private measure?: HTMLTextAreaElement;
   private imageUrls = new Map<string, string>();
   /** Page and PDF point under the pointer, for placing pasted pictures. */
   private hover?: { div: HTMLElement; x: number; y: number };
@@ -2224,59 +2226,68 @@ export class TextEditor extends Component {
     this.syncObjectScope();
     const session = this.session;
     const blocked = session?.status === 'conflict' || !!session?.replacing;
-    this.listGroup.hidden = blocked || !this.listTargetNow();
+    setProp(this.listGroup, 'hidden', blocked || !this.listTargetNow());
     this.updateHighlightButton();
     const selected = session?.snapshot.fields.find((field) => field.name === this.selected);
     const brush = this.tool === 'marker' || this.tool === 'scribble';
-    this.propertiesButton.disabled =
-      !session || blocked || (!brush && this.tool !== 'text' && !selected) || !!selected?.readOnly;
+    setProp(
+      this.propertiesButton,
+      'disabled',
+      !session || blocked || (!brush && this.tool !== 'text' && !selected) || !!selected?.readOnly,
+    );
     const color = brush
       ? this.tool === 'marker'
         ? this.markerColor
         : this.penColor
       : (selected?.color ?? this.textColor);
-    this.propertiesButton.style.setProperty('--pdf-tool-color', cssColor(color));
-    this.propertiesButton.setAttribute('aria-haspopup', 'dialog');
+    setStyle(this.propertiesButton, '--pdf-tool-color', cssColor(color));
+    setAttr(this.propertiesButton, 'aria-haspopup', 'dialog');
     const width = brush
       ? this.tool === 'marker'
         ? this.markerWidth
         : this.penWidth
       : (selected?.fontSize ?? this.fontSize);
-    this.propertiesButton.setAttribute('aria-label', brush ? 'Brush settings' : 'Text settings');
-    this.propertiesButton.querySelector('.pfs-tool-value')!.textContent =
-      `${Number(width.toFixed(1))} pt`;
+    setAttr(this.propertiesButton, 'aria-label', brush ? 'Brush settings' : 'Text settings');
+    setText(
+      this.propertiesButton.querySelector('.pfs-tool-value')!,
+      `${Number(width.toFixed(1))} pt`,
+    );
     for (const [tool, button] of this.tools) {
       if (tool === 'marker' || tool === 'scribble') {
-        button.style.setProperty(
+        setStyle(
+          button,
           '--pdf-tool-color',
           cssColor(tool === 'marker' ? this.markerColor : this.penColor),
         );
       }
-      button.setAttribute('aria-pressed', String(this.tool === tool));
-      button.disabled = !session || blocked;
+      setAttr(button, 'aria-pressed', String(this.tool === tool));
+      setProp(button, 'disabled', !session || blocked);
     }
-    this.editControls.hidden = false;
+    setProp(this.editControls, 'hidden', false);
     this.native.element.classList.toggle('pdf-form-studio-editing', !!session);
-    this.native.element.dataset.pdfTool = this.tool;
-    this.saveButton.disabled = !session?.dirty || blocked;
+    setAttr(this.native.element, 'data-pdf-tool', this.tool);
+    setProp(this.saveButton, 'disabled', !session?.dirty || blocked);
     const stroke = session?.snapshot.strokes.find((stroke) => stroke.id === this.selectedStroke);
-    this.removeButton.disabled =
-      (!this.selection?.objects.length && !selected?.owned && !stroke) ||
-      !!selected?.readOnly ||
-      !!stroke?.readOnly ||
-      blocked;
-    this.removeButton.hidden = false;
-    setTooltip(
+    setProp(
       this.removeButton,
-      this.selection?.objects.length
-        ? 'Remove selection'
-        : stroke
-          ? 'Remove mark'
-          : 'Remove text box',
-      { classes: ['pfs-overlay-tooltip'] },
+      'disabled',
+      (!this.selection?.objects.length && !selected?.owned && !stroke) ||
+        !!selected?.readOnly ||
+        !!stroke?.readOnly ||
+        blocked,
     );
-    this.undoButton.disabled = !session?.canUndoStroke || blocked;
-    this.redoButton.disabled = !session?.canRedoStroke || blocked;
+    setProp(this.removeButton, 'hidden', false);
+    const removeLabel = this.selection?.objects.length
+      ? 'Remove selection'
+      : stroke
+        ? 'Remove mark'
+        : 'Remove text box';
+    if (this.removeButton.dataset.label !== removeLabel) {
+      this.removeButton.dataset.label = removeLabel;
+      setTooltip(this.removeButton, removeLabel, { classes: ['pfs-overlay-tooltip'] });
+    }
+    setProp(this.undoButton, 'disabled', !session?.canUndoStroke || blocked);
+    setProp(this.redoButton, 'disabled', !session?.canRedoStroke || blocked);
     const status = session
       ? {
           saved: 'Saved to PDF',
@@ -2286,33 +2297,38 @@ export class TextEditor extends Component {
           conflict: 'File changed',
         }[session.status]
       : 'Loading…';
-    this.status.replaceChildren();
-    setIcon(
-      this.status,
-      session?.status === 'saved'
-        ? 'check'
-        : session?.status === 'error' || blocked
-          ? 'triangle-alert'
-          : 'loader-circle',
-    );
-    this.status.removeAttribute('aria-label');
-    this.status.dataset.state = session?.status;
-    const accessible = this.status.ownerDocument.createElement('span');
-    accessible.className = 'pdf-form-studio-sr-only';
-    accessible.textContent = status;
-    this.status.append(accessible);
-    {
-      accessible.className = 'pfs-save-label';
-      accessible.textContent =
+    // Rebuild the status only when it changes (it is updated on every refresh).
+    const statusKey = `${session?.status}|${blocked}|${status}`;
+    if (this.status.dataset.key !== statusKey || !this.status.childElementCount) {
+      this.status.dataset.key = statusKey;
+      this.status.replaceChildren();
+      setIcon(
+        this.status,
         session?.status === 'saved'
-          ? 'Saved'
-          : session?.status === 'saving'
-            ? 'Saving…'
-            : session?.status === 'unsaved'
-              ? 'Unsaved'
-              : status;
+          ? 'check'
+          : session?.status === 'error' || blocked
+            ? 'triangle-alert'
+            : 'loader-circle',
+      );
+      this.status.removeAttribute('aria-label');
+      this.status.dataset.state = session?.status;
+      const accessible = this.status.ownerDocument.createElement('span');
+      accessible.className = 'pdf-form-studio-sr-only';
+      accessible.textContent = status;
+      this.status.append(accessible);
+      {
+        accessible.className = 'pfs-save-label';
+        accessible.textContent =
+          session?.status === 'saved'
+            ? 'Saved'
+            : session?.status === 'saving'
+              ? 'Saving…'
+              : session?.status === 'unsaved'
+                ? 'Unsaved'
+                : status;
+      }
     }
-    this.message.textContent = session?.error || this.loadError;
+    setText(this.message, session?.error || this.loadError);
     this.message.classList.toggle(
       'is-error',
       !!this.loadError || session?.status === 'error' || blocked,
@@ -2609,7 +2625,7 @@ export class TextEditor extends Component {
         entry.images = this.imageLayer(page, layer);
       }
       entry.page = page;
-      entry.layer.dataset.tool = this.tool;
+      setAttr(entry.layer, 'data-tool', this.tool);
       entry.ink.update(page);
       const fieldWidgets = this.session.snapshot.fields
         .filter((field) => !field.readOnly)
@@ -2644,15 +2660,18 @@ export class TextEditor extends Component {
         if (!this.composing.has(control.input) && control.input.value !== field.value) {
           control.input.value = field.value;
         }
-        control.input.disabled = field.readOnly;
-        control.input.readOnly =
+        setProp(control.input, 'disabled', field.readOnly);
+        setProp(
+          control.input,
+          'readOnly',
           this.session.status === 'conflict' ||
-          this.session.replacing ||
-          this.editing !== field.name;
+            this.session.replacing ||
+            this.editing !== field.name,
+        );
         const drawing =
           this.tool === 'marker' || this.tool === 'scribble' || this.tool === 'eraser';
-        control.input.tabIndex = !drawing && this.editing === field.name ? 0 : -1;
-        control.frame.tabIndex = drawing ? -1 : 0;
+        setProp(control.input, 'tabIndex', !drawing && this.editing === field.name ? 0 : -1);
+        setProp(control.frame, 'tabIndex', drawing ? -1 : 0);
         control.frame.classList.toggle(
           'is-answer-field',
           this.answerFields.has(field.name) || !!field.ruled,
@@ -2865,7 +2884,7 @@ export class TextEditor extends Component {
     }
     const ready = this.hasTextSelection();
     if (!ready) {
-      this.highlightButton.setAttribute('aria-pressed', 'false');
+      setAttr(this.highlightButton, 'aria-pressed', 'false');
     }
     if (
       this.highlightButton.disabled === !ready &&
@@ -3083,7 +3102,7 @@ export class TextEditor extends Component {
     const highlighted = [...quads].some(
       ([entry, rects]) => this.session!.highlightsAt(entry.page.number, rects).length,
     );
-    this.highlightButton.setAttribute('aria-pressed', String(highlighted));
+    setAttr(this.highlightButton, 'aria-pressed', String(highlighted));
     setTooltip(
       this.highlightButton,
       highlighted ? 'Remove highlight from selected text' : 'Highlight selected text',
@@ -4888,6 +4907,33 @@ export class TextEditor extends Component {
   }
 
   /** Measure editor wrapping with PDF glyph advances, previewing spacing without committing geometry. */
+  private measureArea(doc: Document): HTMLTextAreaElement {
+    if (this.measure?.ownerDocument === doc && this.measure.isConnected) {
+      return this.measure;
+    }
+    this.measure?.parentElement?.remove();
+    const host = doc.createElement('div');
+    host.setAttribute('aria-hidden', 'true');
+    Object.assign(host.style, {
+      position: 'fixed',
+      left: '-10000px',
+      top: '0',
+      width: '4000px',
+      height: '4000px',
+      overflow: 'hidden',
+      visibility: 'hidden',
+      pointerEvents: 'none',
+      contain: 'strict',
+    });
+    const measure = doc.createElement('textarea');
+    measure.tabIndex = -1;
+    Object.assign(measure.style, { position: 'absolute', left: '0', top: '0' });
+    host.append(measure);
+    doc.body.append(host);
+    this.register(() => host.remove());
+    return (this.measure = measure);
+  }
+
   private growField(entry: PageLayer, control: FieldControl, preview = false): void {
     let field = this.session?.snapshot.fields.find(
       (field) => field.name === control.input.dataset.pdfField,
@@ -4909,15 +4955,12 @@ export class TextEditor extends Component {
     const doc = control.input.ownerDocument;
     const style = doc.defaultView!.getComputedStyle(control.input);
     // Measure a separate textarea so fitting never disturbs the real caret,
-    // scroll position, composition or native text undo history.
-    const measure = doc.createElement('textarea');
+    // scroll position, composition or native text undo history. It is kept in an
+    // isolated (contained) host: adding a fresh element to the document on every
+    // keystroke forced Obsidian to lay out the whole window.
+    const measure = this.measureArea(doc);
     measure.value = control.input.value;
     Object.assign(measure.style, {
-      position: 'fixed',
-      left: '-10000px',
-      top: '0',
-      visibility: 'hidden',
-      pointerEvents: 'none',
       width: style.width,
       height: '0',
       minHeight: '0',
@@ -4938,15 +4981,12 @@ export class TextEditor extends Component {
       overflow: 'hidden',
       margin: '0',
     });
-    measure.tabIndex = -1;
-    measure.setAttribute('aria-hidden', 'true');
-    doc.body.append(measure);
     const height = Math.max(
       measure.scrollHeight + 1,
       (field.fontSize * (field.lineSpacing ?? 1.2) + 2) * entry.page.viewport.scale,
     );
     const widthOverflow = measure.scrollWidth > measure.clientWidth + 1;
-    measure.remove();
+    measure.value = '';
     const viewport = entry.page.viewport;
     const angle = (((viewport.rotation - widget.rotation) % 360) + 360) % 360;
     // scrollHeight is rounded to screen pixels; count whole rows before

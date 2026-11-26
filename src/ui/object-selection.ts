@@ -563,7 +563,9 @@ export class ObjectSelection extends Component {
           group.removeAttribute('transform');
         }
       }
-      entry.overlay.hidden = !rect;
+      if (entry.overlay.hidden !== !rect) {
+        entry.overlay.hidden = !rect;
+      }
       entry.overlay.classList.toggle('is-marquee', !!g && !g.move);
       if (rect) {
         Object.assign(entry.overlay.style, {

@@ -1,3 +1,4 @@
+import { setAttr } from './dom';
 import { Component } from 'obsidian';
 import type { NativePage } from '../compat/native-pdf';
 import { strokeBounds } from '../pdf/ink-engine';
@@ -248,7 +249,7 @@ export class InkLayer extends Component {
         this.controls.delete(id);
       }
     }
-    this.svg.setAttribute('viewBox', `0 0 ${page.viewport.width} ${page.viewport.height}`);
+    setAttr(this.svg, 'viewBox', `0 0 ${page.viewport.width} ${page.viewport.height}`);
     for (const stroke of strokes) {
       let control = this.controls.get(stroke.id);
       if (!control) {
