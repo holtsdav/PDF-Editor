@@ -37,7 +37,7 @@ import { readMarks, stripMarks, verifyMarks, writeMarks } from './mark-engine.ts
 import { fieldIndex } from './field-index.ts';
 import { readShapes, stripShapes, verifyShapes, writeShapes } from './shape-engine.ts';
 import type { PdfShape } from './shape-engine.ts';
-import { incrementalBytes, trackChanges } from './incremental.ts';
+import { hasChanges, incrementalBytes, trackChanges } from './incremental.ts';
 import { readImages, stripImages, verifyImages, writeImages } from './image-engine.ts';
 import type { PdfImage } from './image-engine.ts';
 import type { PdfMark } from './mark-engine.ts';
@@ -967,7 +967,22 @@ export async function writeTextPdf(
 
 /** Display copy only: keep foreign annotations and editable widgets; own ink is painted live. */
 export async function renderTextPdf(seed: Uint8Array): Promise<Uint8Array> {
-  const pdf = await loadWritable(seed);
+  let tracking: ReturnType<typeof trackChanges> | undefined;
+  try {
+    const pdf = await loadWritable(seed, (loaded) => {
+      tracking = trackChanges(loaded, seed);
+    });
+    return await displayCopy(pdf, seed, tracking!.tracker);
+  } finally {
+    tracking?.stop();
+  }
+}
+
+async function displayCopy(
+  pdf: PDFDocument,
+  seed: Uint8Array,
+  tracker: ReturnType<typeof trackChanges>['tracker'],
+): Promise<Uint8Array> {
   // Text widgets are painted by the stable editable layer. Preserve other
   // controls and foreign annotations in the background, including checkboxes.
   const textWidgets = new Set(
@@ -1009,7 +1024,12 @@ export async function renderTextPdf(seed: Uint8Array): Promise<Uint8Array> {
   stripMarks(pdf);
   stripShapes(pdf);
   stripImages(pdf);
-  return pdf.save(pdfSaveOptions(pdf));
+  // Nothing to hide: show the file itself. Otherwise append the stripped page lists
+  // instead of re-serializing every page, image and font of a large PDF.
+  if (!hasChanges(pdf, tracker)) {
+    return seed;
+  }
+  return incrementalBytes(seed, pdf, tracker, true) ?? pdf.save(pdfSaveOptions(pdf));
 }
 function readInkId(dict: PDFDict): string | undefined {
   const value = dict.lookup(PDFName.of('NM'));

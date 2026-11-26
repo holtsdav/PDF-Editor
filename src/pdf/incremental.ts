@@ -18,7 +18,7 @@ import type { PDFDocument, PDFObject } from 'pdf-lib';
 const MAX_REVISIONS = 12;
 const MAX_APPENDED_SHARE = 0.15;
 
-interface Tracker {
+export interface Tracker {
   touched: WeakSet<object>;
   assigned: Set<PDFRef>;
   original: Set<PDFRef>;
@@ -168,24 +168,37 @@ function serialize(object: PDFObject): Uint8Array {
  * Seed plus one appended update, or undefined when the seed cannot take one safely
  * (no readable cross-reference footer, too many earlier revisions, nothing changed).
  */
-export function incrementalBytes(
-  seed: Uint8Array,
-  pdf: PDFDocument,
-  tracker: Tracker,
-): Uint8Array | undefined {
-  const section = lastSection(seed);
-  const history = revisions(seed);
-  if (!section || history.count >= MAX_REVISIONS) {
-    return undefined;
-  }
-  const context = pdf.context;
-  const changed = context
+function changedObjects(pdf: PDFDocument, tracker: Tracker): [PDFRef, PDFObject][] {
+  return pdf.context
     .enumerateIndirectObjects()
     .filter(
       ([ref, object]) =>
         !tracker.original.has(ref) || tracker.assigned.has(ref) || touchedInside(object, tracker),
     )
     .sort(([a], [b]) => a.objectNumber - b.objectNumber);
+}
+
+export function hasChanges(pdf: PDFDocument, tracker: Tracker): boolean {
+  return changedObjects(pdf, tracker).length > 0;
+}
+
+/**
+ * With `display`, size limits are ignored: a display copy is never saved, so it may
+ * always append to the original file.
+ */
+export function incrementalBytes(
+  seed: Uint8Array,
+  pdf: PDFDocument,
+  tracker: Tracker,
+  display = false,
+): Uint8Array | undefined {
+  const section = lastSection(seed);
+  const history = revisions(seed);
+  if (!section || (!display && history.count >= MAX_REVISIONS)) {
+    return undefined;
+  }
+  const context = pdf.context;
+  const changed = changedObjects(pdf, tracker);
   const { Root, Info, ID, Encrypt } = context.trailerInfo;
   if (!changed.length || Encrypt || !(Root instanceof PDFRef)) {
     return undefined;
@@ -285,7 +298,7 @@ export function incrementalBytes(
     push(encoder.encode(`\nendobj\nstartxref\n${xrefAt}\n%%EOF\n`));
   }
   // Many small sessions on a small file would otherwise keep superseded fonts around.
-  if (size - history.firstEnd > history.firstEnd * MAX_APPENDED_SHARE) {
+  if (!display && size - history.firstEnd > history.firstEnd * MAX_APPENDED_SHARE) {
     return undefined;
   }
   const output = new Uint8Array(size);
