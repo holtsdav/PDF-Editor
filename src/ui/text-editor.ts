@@ -21,7 +21,8 @@ import { ToolPopover } from './tool-popover';
 import { ruledAnswerBlock } from '../pdf/ruled-text';
 import { labelOverlay } from './overlay-label';
 import type { ChoiceField, ChoiceWidget } from '../pdf/choice-engine';
-import { lineQuads } from '../pdf/mark-engine';
+import { isTextMark, lineQuads, textLine } from '../pdf/mark-engine';
+import type { MarkKind, TextMarkKind } from '../pdf/mark-engine';
 import { continueList, indent, toggleList } from '../pdf/list-format';
 import type { TextEdit } from '../pdf/list-format';
 import { ShapeLayer, shapeExtent } from './shape-layer';
@@ -56,6 +57,15 @@ const MARK_COLORS: { name: string; color: PdfColor }[] = [
   { name: 'Blue', color: [0.45, 0.75, 1] },
   { name: 'Pink', color: [1, 0.55, 0.75] },
 ];
+/** Colours for underline and strikeout lines (pale highlight colours would vanish). */
+const LINE_COLORS: { name: string; color: PdfColor }[] = [
+  { name: 'Red', color: [0.85, 0.15, 0.15] },
+  { name: 'Blue', color: [0.15, 0.4, 0.85] },
+  { name: 'Green', color: [0.15, 0.6, 0.25] },
+  { name: 'Black', color: [0.1, 0.1, 0.1] },
+];
+const colorsFor = (kind: MarkKind) =>
+  kind === 'underline' || kind === 'strikeout' ? LINE_COLORS : MARK_COLORS;
 const MARK_UI = '.pfs-mark-ui';
 type Point = [number, number];
 type HighlightMode = 'toggle' | 'color' | 'comment';
@@ -197,6 +207,7 @@ export class TextEditor extends Component {
   private answerFields = new Set<string>();
   private releaseEditing?: () => void;
   private markColor: PdfColor = MARK_COLORS[0]!.color;
+  private lineColor: PdfColor = LINE_COLORS[0]!.color;
   private selectionBar?: { element: HTMLElement; quads: Map<PageLayer, Rect[]> };
   private markPopover?: {
     id: string;
@@ -364,9 +375,24 @@ export class TextEditor extends Component {
     const colorButton = button(highlightGroup, 'Highlight colour', 'chevron-down', () =>
       this.toggleHighlightColors(colorButton),
     );
+    const underlineButton = button(highlightGroup, 'Underline selected text', 'underline', () =>
+      this.lineSelection('underline'),
+    );
+    const strikeButton = button(
+      highlightGroup,
+      'Strike through selected text',
+      'strikethrough',
+      () => this.lineSelection('strikeout'),
+    );
     this.register(() => this.closeHighlightColors());
     colorButton.classList.add('pfs-highlight-color-button');
-    for (const element of [this.highlightButton, this.highlightCommentButton, colorButton]) {
+    for (const element of [
+      this.highlightButton,
+      this.highlightCommentButton,
+      colorButton,
+      underlineButton,
+      strikeButton,
+    ]) {
       // Keep the PDF text selection while pressing toolbar buttons.
       element.addEventListener('pointerdown', (event) => {
         event.preventDefault();
@@ -2865,6 +2891,39 @@ export class TextEditor extends Component {
     }
   }
 
+  /** Underline or strike through the selected text; again on marked text removes it. */
+  private lineSelection(kind: 'underline' | 'strikeout'): void {
+    const pressed =
+      this.pressedSelection && Date.now() - this.pressedSelection.time < 30000
+        ? this.pressedSelection.found
+        : undefined;
+    const found = this.selectionQuads() ?? pressed;
+    this.pressedSelection = undefined;
+    if (found) {
+      this.createTextMarks(found.quads, kind);
+    }
+  }
+
+  private createTextMarks(quads: Map<PageLayer, Rect[]>, kind: TextMarkKind): void {
+    const session = this.session!;
+    try {
+      for (const [entry, rects] of quads) {
+        if (session.highlightsAt(entry.page.number, rects, kind).length) {
+          session.eraseHighlights(entry.page.number, rects, kind);
+          continue;
+        }
+        session.addMark({ page: entry.page.number, kind, quads: rects, color: this.lineColor });
+      }
+    } catch (error) {
+      this.showError(error);
+    }
+    this.native.element.ownerDocument.getSelection()?.removeAllRanges();
+    this.hideSelectionBar();
+    this.updateHighlightButton();
+    this.refresh();
+    this.scheduleSave();
+  }
+
   private highlightSelection(mode: HighlightMode): void {
     const pressed =
       this.pressedSelection && Date.now() - this.pressedSelection.time < 30000
@@ -3057,6 +3116,18 @@ export class TextEditor extends Component {
     setTooltip(comment, 'Highlight and comment');
     comment.addEventListener('click', () => this.createHighlights(quads, 'comment'));
     bar.append(comment);
+    for (const [kind, icon, label] of [
+      ['underline', 'underline', 'Underline'],
+      ['strikeout', 'strikethrough', 'Strike through'],
+    ] as const) {
+      const line = doc.createElement('button');
+      line.type = 'button';
+      line.className = `clickable-icon pfs-mark-${kind}-button`;
+      setIcon(line, icon);
+      setTooltip(line, label);
+      line.addEventListener('click', () => this.createTextMarks(quads, kind));
+      bar.append(line);
+    }
     // Already highlighted text: offer removing just the selected part.
     if (
       [...quads].some(
@@ -3079,7 +3150,7 @@ export class TextEditor extends Component {
       });
     }
     const width = last.entry.page.viewport.width;
-    bar.style.left = `${Math.max(0, Math.min(last.x, width - 190))}px`;
+    bar.style.left = `${Math.max(0, Math.min(last.x, width - 250))}px`;
     bar.style.top = `${last.y + 6}px`;
     last.entry.layer.append(bar);
     this.selectionBar = { element: bar, quads };
@@ -3173,7 +3244,7 @@ export class TextEditor extends Component {
       const mark = this.session?.snapshot.marks?.find(
         (item) =>
           item.page === entry.page.number &&
-          item.kind === 'highlight' &&
+          isTextMark(item.kind) &&
           item.quads.some((q) => x >= q[0] && x <= q[2] && y >= q[1] && y <= q[3]),
       );
       if (mark) {
@@ -3285,7 +3356,7 @@ export class TextEditor extends Component {
       .find(
         (item) =>
           item.page === page &&
-          item.kind === 'highlight' &&
+          isTextMark(item.kind) &&
           item.quads.some((q) => x >= q[0] && x <= q[2] && y >= q[1] && y <= q[3]),
       );
     return highlight ? { kind: 'mark', mark: highlight } : { kind: 'page' };
@@ -3383,15 +3454,19 @@ export class TextEditor extends Component {
         this.openMarkPopover(entry, mark.id, false),
       );
       menu.addSeparator();
-      for (const { name, color } of MARK_COLORS) {
+      for (const { name, color } of colorsFor(mark.kind)) {
         add(name, 'palette', () => session.updateMark(mark.id, { color }), {
           checked: color.every((value, index) => Math.abs(value - mark.color[index]!) < 0.01),
         });
       }
       menu.addSeparator();
-      add(mark.kind === 'note' ? 'Delete note' : 'Delete highlight', 'trash-2', () =>
-        session.deleteMark(mark.id),
-      );
+      const labels: Record<MarkKind, string> = {
+        note: 'Delete note',
+        highlight: 'Delete highlight',
+        underline: 'Delete underline',
+        strikeout: 'Delete strikethrough',
+      };
+      add(labels[mark.kind], 'trash-2', () => session.deleteMark(mark.id));
     } else if (target.kind === 'objects') {
       const { objects } = target;
       add('Cut', 'scissors', () => {
@@ -4285,14 +4360,20 @@ export class TextEditor extends Component {
       }
       element.className = 'pfs-mark-highlight';
       for (const quad of mark.quads) {
-        const [left, top, right, bottom] = screenRectangle(viewport, quad);
+        let area = quad;
+        if (mark.kind === 'underline' || mark.kind === 'strikeout') {
+          // A thin band where the saved appearance draws its line.
+          const { y, width } = textLine(mark.kind, quad);
+          area = [quad[0], y - width / 2, quad[2], y + width / 2];
+        }
+        const [left, top, right, bottom] = screenRectangle(viewport, area);
         const band = doc.createElement('div');
         band.className = 'pfs-mark-quad';
         Object.assign(band.style, {
           left: `${left}px`,
           top: `${top}px`,
           width: `${right - left}px`,
-          height: `${bottom - top}px`,
+          height: `${Math.max(1, bottom - top)}px`,
           backgroundColor: color,
           // Same strength as the saved annotation (multiplied, so dark text stays dark).
           opacity: String(mark.opacity),
@@ -4367,7 +4448,7 @@ export class TextEditor extends Component {
     });
     const row = doc.createElement('div');
     row.className = 'pfs-mark-row';
-    for (const { name, color } of MARK_COLORS) {
+    for (const { name, color } of colorsFor(mark.kind)) {
       const swatch = doc.createElement('button');
       swatch.type = 'button';
       swatch.className = 'pfs-mark-swatch';
@@ -4378,6 +4459,8 @@ export class TextEditor extends Component {
           this.session!.updateMark(id, { color });
           if (mark.kind === 'highlight') {
             this.markColor = color;
+          } else if (mark.kind !== 'note') {
+            this.lineColor = color;
           }
           this.scheduleSave();
         } catch (error) {

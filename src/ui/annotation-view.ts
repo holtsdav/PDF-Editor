@@ -82,7 +82,7 @@ export async function collectMarks(
     marks.map(async (mark) => ({
       mark,
       text:
-        mark.kind === 'highlight'
+        mark.kind !== 'note'
           ? textInQuads(await pageText(app, file, mark.page).catch(() => []), mark.quads)
           : '',
     })),
@@ -258,7 +258,13 @@ export class AnnotationView extends ItemView {
       }
       const item = root.createEl('button', { cls: 'pfs-annotation' });
       item.style.setProperty('--pfs-mark-color', cssColor(mark.color));
-      if (mark.kind === 'highlight') {
+      if (mark.kind !== 'note') {
+        if (mark.kind !== 'highlight') {
+          item.createDiv({
+            cls: 'pfs-annotation-kind',
+            text: mark.kind === 'underline' ? 'Underline' : 'Strikethrough',
+          });
+        }
         item.createDiv({ cls: 'pfs-annotation-text', text: text || '(highlighted area)' });
       } else {
         item.createDiv({ cls: 'pfs-annotation-kind', text: 'Note' });

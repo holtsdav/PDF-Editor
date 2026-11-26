@@ -31,6 +31,7 @@ import { loadPdfDocument } from './pdf-load.ts';
 import type { ChoiceField } from './choice-engine.ts';
 import {
   MARK_PREFIX,
+  isTextMark,
   NOTE_SIZE,
   pdfDate,
   quadsOverlap,
@@ -38,7 +39,7 @@ import {
   unionRect,
   validateMark,
 } from './mark-engine.ts';
-import type { MarkKind, PdfMark } from './mark-engine.ts';
+import type { MarkKind, PdfMark, TextMarkKind } from './mark-engine.ts';
 import { SHAPE_PREFIX, shapeRect, validateShape } from './shape-engine.ts';
 import type { PdfShape, Point as ShapePoint, ShapeKind } from './shape-engine.ts';
 import { IMAGE_PREFIX, storeImage, validateImage } from './image-engine.ts';
@@ -350,7 +351,7 @@ export class TextSession {
     }
     let rect: Rect;
     let quads: Rect[] = [];
-    if (input.kind === 'highlight') {
+    if (isTextMark(input.kind)) {
       quads = (input.quads ?? []).map(
         (quad) =>
           [
@@ -636,9 +637,9 @@ export class TextSession {
   }
 
   /** Highlights on this page that the selection touches. */
-  highlightsAt(page: number, cuts: Rect[]): PdfMark[] {
+  highlightsAt(page: number, cuts: Rect[], kind: TextMarkKind = 'highlight'): PdfMark[] {
     return (this.snapshot.marks ?? []).filter(
-      (mark) => mark.page === page && mark.kind === 'highlight' && quadsOverlap(mark.quads, cuts),
+      (mark) => mark.page === page && mark.kind === kind && quadsOverlap(mark.quads, cuts),
     );
   }
 
@@ -646,9 +647,9 @@ export class TextSession {
    * Remove the selected parts of highlights on a page as one undo step. Marks left
    * without any highlighted text are deleted; the rest keep their colour and comment.
    */
-  eraseHighlights(page: number, cuts: Rect[]): number {
+  eraseHighlights(page: number, cuts: Rect[], kind: TextMarkKind = 'highlight'): number {
     this.assertEditable();
-    const touched = this.highlightsAt(page, cuts);
+    const touched = this.highlightsAt(page, cuts, kind);
     if (!touched.length) {
       return 0;
     }

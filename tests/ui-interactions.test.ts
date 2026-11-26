@@ -2468,6 +2468,28 @@ test('the toolbar highlight button highlights selected PDF text in the chosen co
     );
     assert.ok(f.doc.querySelector('.pfs-mark-popover textarea'));
     assert.equal(f.session.snapshot.marks!.length, 1);
+    // Underline and strikethrough buttons add red lines; pressing again removes them.
+    f.doc.querySelector<HTMLButtonElement>('.pfs-mark-done')?.click();
+    for (const label of ['Underline selected text', 'Strike through selected text']) {
+      select();
+      await ready();
+      press(f.doc.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!);
+    }
+    assert.deepEqual(
+      f.session.snapshot.marks!.map((mark) => [mark.kind, mark.color]),
+      [
+        ['highlight', [0.45, 0.75, 1]],
+        ['underline', [0.85, 0.15, 0.15]],
+        ['strikeout', [0.85, 0.15, 0.15]],
+      ],
+    );
+    select();
+    await ready();
+    press(f.doc.querySelector<HTMLButtonElement>('button[aria-label="Underline selected text"]')!);
+    assert.deepEqual(
+      f.session.snapshot.marks!.map((mark) => mark.kind),
+      ['highlight', 'strikeout'],
+    );
   } finally {
     f.dispose();
   }

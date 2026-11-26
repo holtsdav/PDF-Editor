@@ -127,9 +127,15 @@ export function marksMarkdown(pdfPath: string, entries: ExportedMark[]): string 
     }
     const link = `[[${pdfPath}#page=${page}|p. ${page}]]`;
     const author = mark.foreign && mark.author ? ` — ${inline(mark.author)}` : '';
-    if (mark.kind === 'highlight') {
+    if (mark.kind !== 'note') {
       const quote = inline(text) || '(highlighted area)';
-      lines.push(`- ==${quote}== ${link} #highlight/${colourName(mark.color)}${author}`);
+      lines.push(
+        mark.kind === 'highlight'
+          ? `- ==${quote}== ${link} #highlight/${colourName(mark.color)}${author}`
+          : mark.kind === 'underline'
+            ? `- <u>${quote}</u> ${link} #underline${author}`
+            : `- ~~${quote}~~ ${link} #strikethrough${author}`,
+      );
       if (mark.comment.trim()) {
         for (const [index, line] of mark.comment.trim().split('\n').entries()) {
           lines.push(`\t- ${index ? '' : '**Comment:** '}${line.trim()}`);

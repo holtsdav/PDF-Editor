@@ -14,7 +14,15 @@ export const MARK_AUTHOR = 'PDF Editor';
 /** IDs for other apps' annotations, derived from their PDF object reference. */
 export const FOREIGN_PREFIX = 'pdf-foreign-mark-';
 export const NOTE_SIZE = 20;
-export type MarkKind = 'highlight' | 'note';
+export type MarkKind = 'highlight' | 'underline' | 'strikeout' | 'note';
+/** Marks on selected text, stored with QuadPoints (/Highlight, /Underline, /StrikeOut). */
+export type TextMarkKind = Exclude<MarkKind, 'note'>;
+export const isTextMark = (kind: MarkKind): kind is TextMarkKind => kind !== 'note';
+const SUBTYPE: Record<TextMarkKind, string> = {
+  highlight: 'Highlight',
+  underline: 'Underline',
+  strikeout: 'StrikeOut',
+};
 export interface PdfMark {
   id: string;
   page: number;
@@ -84,8 +92,8 @@ export function validateMark(mark: PdfMark, bounds: Rect): void {
     rect[3] <= bounds[3] + 0.01;
   if (
     (!mark.id.startsWith(MARK_PREFIX) && !mark.id.startsWith(FOREIGN_PREFIX)) ||
-    (mark.kind !== 'highlight' && mark.kind !== 'note') ||
-    (mark.kind === 'highlight' && (!mark.quads.length || mark.quads.length > 2000)) ||
+    !['highlight', 'underline', 'strikeout', 'note'].includes(mark.kind) ||
+    (isTextMark(mark.kind) && (!mark.quads.length || mark.quads.length > 2000)) ||
     (mark.kind === 'note' && mark.quads.length) ||
     !mark.quads.every(inside) ||
     !inside(mark.rect) ||
@@ -126,8 +134,10 @@ function ownKind(dict: PDFDict): MarkKind | undefined {
   if (!id?.startsWith(MARK_PREFIX)) {
     return undefined;
   }
-  if (subtype === '/Highlight' && tag === '/Highlight') {
-    return 'highlight';
+  for (const kind of ['highlight', 'underline', 'strikeout'] as const) {
+    if (subtype === `/${SUBTYPE[kind]}` && tag === `/${SUBTYPE[kind]}`) {
+      return kind;
+    }
   }
   if (subtype === '/Text' && tag === '/Note') {
     return 'note';
@@ -152,7 +162,15 @@ function foreignKind(dict: PDFDict): MarkKind | undefined {
     return undefined;
   }
   const subtype = dict.get(PDFName.of('Subtype'))?.toString();
-  return subtype === '/Highlight' ? 'highlight' : subtype === '/Text' ? 'note' : undefined;
+  return subtype === '/Highlight'
+    ? 'highlight'
+    : subtype === '/Underline'
+      ? 'underline'
+      : subtype === '/StrikeOut'
+        ? 'strikeout'
+        : subtype === '/Text'
+          ? 'note'
+          : undefined;
 }
 
 function foreignId(ref: PDFRef): string {
@@ -219,7 +237,7 @@ function markOf(item: Located): PdfMark | undefined {
     Math.max(raw[1]!, raw[3]!),
   ];
   const quads: Rect[] = [];
-  if (kind === 'highlight') {
+  if (isTextMark(kind)) {
     const points = numbers(dict, 'QuadPoints');
     if (points?.length && points.length % 8 === 0) {
       for (let i = 0; i < points.length; i += 8) {
@@ -240,7 +258,7 @@ function markOf(item: Located): PdfMark | undefined {
     page: item.index + 1,
     kind,
     quads,
-    rect: kind === 'highlight' ? unionRect(quads) : rect,
+    rect: isTextMark(kind) ? unionRect(quads) : rect,
     // Colour arrays may be gray (1), RGB (3) or CMYK (4) components.
     color: (color?.length === 3
       ? color
@@ -306,6 +324,29 @@ function highlightAppearance(mark: PdfMark): string {
   ].join('\n');
 }
 
+/** Where a text line is drawn inside a quad: near the bottom, or through the middle. */
+export function textLine(kind: 'underline' | 'strikeout', [, bottom, , top]: Rect) {
+  const height = top - bottom;
+  return {
+    y: bottom + height * (kind === 'underline' ? 0.1 : 0.45),
+    width: Math.max(0.5, height * 0.07),
+  };
+}
+
+function lineAppearance(mark: PdfMark): string {
+  const [x0, y0] = mark.rect;
+  const kind = mark.kind as 'underline' | 'strikeout';
+  return [
+    'q',
+    `${mark.color.map(decimal).join(' ')} RG`,
+    ...mark.quads.map((quad) => {
+      const { y, width } = textLine(kind, quad);
+      return `${decimal(width)} w ${decimal(quad[0] - x0)} ${decimal(y - y0)} m ${decimal(quad[2] - x0)} ${decimal(y - y0)} l S`;
+    }),
+    'Q',
+  ].join('\n');
+}
+
 /** A folded sticky note with text lines, drawn without fonts so every reader can paint it. */
 function noteAppearance(mark: PdfMark): string {
   const size = NOTE_SIZE;
@@ -328,21 +369,28 @@ function appearanceStream(pdf: PDFDocument, mark: PdfMark): PDFRef {
   const [left, bottom, right, top] = mark.rect;
   const highlight = mark.kind === 'highlight';
   return context.register(
-    context.flateStream(highlight ? highlightAppearance(mark) : noteAppearance(mark), {
-      Type: 'XObject',
-      Subtype: 'Form',
-      FormType: 1,
-      BBox: [0, 0, right - left, top - bottom],
-      ...(highlight
-        ? {
-            Resources: {
-              ExtGState: {
-                GS0: { Type: 'ExtGState', CA: mark.opacity, ca: mark.opacity, BM: 'Multiply' },
+    context.flateStream(
+      highlight
+        ? highlightAppearance(mark)
+        : mark.kind === 'note'
+          ? noteAppearance(mark)
+          : lineAppearance(mark),
+      {
+        Type: 'XObject',
+        Subtype: 'Form',
+        FormType: 1,
+        BBox: [0, 0, right - left, top - bottom],
+        ...(highlight
+          ? {
+              Resources: {
+                ExtGState: {
+                  GS0: { Type: 'ExtGState', CA: mark.opacity, ca: mark.opacity, BM: 'Multiply' },
+                },
               },
-            },
-          }
-        : {}),
-    }),
+            }
+          : {}),
+      },
+    ),
   );
 }
 
@@ -377,7 +425,7 @@ function updateForeign(pdf: PDFDocument, item: Located, mark: PdfMark, prior: Pd
   dict.set(PDFName.of('M'), PDFString.of(mark.modified));
   dict.set(PDFName.of('C'), context.obj(mark.color));
   const recoloured = mark.color.some((value, i) => Math.abs(value - prior.color[i]!) > 0.0005);
-  if (mark.kind === 'highlight') {
+  if (isTextMark(mark.kind)) {
     dict.set(PDFName.of('QuadPoints'), context.obj(quadPoints(mark.quads)));
     dict.set(PDFName.of('Rect'), context.obj(mark.rect));
     if (
@@ -446,13 +494,13 @@ export function writeMarks(
       removeLocated(item);
     }
     const [, , right, top] = mark.rect;
-    const highlight = mark.kind === 'highlight';
+    const onText = isTextMark(mark.kind);
     const ap = appearanceStream(pdf, mark);
     const annotRef = context.nextRef();
     const popupRef = context.nextRef();
     const annotation = context.obj({
       Type: 'Annot',
-      Subtype: highlight ? 'Highlight' : 'Text',
+      Subtype: onText ? SUBTYPE[mark.kind as TextMarkKind] : 'Text',
       NM: PDFHexString.fromText(mark.id),
       P: page.ref,
       F: 4,
@@ -463,11 +511,11 @@ export function writeMarks(
       M: PDFString.of(mark.modified),
       CreationDate: PDFString.of(mark.modified),
       Contents: PDFHexString.fromText(mark.comment),
-      PFSKind: highlight ? 'Highlight' : 'Note',
+      PFSKind: onText ? SUBTYPE[mark.kind as TextMarkKind] : 'Note',
       Popup: popupRef,
       AP: { N: ap },
     });
-    if (highlight) {
+    if (onText) {
       annotation.set(PDFName.of('QuadPoints'), context.obj(quadPoints(mark.quads)));
     } else {
       annotation.set(PDFName.of('Name'), PDFName.of('Comment'));

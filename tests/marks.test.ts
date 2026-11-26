@@ -344,3 +344,36 @@ test('highlights and notes from other apps can be edited, re-coloured, trimmed a
     );
   assert.deepEqual(left, ['Erledigt', '(hidden)']);
 });
+
+test('underline and strikethrough are standard annotations that toggle off again', async () => {
+  const file = memory(await textPdf());
+  const session = await TextSession.open(file.store, font);
+  const line: Rect = [40, 338, 200, 352];
+  session.addMark({ page: 1, kind: 'underline', quads: [line], color: [0.85, 0.15, 0.15] });
+  session.addMark({ page: 1, kind: 'strikeout', quads: [line], color: [0.1, 0.1, 0.1] });
+  // Pressing underline again on the left half removes just that part.
+  assert.equal(session.highlightsAt(1, [[40, 338, 120, 352]], 'highlight').length, 0);
+  session.eraseHighlights(1, [[40, 338, 120, 352]], 'underline');
+  await session.save();
+  const saved = (await readTextPdf(file.bytes())).marks!;
+  assert.deepEqual(
+    saved.map((mark) => [mark.kind, mark.quads[0]![0], mark.opacity]),
+    [
+      ['underline', 120, 1],
+      ['strikeout', 40, 1],
+    ],
+  );
+  const document = await getDocument({ data: file.bytes().slice() }).promise;
+  const annotations = await (await document.getPage(1)).getAnnotations();
+  assert.deepEqual(
+    annotations
+      .filter((item) => item.subtype !== 'Popup')
+      .map((item) => [item.subtype, item.hasAppearance])
+      .sort(),
+    [
+      ['StrikeOut', true],
+      ['Underline', true],
+    ],
+  );
+  await document.destroy();
+});
