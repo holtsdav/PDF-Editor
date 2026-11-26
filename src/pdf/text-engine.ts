@@ -23,7 +23,12 @@ import type { InkStroke } from './ink-engine.ts';
 import { defaultColor, isPrivateUse, validColor, validSpacing } from './text-format.ts';
 import type { FontFamily, PdfColor, PdfFonts, TextFormat } from './text-format.ts';
 import { referencedObjects, pruneReplacedObjects } from './object-references.ts';
-import { loadPdfDocument, pdfSaveOptions } from './pdf-load.ts';
+import {
+  loadAppendedUpdate,
+  loadPdfDocument,
+  loadPdfDocumentReusing,
+  pdfSaveOptions,
+} from './pdf-load.ts';
 import { validRuledLayout } from './ruled-text.ts';
 import {
   editableChoiceWidgets,
@@ -134,8 +139,9 @@ const yieldToInput = () => new Promise<void>((resolve) => setTimeout(resolve, 0)
 async function loadWritable(
   bytes: Uint8Array,
   loaded?: (pdf: PDFDocument) => void,
+  reuse = false,
 ): Promise<PDFDocument> {
-  const pdf = await loadPdfDocument(bytes);
+  const pdf = reuse ? await loadPdfDocumentReusing(bytes) : await loadPdfDocument(bytes);
   // Saves record changes from here on, including form repairs made below.
   loaded?.(pdf);
   const acroForm = pdf.catalog.lookupMaybe(PDFName.of('AcroForm'), PDFDict);
@@ -567,9 +573,13 @@ export async function writeTextPdf(
   let bytes: Uint8Array;
   let pdf: PDFDocument;
   try {
-    pdf = await loadWritable(seed, (loaded) => {
-      tracking = trackChanges(loaded, seed);
-    });
+    pdf = await loadWritable(
+      seed,
+      (loaded) => {
+        tracking = trackChanges(loaded, seed);
+      },
+      true,
+    );
     await pause();
     pdf.registerFontkit(fontkit);
     const form = pdf.getForm();
@@ -883,7 +893,8 @@ export async function writeTextPdf(
   }
   await pause();
   // Reopen and verify logical values, widget appearances, and page count before any vault write.
-  const verified = await loadPdfDocument(bytes);
+  // An appended update is read back through its own index on top of the unchanged original.
+  const verified = (await loadAppendedUpdate(seed, bytes)) ?? (await loadPdfDocument(bytes));
   const saved = fieldIndex(verified.getForm());
   if (verified.getPageCount() !== pdf.getPageCount()) {
     throw new Error('PDF page verification failed.');

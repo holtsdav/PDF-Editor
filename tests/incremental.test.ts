@@ -5,6 +5,7 @@ import { PDFDocument } from 'pdf-lib';
 import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { readTextPdf } from '../src/pdf/text-engine.ts';
 import { TextSession } from '../src/pdf/text-session.ts';
+import { loadAppendedUpdate, loadPdfDocumentReusing } from '../src/pdf/pdf-load.ts';
 
 const font = new Uint8Array(
   await readFile(new URL('../assets/fonts/NotoSans-Regular.ttf', import.meta.url)),
@@ -107,4 +108,45 @@ test('after many appended revisions a save rewrites the file compactly', async (
     assert.ok(revisions(bytes) <= 12, `revision ${revisions(bytes)}`);
   }
   assert.equal((await readTextPdf(bytes)).shapes!.length, 14);
+});
+
+test('an appended update is read back through its own index and rejected when it is broken', async () => {
+  const doc = await PDFDocument.create();
+  doc.addPage([400, 400]);
+  let state = 7;
+  await doc.attach(
+    new Uint8Array(200_000).map(() => (state = (state * 48271) % 2147483647) & 0xff),
+    'data.bin',
+  );
+  const seed = await doc.save({ useObjectStreams: false });
+  let bytes = seed.slice();
+  const session = await TextSession.open(
+    {
+      read: async () => bytes.slice(),
+      write: async (value) => {
+        bytes = value.slice();
+      },
+      backup: async () => '',
+    },
+    font,
+  );
+  session.addShape({
+    page: 1,
+    kind: 'line',
+    start: [10, 10],
+    end: [200, 10],
+    color: [0, 0, 0],
+    width: 1,
+  });
+  await session.save();
+  const own = (session as unknown as { seed: Uint8Array }).seed;
+  await loadPdfDocumentReusing(own);
+  const read = await loadAppendedUpdate(own, bytes);
+  assert.equal(read?.getPageCount(), 1);
+  // An index entry pointing at the wrong object must fail, not be guessed around.
+  const text = latin1.decode(bytes);
+  const at = text.lastIndexOf(' 00000 n');
+  const broken = bytes.slice();
+  broken[at - 1] = broken[at - 1] === 0x30 ? 0x31 : 0x30;
+  await assert.rejects(loadAppendedUpdate(own, broken), /index|object/i);
 });

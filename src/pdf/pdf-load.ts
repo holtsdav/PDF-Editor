@@ -1,4 +1,5 @@
 import {
+  PDFArray,
   PDFContext,
   PDFDict,
   PDFDocument,
@@ -7,8 +8,10 @@ import {
   PDFNull,
   PDFNumber,
   PDFObjectParser,
+  PDFRawStream,
   PDFRef,
   PDFStream,
+  decodePDFRawStream,
 } from 'pdf-lib';
 import type { PDFObject, SaveOptions } from 'pdf-lib';
 
@@ -290,6 +293,8 @@ function readIndexedObject(
 
 /** Build only indexed objects; obsolete compressed payloads remain opaque on later saves. */
 async function loadIndexedObjects(
+  // DEBUGTRACE
+
   pdf: PDFDocument,
   bytes: Uint8Array,
   index: ClassicIndex,
@@ -338,6 +343,9 @@ function populateCatalog(pdf: PDFDocument): void {
   ) {
     throw new Error('Invalid active PDF catalog.');
   }
+  if (root === pdf.catalog) {
+    return; // Already the active catalog (an update that left the catalog unchanged).
+  }
   // The new document's empty page/form caches must use the active catalog before traversal.
   for (const key of pdf.catalog.keys()) {
     pdf.catalog.delete(key);
@@ -385,4 +393,181 @@ export function pdfSaveOptions(pdf: PDFDocument): SaveOptions {
     objectsPerTick: OBJECTS_PER_TICK,
     ...(classicSerialization.has(pdf) ? { useObjectStreams: false } : {}),
   };
+}
+
+/**
+ * Saves rebuild the PDF from the same seed every time. Parsing a large file is most of
+ * the cost, so keep one pristine parse per seed and hand each save a deep copy of its
+ * objects (stream contents are shared: they are never modified in place).
+ */
+const templates = new WeakMap<Uint8Array, Promise<PDFDocument>>();
+
+export async function loadPdfDocumentReusing(bytes: Uint8Array): Promise<PDFDocument> {
+  let template = templates.get(bytes);
+  if (!template) {
+    template = loadPdfDocument(bytes);
+    templates.set(bytes, template);
+    template.catch(() => templates.delete(bytes));
+  }
+  return copyDocument(await template);
+}
+
+type DictClass = {
+  fromMapWithContext(map: Map<PDFName, PDFObject>, context: PDFContext): PDFDict;
+};
+
+function deepCopy(object: PDFObject, context: PDFContext): PDFObject {
+  if (object instanceof PDFRawStream) {
+    return PDFRawStream.of(deepCopy(object.dict, context) as PDFDict, object.contents);
+  }
+  if (object instanceof PDFDict) {
+    const entries = new Map<PDFName, PDFObject>();
+    for (const [key, value] of object.entries()) {
+      entries.set(key, deepCopy(value, context));
+    }
+    // Keep pdf-lib's catalog, page tree and page classes.
+    return (object.constructor as unknown as DictClass).fromMapWithContext(entries, context);
+  }
+  if (object instanceof PDFArray) {
+    const array = PDFArray.withContext(context);
+    for (const value of object.asArray()) {
+      array.push(deepCopy(value, context));
+    }
+    return array;
+  }
+  if (object instanceof PDFStream) {
+    throw new Error('Unexpected encoded stream in a parsed PDF.');
+  }
+  return object;
+}
+
+async function copyDocument(source: PDFDocument): Promise<PDFDocument> {
+  const pdf = await PDFDocument.create({ updateMetadata: false });
+  const context = pdf.context;
+  for (const [ref] of context.enumerateIndirectObjects()) {
+    context.delete(ref);
+  }
+  context.header = source.context.header;
+  for (const [ref, object] of source.context.enumerateIndirectObjects()) {
+    context.assign(ref, deepCopy(object, context));
+  }
+  context.largestObjectNumber = source.context.largestObjectNumber;
+  const { Root, Info, ID, Encrypt } = source.context.trailerInfo;
+  context.trailerInfo = {
+    Root,
+    Info,
+    ID: ID && deepCopy(ID as PDFObject, context),
+    Encrypt,
+  };
+  populateCatalog(pdf);
+  if (classicSerialization.has(source)) {
+    classicSerialization.add(pdf);
+  }
+  return pdf;
+}
+
+/**
+ * Read back an update appended to `seed` the way a PDF reader does: the seed's objects
+ * (from the cached parse) overlaid by the objects the new cross-reference section
+ * indexes. The seed bytes themselves are compared, not re-parsed. Returns undefined
+ * when this shortcut does not apply, so the caller parses the whole file instead.
+ */
+export async function loadAppendedUpdate(
+  seed: Uint8Array,
+  output: Uint8Array,
+): Promise<PDFDocument | undefined> {
+  const template = templates.get(seed);
+  const previous = readFooterOffset(seed);
+  const offset = readFooterOffset(output);
+  if (
+    !template ||
+    previous === undefined ||
+    offset === undefined ||
+    offset < seed.length ||
+    output.length <= seed.length
+  ) {
+    return undefined;
+  }
+  for (let i = 0; i < seed.length; i++) {
+    if (output[i] !== seed[i]) {
+      return undefined;
+    }
+  }
+  const pdf = await copyDocument(await template);
+  const context = pdf.context;
+  let entries: Map<number, IndexEntry>;
+  let trailer: PDFDict;
+  if (hasClassicIndex(output, offset)) {
+    ({ entries, trailer } = readClassicSection(output, offset, context));
+  } else if (hasStreamIndex(output, offset)) {
+    const header = /^(\d+)[\s\0]+(\d+)[\s\0]+obj\b/.exec(
+      decoder.decode(output.subarray(offset, offset + OBJECT_HEADER_SCAN_BYTES)),
+    )!;
+    const stream = PDFObjectParser.forBytes(
+      output.subarray(offset + header[0].length),
+      PDFContext.create(),
+    ).parseObject() as PDFRawStream;
+    const widths = stream.dict
+      .lookup(PDFName.of('W'), PDFArray)
+      .asArray()
+      .map((value) => (value as PDFNumber).asNumber());
+    const index = stream.dict
+      .lookupMaybe(PDFName.of('Index'), PDFArray)
+      ?.asArray()
+      .map((value) => (value as PDFNumber).asNumber());
+    const data = decodePDFRawStream(stream).decode();
+    const size = stream.dict.lookup(PDFName.of('Size'), PDFNumber).asNumber();
+    const ranges = index ?? [0, size];
+    const field = (position: number, width: number) => {
+      let value = 0;
+      for (let i = 0; i < width; i++) {
+        value = value * 256 + data[position + i]!;
+      }
+      return value;
+    };
+    entries = new Map();
+    const row = widths[0]! + widths[1]! + widths[2]!;
+    let position = 0;
+    for (let r = 0; r < ranges.length; r += 2) {
+      for (let number = ranges[r]!; number < ranges[r]! + ranges[r + 1]!; number++) {
+        const type = widths[0] ? field(position, widths[0]) : 1;
+        const second = field(position + widths[0]!, widths[1]!);
+        const third = field(position + widths[0]! + widths[1]!, widths[2]!);
+        position += row;
+        if (type === 2) {
+          return undefined; // Compressed objects: let the full parser handle them.
+        }
+        entries.set(number, { offset: second, generation: third, active: type === 1 });
+      }
+    }
+    trailer = stream.dict;
+  } else {
+    throw new Error('Invalid appended PDF cross-reference section.');
+  }
+  const prev = trailer.get(PDFName.of('Prev'));
+  if (!(prev instanceof PDFNumber) || prev.asNumber() !== previous) {
+    throw new Error('The appended PDF update does not continue the original file.');
+  }
+  for (const [number, entry] of entries) {
+    if (!entry.active || entry.offset === offset) {
+      continue;
+    }
+    if (entry.offset < seed.length) {
+      throw new Error('The appended PDF update points into the original file.');
+    }
+    readIndexedObject(output, context, number, entry);
+    context.largestObjectNumber = Math.max(context.largestObjectNumber, number);
+  }
+  const root = trailer.get(PDFName.of('Root'));
+  if (!(root instanceof PDFRef)) {
+    throw new Error('Invalid PDF trailer.');
+  }
+  context.trailerInfo = {
+    ...context.trailerInfo,
+    Root: root,
+    ...(trailer.get(PDFName.of('Info')) ? { Info: trailer.get(PDFName.of('Info')) } : {}),
+    ...(trailer.get(PDFName.of('ID')) ? { ID: trailer.get(PDFName.of('ID')) } : {}),
+  };
+  populateCatalog(pdf);
+  return pdf;
 }
