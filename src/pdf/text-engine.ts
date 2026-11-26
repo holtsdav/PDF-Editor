@@ -37,6 +37,7 @@ import { readMarks, stripMarks, verifyMarks, writeMarks } from './mark-engine.ts
 import { fieldIndex } from './field-index.ts';
 import { readShapes, stripShapes, verifyShapes, writeShapes } from './shape-engine.ts';
 import type { PdfShape } from './shape-engine.ts';
+import { incrementalBytes, trackChanges } from './incremental.ts';
 import { readImages, stripImages, verifyImages, writeImages } from './image-engine.ts';
 import type { PdfImage } from './image-engine.ts';
 import type { PdfMark } from './mark-engine.ts';
@@ -120,8 +121,13 @@ export interface TextChanges {
   deletedImages?: Set<string>;
 }
 
-async function loadWritable(bytes: Uint8Array): Promise<PDFDocument> {
+async function loadWritable(
+  bytes: Uint8Array,
+  loaded?: (pdf: PDFDocument) => void,
+): Promise<PDFDocument> {
   const pdf = await loadPdfDocument(bytes);
+  // Saves record changes from here on, including form repairs made below.
+  loaded?.(pdf);
   const acroForm = pdf.catalog.lookupMaybe(PDFName.of('AcroForm'), PDFDict);
   if (acroForm?.has(PDFName.of('XFA'))) {
     throw new Error('XFA PDFs are read only in this version.');
@@ -540,308 +546,321 @@ export async function writeTextPdf(
   changes: TextChanges,
   fontBytes: PdfFonts,
 ): Promise<Uint8Array> {
-  const pdf = await loadWritable(seed);
-  pdf.registerFontkit(fontkit);
-  const form = pdf.getForm();
-  const fields = fieldIndex(form);
-  const replaced = referencedObjects(
-    pdf,
-    form
-      .getFields()
-      .flatMap((field) =>
-        changes.values.has(field.getName()) ||
-        changes.boxes.has(field.getName()) ||
-        changes.deleted.has(field.getName())
-          ? field.acroField
-              .getWidgets()
-              .flatMap(
-                (widget) => widget.dict.lookupMaybe(PDFName.of('AP'), PDFDict)?.values() ?? [],
-              )
-          : [],
-      )
-      .concat(replacedChoiceAppearances(pdf, changes.choices ?? new Map())),
-  );
-  const embedded = new Map<FontFamily, PDFFont>();
-  const getFont = async (family: FontFamily): Promise<PDFFont> => {
-    let font = embedded.get(family);
-    if (!font) {
-      font = await pdf.embedFont(fontBytes instanceof Uint8Array ? fontBytes : fontBytes[family], {
-        subset: true,
-        features: { liga: false, clig: false, kern: false },
-      });
-      embedded.set(family, font);
-    }
-    return font;
-  };
-  for (const name of changes.deleted) {
-    const field = fields.maybe(name);
-    if (!(field instanceof PDFTextField) || !ownedText(field) || !editableText(field)) {
-      throw new Error('Only editable text boxes created by this plugin can be deleted.');
-    }
-    if (field) {
-      // PDF-LIB 1.17 removes appearance refs instead of separate widget refs.
-      // Capture the exact page entries before it deletes their dictionaries.
-      const widgets = new Set(field.acroField.getWidgets().map((widget) => widget.dict));
-      const entries = pdf.getPages().map((page) => ({
-        annotations: page.node.Annots(),
-        refs: new Set(
-          page.node
-            .Annots()
-            ?.asArray()
-            .filter((ref) => widgets.has(pdf.context.lookup(ref) as PDFDict)) ?? [],
-        ),
-      }));
-      form.removeField(field);
-      fields.forget(name);
-      for (const { annotations, refs } of entries) {
-        if (annotations) {
-          for (let i = annotations.size() - 1; i >= 0; i--) {
-            if (refs.has(annotations.get(i))) {
-              annotations.remove(i);
+  let tracking: ReturnType<typeof trackChanges> | undefined;
+  let bytes: Uint8Array;
+  let pdf: PDFDocument;
+  try {
+    pdf = await loadWritable(seed, (loaded) => {
+      tracking = trackChanges(loaded, seed);
+    });
+    pdf.registerFontkit(fontkit);
+    const form = pdf.getForm();
+    const fields = fieldIndex(form);
+    const replaced = referencedObjects(
+      pdf,
+      form
+        .getFields()
+        .flatMap((field) =>
+          changes.values.has(field.getName()) ||
+          changes.boxes.has(field.getName()) ||
+          changes.deleted.has(field.getName())
+            ? field.acroField
+                .getWidgets()
+                .flatMap(
+                  (widget) => widget.dict.lookupMaybe(PDFName.of('AP'), PDFDict)?.values() ?? [],
+                )
+            : [],
+        )
+        .concat(replacedChoiceAppearances(pdf, changes.choices ?? new Map())),
+    );
+    const embedded = new Map<FontFamily, PDFFont>();
+    const getFont = async (family: FontFamily): Promise<PDFFont> => {
+      let font = embedded.get(family);
+      if (!font) {
+        font = await pdf.embedFont(
+          fontBytes instanceof Uint8Array ? fontBytes : fontBytes[family],
+          {
+            subset: true,
+            features: { liga: false, clig: false, kern: false },
+          },
+        );
+        embedded.set(family, font);
+      }
+      return font;
+    };
+    for (const name of changes.deleted) {
+      const field = fields.maybe(name);
+      if (!(field instanceof PDFTextField) || !ownedText(field) || !editableText(field)) {
+        throw new Error('Only editable text boxes created by this plugin can be deleted.');
+      }
+      if (field) {
+        // PDF-LIB 1.17 removes appearance refs instead of separate widget refs.
+        // Capture the exact page entries before it deletes their dictionaries.
+        const widgets = new Set(field.acroField.getWidgets().map((widget) => widget.dict));
+        const entries = pdf.getPages().map((page) => ({
+          annotations: page.node.Annots(),
+          refs: new Set(
+            page.node
+              .Annots()
+              ?.asArray()
+              .filter((ref) => widgets.has(pdf.context.lookup(ref) as PDFDict)) ?? [],
+          ),
+        }));
+        form.removeField(field);
+        fields.forget(name);
+        for (const { annotations, refs } of entries) {
+          if (annotations) {
+            for (let i = annotations.size() - 1; i >= 0; i--) {
+              if (refs.has(annotations.get(i))) {
+                annotations.remove(i);
+              }
             }
           }
         }
       }
     }
-  }
-  for (const added of changes.added.values()) {
-    if (!added.name.startsWith(FIELD_PREFIX) || fields.has(added.name)) {
-      throw new Error('Invalid or duplicate text box ID.');
-    }
-    const page = pdf.getPages()[added.page - 1];
-    if (!page) {
-      throw new Error('The target PDF page no longer exists.');
-    }
-    const [x1, y1, x2, y2] = added.rect;
-    if (![x1, y1, x2, y2, added.fontSize].every(Number.isFinite) || x2 <= x1 || y2 <= y1) {
-      throw new Error('Invalid text box geometry.');
-    }
-    const field = form.createTextField(added.name);
-    fields.add(field);
-    field.acroField.dict.set(PDFName.of('PFSKind'), PDFName.of('Text'));
-    if (added.multiline) {
-      field.enableMultiline();
-    }
-    field.addToPage(page, {
-      x: x1,
-      y: y1,
-      width: x2 - x1,
-      height: y2 - y1,
-      borderWidth: 0,
-      backgroundColor: undefined,
-      borderColor: undefined,
-      textColor: rgb(0.05, 0.05, 0.05),
-      font: await getFont('sans'),
-    });
-    field.setFontSize(added.fontSize);
-    if (added.ruled) {
-      if (!added.multiline || added.rotation || !validRuledLayout(added.ruled, added.rect)) {
-        throw new Error('Invalid ruled answer layout.');
+    for (const added of changes.added.values()) {
+      if (!added.name.startsWith(FIELD_PREFIX) || fields.has(added.name)) {
+        throw new Error('Invalid or duplicate text box ID.');
       }
-      field.acroField.dict.set(
-        PDFName.of('PFSRuled'),
-        pdf.context.obj([added.ruled.spacing, added.ruled.rows]),
-      );
-    }
-    // Rotate the widget appearance to follow the user's current viewport orientation.
-    if (added.rotation) {
-      field.acroField
-        .getWidgets()[0]
-        ?.getOrCreateAppearanceCharacteristics()
-        .setRotation(added.rotation);
-    }
-  }
-  for (const [name, box] of changes.boxes) {
-    if (changes.deleted.has(name)) {
-      continue;
-    }
-    const field = fields.text(name);
-    if (!ownedText(field)) {
-      throw new Error('Only added text boxes can be moved or resized.');
-    }
-    const widgets = field.acroField.getWidgets();
-    if (widgets.length !== 1 || field.isReadOnly()) {
-      throw new Error('This text box cannot be resized.');
-    }
-    const [x1, y1, x2, y2] = box.rect;
-    if (
-      ![...box.rect, box.fontSize].every(Number.isFinite) ||
-      x2 <= x1 ||
-      y2 <= y1 ||
-      box.fontSize <= 0
-    ) {
-      throw new Error('Invalid text box geometry.');
-    }
-    widgets[0]!.setRectangle({ x: x1, y: y1, width: x2 - x1, height: y2 - y1 });
-    field.setFontSize(box.fontSize);
-    if (box.multiline) {
-      field.enableMultiline();
-    } else {
-      field.disableMultiline();
-    }
-    if (box.ruled) {
-      if (!box.multiline || !validRuledLayout(box.ruled, box.rect)) {
-        throw new Error('Invalid ruled answer layout.');
+      const page = pdf.getPages()[added.page - 1];
+      if (!page) {
+        throw new Error('The target PDF page no longer exists.');
       }
-      field.acroField.dict.set(
-        PDFName.of('PFSRuled'),
-        pdf.context.obj([box.ruled.spacing, box.ruled.rows]),
-      );
-    } else {
-      field.acroField.dict.delete(PDFName.of('PFSRuled'));
-    }
-  }
-  for (const [name, value] of changes.values) {
-    if (changes.deleted.has(name)) {
-      continue;
-    }
-    const field = fields.text(name);
-    const owned = ownedText(field);
-    const originalDa = inheritedAppearance(pdf, field);
-    const widgetDefaults = field.acroField
-      .getWidgets()
-      .map((widget) => widget.getDefaultAppearance());
-    const baseFont = originalFont(pdf, field);
-    const family =
-      changes.formats.get(name)?.fontFamily ??
-      (field.acroField.dict.get(PDFName.of('PFSFont'))?.toString() === '/serif' ||
-      baseFont?.startsWith('Times')
-        ? 'serif'
-        : field.acroField.dict.get(PDFName.of('PFSFont'))?.toString() === '/mono' ||
-            baseFont?.startsWith('Courier')
-          ? 'mono'
-          : 'sans');
-    let font: PDFFont;
-    if (
-      !owned &&
-      !changes.formats.has(name) &&
-      Object.values(StandardFonts).includes(baseFont as StandardFonts)
-    ) {
-      font = await pdf.embedFont(baseFont as StandardFonts);
-      const supported = new Set(font.getCharacterSet());
-      if (
-        [...value].some(
-          (character) =>
-            ![9, 10, 13].includes(character.codePointAt(0)!) &&
-            !supported.has(character.codePointAt(0)!),
-        )
-      ) {
-        font = await getFont(family);
+      const [x1, y1, x2, y2] = added.rect;
+      if (![x1, y1, x2, y2, added.fontSize].every(Number.isFinite) || x2 <= x1 || y2 <= y1) {
+        throw new Error('Invalid text box geometry.');
       }
-    } else {
-      font = await getFont(family);
-    }
-    const supported = new Set(font.getCharacterSet());
-    for (const character of value) {
-      const code = character.codePointAt(0)!;
-      if (code !== 10 && code !== 13 && code !== 9 && !supported.has(code)) {
-        throw new Error(
-          isPrivateUse(code)
-            ? `The text contains a special-font symbol (U+${code.toString(16).toUpperCase()}, often a bullet copied from Word or another PDF) that cannot be saved. Your text is kept here; replace that character with a normal one such as • or – before saving.`
-            : `The PDF font cannot render U+${code.toString(16).toUpperCase()}. Your text is kept here; replace the unsupported character before saving.`,
+      const field = form.createTextField(added.name);
+      fields.add(field);
+      field.acroField.dict.set(PDFName.of('PFSKind'), PDFName.of('Text'));
+      if (added.multiline) {
+        field.enableMultiline();
+      }
+      field.addToPage(page, {
+        x: x1,
+        y: y1,
+        width: x2 - x1,
+        height: y2 - y1,
+        borderWidth: 0,
+        backgroundColor: undefined,
+        borderColor: undefined,
+        textColor: rgb(0.05, 0.05, 0.05),
+        font: await getFont('sans'),
+      });
+      field.setFontSize(added.fontSize);
+      if (added.ruled) {
+        if (!added.multiline || added.rotation || !validRuledLayout(added.ruled, added.rect)) {
+          throw new Error('Invalid ruled answer layout.');
+        }
+        field.acroField.dict.set(
+          PDFName.of('PFSRuled'),
+          pdf.context.obj([added.ruled.spacing, added.ruled.rows]),
         );
       }
+      // Rotate the widget appearance to follow the user's current viewport orientation.
+      if (added.rotation) {
+        field.acroField
+          .getWidgets()[0]
+          ?.getOrCreateAppearanceCharacteristics()
+          .setRotation(added.rotation);
+      }
     }
-    if (!editableText(field)) {
-      throw new Error(`Field ${name} is read only or unsupported.`);
+    for (const [name, box] of changes.boxes) {
+      if (changes.deleted.has(name)) {
+        continue;
+      }
+      const field = fields.text(name);
+      if (!ownedText(field)) {
+        throw new Error('Only added text boxes can be moved or resized.');
+      }
+      const widgets = field.acroField.getWidgets();
+      if (widgets.length !== 1 || field.isReadOnly()) {
+        throw new Error('This text box cannot be resized.');
+      }
+      const [x1, y1, x2, y2] = box.rect;
+      if (
+        ![...box.rect, box.fontSize].every(Number.isFinite) ||
+        x2 <= x1 ||
+        y2 <= y1 ||
+        box.fontSize <= 0
+      ) {
+        throw new Error('Invalid text box geometry.');
+      }
+      widgets[0]!.setRectangle({ x: x1, y: y1, width: x2 - x1, height: y2 - y1 });
+      field.setFontSize(box.fontSize);
+      if (box.multiline) {
+        field.enableMultiline();
+      } else {
+        field.disableMultiline();
+      }
+      if (box.ruled) {
+        if (!box.multiline || !validRuledLayout(box.ruled, box.rect)) {
+          throw new Error('Invalid ruled answer layout.');
+        }
+        field.acroField.dict.set(
+          PDFName.of('PFSRuled'),
+          pdf.context.obj([box.ruled.spacing, box.ruled.rows]),
+        );
+      } else {
+        field.acroField.dict.delete(PDFName.of('PFSRuled'));
+      }
     }
-    const maximum = field.getMaxLength();
-    if (maximum !== undefined && value.length > maximum) {
-      throw new Error(`Field ${name} allows at most ${maximum} characters.`);
-    }
-    field.setText(value);
-    const format = changes.formats.get(name);
-    if (format && !validSpacing(format.letterSpacing, format.lineSpacing)) {
-      throw new Error('Invalid text spacing.');
-    }
-    if (
-      format &&
-      !owned &&
-      (format.letterSpacing !== undefined || format.lineSpacing !== undefined)
-    ) {
-      throw new Error('Spacing is supported only for added text boxes.');
-    }
-    if (owned && format) {
-      for (const [key, value] of [
-        ['PFSLetterSpacing', format.letterSpacing],
-        ['PFSLineSpacing', format.lineSpacing],
-      ] as const) {
-        if (value !== undefined) {
-          field.acroField.dict.set(PDFName.of(key), PDFNumber.of(value));
+    for (const [name, value] of changes.values) {
+      if (changes.deleted.has(name)) {
+        continue;
+      }
+      const field = fields.text(name);
+      const owned = ownedText(field);
+      const originalDa = inheritedAppearance(pdf, field);
+      const widgetDefaults = field.acroField
+        .getWidgets()
+        .map((widget) => widget.getDefaultAppearance());
+      const baseFont = originalFont(pdf, field);
+      const family =
+        changes.formats.get(name)?.fontFamily ??
+        (field.acroField.dict.get(PDFName.of('PFSFont'))?.toString() === '/serif' ||
+        baseFont?.startsWith('Times')
+          ? 'serif'
+          : field.acroField.dict.get(PDFName.of('PFSFont'))?.toString() === '/mono' ||
+              baseFont?.startsWith('Courier')
+            ? 'mono'
+            : 'sans');
+      let font: PDFFont;
+      if (
+        !owned &&
+        !changes.formats.has(name) &&
+        Object.values(StandardFonts).includes(baseFont as StandardFonts)
+      ) {
+        font = await pdf.embedFont(baseFont as StandardFonts);
+        const supported = new Set(font.getCharacterSet());
+        if (
+          [...value].some(
+            (character) =>
+              ![9, 10, 13].includes(character.codePointAt(0)!) &&
+              !supported.has(character.codePointAt(0)!),
+          )
+        ) {
+          font = await getFont(family);
+        }
+      } else {
+        font = await getFont(family);
+      }
+      const supported = new Set(font.getCharacterSet());
+      for (const character of value) {
+        const code = character.codePointAt(0)!;
+        if (code !== 10 && code !== 13 && code !== 9 && !supported.has(code)) {
+          throw new Error(
+            isPrivateUse(code)
+              ? `The text contains a special-font symbol (U+${code.toString(16).toUpperCase()}, often a bullet copied from Word or another PDF) that cannot be saved. Your text is kept here; replace that character with a normal one such as • or – before saving.`
+              : `The PDF font cannot render U+${code.toString(16).toUpperCase()}. Your text is kept here; replace the unsupported character before saving.`,
+          );
         }
       }
-    }
-    if (format?.alignment !== undefined) {
-      const alignment = {
-        left: TextAlignment.Left,
-        center: TextAlignment.Center,
-        right: TextAlignment.Right,
-      }[format.alignment];
-      if (alignment === undefined) {
-        throw new Error('Invalid text alignment.');
+      if (!editableText(field)) {
+        throw new Error(`Field ${name} is read only or unsupported.`);
       }
-      field.setAlignment(alignment);
-    }
-    const color = format?.color ?? defaultColor(originalDa);
-    const originalSize = /([\d.]+)\s+Tf/.exec(originalDa)?.[1];
-    const size = format?.autoSize
-      ? 0
-      : (format?.fontSize ??
-        changes.boxes.get(name)?.fontSize ??
-        (originalSize !== undefined ? Number(originalSize) : 14));
-    if (!Number.isFinite(size) || size < 0 || size > 200 || !validColor(color)) {
-      throw new Error('Invalid text formatting.');
-    }
-    const da = `${setFillingRgbColor(...color)}\n${setFontAndSize(font.name, size)}`;
-    field.acroField.setDefaultAppearance(da);
-    field.acroField.dict.set(PDFName.of('PFSFont'), PDFName.of(family));
-    // Keep each authored widget's size/color overrides when only its value changes.
-    const widgetDas = field.acroField.getWidgets().map((widget, index) => {
-      const original = widgetDefaults[index] ?? originalDa;
-      const widgetSize = /([\d.]+)\s+Tf/.exec(original)?.[1];
-      const next =
-        !owned && (!format || format.preserveWidgetSizes)
-          ? `${setFillingRgbColor(...(format?.color ?? defaultColor(original)))}\n${setFontAndSize(font.name, widgetSize !== undefined ? Number(widgetSize) : size)}`
-          : da;
-      widget.setDefaultAppearance(next);
-      return next;
-    });
-    field.acroField.dict.set(PDFName.of('PFSKind'), PDFName.of(owned ? 'Text' : 'Form'));
-    // Capture stream refs now: PDF-LIB mutates the AP dictionary in place.
-    for (const ref of referencedObjects(
-      pdf,
-      field.acroField
-        .getWidgets()
-        .flatMap((widget) => widget.dict.lookupMaybe(PDFName.of('AP'), PDFDict)?.values() ?? []),
-    )) {
-      replaced.add(ref);
-    }
-    field.updateAppearances(font, owned ? multilineAppearance : undefined);
-    // PDF-LIB resolves auto-size (0) while drawing. Retain that form option for future edits.
-    if (!owned && (!format || format.preserveWidgetSizes)) {
+      const maximum = field.getMaxLength();
+      if (maximum !== undefined && value.length > maximum) {
+        throw new Error(`Field ${name} allows at most ${maximum} characters.`);
+      }
+      field.setText(value);
+      const format = changes.formats.get(name);
+      if (format && !validSpacing(format.letterSpacing, format.lineSpacing)) {
+        throw new Error('Invalid text spacing.');
+      }
+      if (
+        format &&
+        !owned &&
+        (format.letterSpacing !== undefined || format.lineSpacing !== undefined)
+      ) {
+        throw new Error('Spacing is supported only for added text boxes.');
+      }
+      if (owned && format) {
+        for (const [key, value] of [
+          ['PFSLetterSpacing', format.letterSpacing],
+          ['PFSLineSpacing', format.lineSpacing],
+        ] as const) {
+          if (value !== undefined) {
+            field.acroField.dict.set(PDFName.of(key), PDFNumber.of(value));
+          }
+        }
+      }
+      if (format?.alignment !== undefined) {
+        const alignment = {
+          left: TextAlignment.Left,
+          center: TextAlignment.Center,
+          right: TextAlignment.Right,
+        }[format.alignment];
+        if (alignment === undefined) {
+          throw new Error('Invalid text alignment.');
+        }
+        field.setAlignment(alignment);
+      }
+      const color = format?.color ?? defaultColor(originalDa);
+      const originalSize = /([\d.]+)\s+Tf/.exec(originalDa)?.[1];
+      const size = format?.autoSize
+        ? 0
+        : (format?.fontSize ??
+          changes.boxes.get(name)?.fontSize ??
+          (originalSize !== undefined ? Number(originalSize) : 14));
+      if (!Number.isFinite(size) || size < 0 || size > 200 || !validColor(color)) {
+        throw new Error('Invalid text formatting.');
+      }
+      const da = `${setFillingRgbColor(...color)}\n${setFontAndSize(font.name, size)}`;
       field.acroField.setDefaultAppearance(da);
-      field.acroField
-        .getWidgets()
-        .forEach((widget, index) => widget.setDefaultAppearance(widgetDas[index]!));
+      field.acroField.dict.set(PDFName.of('PFSFont'), PDFName.of(family));
+      // Keep each authored widget's size/color overrides when only its value changes.
+      const widgetDas = field.acroField.getWidgets().map((widget, index) => {
+        const original = widgetDefaults[index] ?? originalDa;
+        const widgetSize = /([\d.]+)\s+Tf/.exec(original)?.[1];
+        const next =
+          !owned && (!format || format.preserveWidgetSizes)
+            ? `${setFillingRgbColor(...(format?.color ?? defaultColor(original)))}\n${setFontAndSize(font.name, widgetSize !== undefined ? Number(widgetSize) : size)}`
+            : da;
+        widget.setDefaultAppearance(next);
+        return next;
+      });
+      field.acroField.dict.set(PDFName.of('PFSKind'), PDFName.of(owned ? 'Text' : 'Form'));
+      // Capture stream refs now: PDF-LIB mutates the AP dictionary in place.
+      for (const ref of referencedObjects(
+        pdf,
+        field.acroField
+          .getWidgets()
+          .flatMap((widget) => widget.dict.lookupMaybe(PDFName.of('AP'), PDFDict)?.values() ?? []),
+      )) {
+        replaced.add(ref);
+      }
+      field.updateAppearances(font, owned ? multilineAppearance : undefined);
+      // PDF-LIB resolves auto-size (0) while drawing. Retain that form option for future edits.
+      if (!owned && (!format || format.preserveWidgetSizes)) {
+        field.acroField.setDefaultAppearance(da);
+        field.acroField
+          .getWidgets()
+          .forEach((widget, index) => widget.setDefaultAppearance(widgetDas[index]!));
+      }
     }
+    if (changes.choices?.size) {
+      await writeChoices(pdf, fields, changes.choices, () => getFont('sans'));
+    }
+    writeInk(pdf, changes.strokes, changes.deletedStrokes);
+    if (changes.marks?.size || changes.deletedMarks?.size) {
+      writeMarks(pdf, changes.marks ?? new Map(), changes.deletedMarks ?? new Set());
+    }
+    if (changes.shapes?.size || changes.deletedShapes?.size) {
+      writeShapes(pdf, changes.shapes ?? new Map(), changes.deletedShapes ?? new Set());
+    }
+    if (changes.images?.size || changes.deletedImages?.size) {
+      await writeImages(pdf, changes.images ?? new Map(), changes.deletedImages ?? new Set());
+    }
+    await pdf.flush();
+    // Embedded fonts may only resolve after flush; expand the captured refs then.
+    pruneReplacedObjects(pdf, referencedObjects(pdf, [...replaced]));
+    // Append only what changed to the original bytes; rewrite the file when that is not possible.
+    bytes = incrementalBytes(seed, pdf, tracking!.tracker) ?? (await pdf.save(pdfSaveOptions(pdf)));
+  } finally {
+    tracking?.stop();
   }
-  if (changes.choices?.size) {
-    await writeChoices(pdf, fields, changes.choices, () => getFont('sans'));
-  }
-  writeInk(pdf, changes.strokes, changes.deletedStrokes);
-  if (changes.marks?.size || changes.deletedMarks?.size) {
-    writeMarks(pdf, changes.marks ?? new Map(), changes.deletedMarks ?? new Set());
-  }
-  if (changes.shapes?.size || changes.deletedShapes?.size) {
-    writeShapes(pdf, changes.shapes ?? new Map(), changes.deletedShapes ?? new Set());
-  }
-  if (changes.images?.size || changes.deletedImages?.size) {
-    await writeImages(pdf, changes.images ?? new Map(), changes.deletedImages ?? new Set());
-  }
-  await pdf.flush();
-  // Embedded fonts may only resolve after flush; expand the captured refs then.
-  pruneReplacedObjects(pdf, referencedObjects(pdf, [...replaced]));
-  const bytes = await pdf.save(pdfSaveOptions(pdf));
   // Reopen and verify logical values, widget appearances, and page count before any vault write.
   const verified = await loadPdfDocument(bytes);
   const saved = fieldIndex(verified.getForm());
