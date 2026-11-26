@@ -24,6 +24,8 @@ export interface ToolPreferences {
   snapToText: boolean;
   autoDetectLines: boolean;
   flowAnswerLines: boolean;
+  /** Replace the native viewer for every PDF. Off keeps Obsidian's viewer (and plugins such as PDF++) until editing is switched on. */
+  openInEditor: boolean;
 }
 /** Normalize persisted tool defaults, replacing malformed or out-of-range values with supported defaults. */
 export function loadToolPreferences(value: unknown): ToolPreferences {
@@ -49,6 +51,7 @@ export function loadToolPreferences(value: unknown): ToolPreferences {
     snapToText: false,
     autoDetectLines: false,
     flowAnswerLines: true,
+    openInEditor: false,
   };
   if (!value || typeof value !== 'object') {
     return result;
@@ -135,6 +138,7 @@ export function loadToolPreferences(value: unknown): ToolPreferences {
     'snapToText',
     'autoDetectLines',
     'flowAnswerLines',
+    'openInEditor',
   ] as const) {
     if (typeof saved[key] === 'boolean') {
       result[key] = saved[key];

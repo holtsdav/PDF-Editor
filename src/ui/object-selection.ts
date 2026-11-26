@@ -1,3 +1,4 @@
+import { shapeArea } from '../pdf/text-session';
 import { Component, Scope } from 'obsidian';
 import type { App } from 'obsidian';
 import { labelOverlay } from './overlay-label';
@@ -173,7 +174,16 @@ export class ObjectSelection extends Component {
     const ink = this.session.snapshot.strokes
       .filter((stroke) => stroke.page === page && !stroke.readOnly && !stroke.hidden)
       .map((stroke) => ({ object: { kind: 'ink' as const, id: stroke.id }, rect: stroke.rect }));
-    return [...text, ...ink];
+    const shapes = (this.session.snapshot.shapes ?? [])
+      .filter((shape) => shape.page === page && !shape.locked)
+      .map((shape) => ({
+        object: { kind: 'shape' as const, id: shape.id },
+        rect: shapeArea(shape),
+      }));
+    const images = (this.session.snapshot.images ?? [])
+      .filter((image) => image.page === page && !image.locked)
+      .map((image) => ({ object: { kind: 'image' as const, id: image.id }, rect: image.box }));
+    return [...text, ...ink, ...shapes, ...images];
   }
   /** Track selected geometry once instead of rescanning every document page on each pointer move. */
   private model(): string {
@@ -195,6 +205,17 @@ export class ObjectSelection extends Component {
       ...this.session.snapshot.strokes
         .filter((stroke) => !stroke.readOnly && !stroke.hidden && this.has('ink', stroke.id))
         .map((stroke) => ({ kind: 'ink', id: stroke.id, page: stroke.page, rect: stroke.rect })),
+      ...(this.session.snapshot.shapes ?? [])
+        .filter((shape) => this.has('shape', shape.id))
+        .map((shape) => ({
+          kind: 'shape',
+          id: shape.id,
+          page: shape.page,
+          rect: shapeArea(shape),
+        })),
+      ...(this.session.snapshot.images ?? [])
+        .filter((image) => this.has('image', image.id))
+        .map((image) => ({ kind: 'image', id: image.id, page: image.page, rect: image.box })),
     ]);
   }
   private signature(entry: PageSelection): string {
@@ -246,6 +267,12 @@ export class ObjectSelection extends Component {
       ...this.session.snapshot.strokes
         .filter((stroke) => !stroke.readOnly && !stroke.hidden)
         .map((stroke) => `ink:${stroke.id}`),
+      ...(this.session.snapshot.shapes ?? [])
+        .filter((shape) => !shape.locked)
+        .map((shape) => `shape:${shape.id}`),
+      ...(this.session.snapshot.images ?? [])
+        .filter((image) => !image.locked)
+        .map((image) => `image:${image.id}`),
     ]);
     const next = this.objects.filter((object) => ids.has(key(object)));
     if (next.length !== this.objects.length) {
@@ -267,14 +294,33 @@ export class ObjectSelection extends Component {
         return;
       }
       const target = event.target as Element;
-      if (target.closest('[data-ink-resize]')) {
+      // Comment popovers and other editor controls on the page keep their own pointer
+      // handling; starting a marquee there would block focusing their text fields.
+      if (target.closest('[data-ink-resize], .pfs-mark-ui')) {
         return;
       }
+      // Shapes and pictures join a group with Shift+click, and drag the group when selected.
+      const shapeId = target.closest<SVGElement>('.pfs-shape-hit')
+        ? target.closest<SVGElement>('[data-shape-id]')?.dataset.shapeId
+        : undefined;
+      const imageId = target.closest('.pfs-image-handle')
+        ? undefined
+        : target.closest<HTMLElement>('[data-image-id]')?.dataset.imageId;
+      const member: PdfObject | undefined = shapeId
+        ? { kind: 'shape', id: shapeId }
+        : imageId
+          ? { kind: 'image', id: imageId }
+          : undefined;
+      const usable =
+        member && this.items(page.number).some((item) => key(item.object) === key(member));
       if (
-        target.closest(
-          'a, button, .pfs-text-layer span, .textLayer span, .annotationLayer, .pfs-answer-suggestions',
+        !(usable && (event.shiftKey || this.has(member.kind, member.id))) &&
+        (target.closest(
+          'a, button, select, .pfs-choice, .pfs-shape-hit, .pfs-shape-handle, .pfs-image, .annotationLayer, .pfs-answer-suggestions',
         ) ||
-        target.closest('.is-editing')
+          // Printed text stays selectable for highlighting; Shift+drag over it draws a marquee.
+          (!event.shiftKey && target.closest('.pfs-text-layer span, .textLayer span')) ||
+          target.closest('.is-editing'))
       ) {
         this.clear();
         return;
@@ -295,7 +341,9 @@ export class ObjectSelection extends Component {
         ? { kind: 'text', id: field }
         : stroke
           ? { kind: 'ink', id: stroke }
-          : undefined;
+          : usable
+            ? member
+            : undefined;
       if (object && !this.items(page.number).some((item) => key(item.object) === key(object))) {
         this.clear();
         return;
@@ -382,7 +430,7 @@ export class ObjectSelection extends Component {
                 .filter(
                   (item) =>
                     intersects(item.rect, rect) &&
-                    (item.object.kind === 'text' || this.hitsInk(item.object.id, rect)),
+                    (item.object.kind !== 'ink' || this.hitsInk(item.object.id, rect)),
                 )
                 .map((item) => item.object)
             : [];
@@ -495,6 +543,16 @@ export class ObjectSelection extends Component {
         );
         frame.classList.toggle('is-multi-selected', selected);
         frame.style.translate = selected ? `${dx}px ${dy}px` : '';
+      }
+      for (const shape of entry.layer.querySelectorAll<SVGElement>('.pfs-shape[data-shape-id]')) {
+        const selected = this.has('shape', shape.dataset.shapeId!);
+        shape.classList.toggle('is-multi-selected', selected);
+        shape.style.translate = selected && g?.move ? `${dx}px ${dy}px` : '';
+      }
+      for (const frame of entry.layer.querySelectorAll<HTMLElement>('.pfs-image[data-image-id]')) {
+        const selected = this.has('image', frame.dataset.imageId!);
+        frame.classList.toggle('is-multi-selected', selected);
+        frame.style.translate = selected && g?.move ? `${dx}px ${dy}px` : '';
       }
       for (const group of entry.layer.querySelectorAll<SVGElement>('[data-pdf-stroke]')) {
         const selected = this.has('ink', group.dataset.pdfStroke!);

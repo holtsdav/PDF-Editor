@@ -20,11 +20,26 @@ import fontkit from '@pdf-lib/fontkit';
 import { multilineAppearance } from './text-appearance.ts';
 import { readInk, verifyInk, writeInk } from './ink-engine.ts';
 import type { InkStroke } from './ink-engine.ts';
-import { defaultColor, validColor, validSpacing } from './text-format.ts';
+import { defaultColor, isPrivateUse, validColor, validSpacing } from './text-format.ts';
 import type { FontFamily, PdfColor, PdfFonts, TextFormat } from './text-format.ts';
 import { referencedObjects, pruneReplacedObjects } from './object-references.ts';
 import { loadPdfDocument, pdfSaveOptions } from './pdf-load.ts';
 import { validRuledLayout } from './ruled-text.ts';
+import {
+  editableChoiceWidgets,
+  readChoices,
+  replacedChoiceAppearances,
+  verifyChoices,
+  writeChoices,
+} from './choice-engine.ts';
+import type { ChoiceField } from './choice-engine.ts';
+import { readMarks, stripMarks, verifyMarks, writeMarks } from './mark-engine.ts';
+import { fieldIndex } from './field-index.ts';
+import { readShapes, stripShapes, verifyShapes, writeShapes } from './shape-engine.ts';
+import type { PdfShape } from './shape-engine.ts';
+import { readImages, stripImages, verifyImages, writeImages } from './image-engine.ts';
+import type { PdfImage } from './image-engine.ts';
+import type { PdfMark } from './mark-engine.ts';
 import type { RuledLayout } from './ruled-text';
 
 export const FIELD_PREFIX = 'pdf-form-studio-';
@@ -63,6 +78,13 @@ export interface TextSnapshot {
   pages: Rect[];
   fields: TextField[];
   strokes: InkStroke[];
+  /** Checkboxes, radio groups, dropdowns and list boxes. */
+  choices?: ChoiceField[];
+  /** Text highlights and comment notes made by this plugin. */
+  marks?: PdfMark[];
+  /** Rectangles, ellipses, lines and arrows made by this plugin. */
+  shapes?: PdfShape[];
+  images?: PdfImage[];
 }
 export interface AddedField {
   name: string;
@@ -87,6 +109,15 @@ export interface TextChanges {
   strokes: Map<string, InkStroke>;
   deletedStrokes: Set<string>;
   formats: Map<string, TextFormat>;
+  /** Choice field name to on-state/export value, or '' for off/none. */
+  choices?: Map<string, string>;
+  /** Added or changed highlights/notes by ID, and removed IDs. */
+  marks?: Map<string, PdfMark>;
+  deletedMarks?: Set<string>;
+  shapes?: Map<string, PdfShape>;
+  deletedShapes?: Set<string>;
+  images?: Map<string, PdfImage>;
+  deletedImages?: Set<string>;
 }
 
 async function loadWritable(bytes: Uint8Array): Promise<PDFDocument> {
@@ -496,6 +527,10 @@ export async function readTextPdf(bytes: Uint8Array): Promise<TextSnapshot> {
     }),
     fields,
     strokes: readInk(pdf),
+    choices: readChoices(pdf),
+    marks: readMarks(pdf),
+    shapes: readShapes(pdf),
+    images: readImages(pdf),
   };
 }
 
@@ -508,6 +543,7 @@ export async function writeTextPdf(
   const pdf = await loadWritable(seed);
   pdf.registerFontkit(fontkit);
   const form = pdf.getForm();
+  const fields = fieldIndex(form);
   const replaced = referencedObjects(
     pdf,
     form
@@ -522,7 +558,8 @@ export async function writeTextPdf(
                 (widget) => widget.dict.lookupMaybe(PDFName.of('AP'), PDFDict)?.values() ?? [],
               )
           : [],
-      ),
+      )
+      .concat(replacedChoiceAppearances(pdf, changes.choices ?? new Map())),
   );
   const embedded = new Map<FontFamily, PDFFont>();
   const getFont = async (family: FontFamily): Promise<PDFFont> => {
@@ -537,7 +574,7 @@ export async function writeTextPdf(
     return font;
   };
   for (const name of changes.deleted) {
-    const field = form.getFieldMaybe(name);
+    const field = fields.maybe(name);
     if (!(field instanceof PDFTextField) || !ownedText(field) || !editableText(field)) {
       throw new Error('Only editable text boxes created by this plugin can be deleted.');
     }
@@ -555,6 +592,7 @@ export async function writeTextPdf(
         ),
       }));
       form.removeField(field);
+      fields.forget(name);
       for (const { annotations, refs } of entries) {
         if (annotations) {
           for (let i = annotations.size() - 1; i >= 0; i--) {
@@ -567,7 +605,7 @@ export async function writeTextPdf(
     }
   }
   for (const added of changes.added.values()) {
-    if (!added.name.startsWith(FIELD_PREFIX) || form.getFieldMaybe(added.name)) {
+    if (!added.name.startsWith(FIELD_PREFIX) || fields.has(added.name)) {
       throw new Error('Invalid or duplicate text box ID.');
     }
     const page = pdf.getPages()[added.page - 1];
@@ -579,6 +617,7 @@ export async function writeTextPdf(
       throw new Error('Invalid text box geometry.');
     }
     const field = form.createTextField(added.name);
+    fields.add(field);
     field.acroField.dict.set(PDFName.of('PFSKind'), PDFName.of('Text'));
     if (added.multiline) {
       field.enableMultiline();
@@ -616,7 +655,7 @@ export async function writeTextPdf(
     if (changes.deleted.has(name)) {
       continue;
     }
-    const field = form.getTextField(name);
+    const field = fields.text(name);
     if (!ownedText(field)) {
       throw new Error('Only added text boxes can be moved or resized.');
     }
@@ -656,7 +695,7 @@ export async function writeTextPdf(
     if (changes.deleted.has(name)) {
       continue;
     }
-    const field = form.getTextField(name);
+    const field = fields.text(name);
     const owned = ownedText(field);
     const originalDa = inheritedAppearance(pdf, field);
     const widgetDefaults = field.acroField
@@ -697,7 +736,9 @@ export async function writeTextPdf(
       const code = character.codePointAt(0)!;
       if (code !== 10 && code !== 13 && code !== 9 && !supported.has(code)) {
         throw new Error(
-          `The PDF font cannot render U+${code.toString(16).toUpperCase()}. Your text is kept here; replace the unsupported character before saving.`,
+          isPrivateUse(code)
+            ? `The text contains a special-font symbol (U+${code.toString(16).toUpperCase()}, often a bullet copied from Word or another PDF) that cannot be saved. Your text is kept here; replace that character with a normal one such as • or – before saving.`
+            : `The PDF font cannot render U+${code.toString(16).toUpperCase()}. Your text is kept here; replace the unsupported character before saving.`,
         );
       }
     }
@@ -784,22 +825,39 @@ export async function writeTextPdf(
         .forEach((widget, index) => widget.setDefaultAppearance(widgetDas[index]!));
     }
   }
+  if (changes.choices?.size) {
+    await writeChoices(pdf, fields, changes.choices, () => getFont('sans'));
+  }
   writeInk(pdf, changes.strokes, changes.deletedStrokes);
+  if (changes.marks?.size || changes.deletedMarks?.size) {
+    writeMarks(pdf, changes.marks ?? new Map(), changes.deletedMarks ?? new Set());
+  }
+  if (changes.shapes?.size || changes.deletedShapes?.size) {
+    writeShapes(pdf, changes.shapes ?? new Map(), changes.deletedShapes ?? new Set());
+  }
+  if (changes.images?.size || changes.deletedImages?.size) {
+    await writeImages(pdf, changes.images ?? new Map(), changes.deletedImages ?? new Set());
+  }
   await pdf.flush();
   // Embedded fonts may only resolve after flush; expand the captured refs then.
   pruneReplacedObjects(pdf, referencedObjects(pdf, [...replaced]));
   const bytes = await pdf.save(pdfSaveOptions(pdf));
   // Reopen and verify logical values, widget appearances, and page count before any vault write.
   const verified = await loadPdfDocument(bytes);
+  const saved = fieldIndex(verified.getForm());
   if (verified.getPageCount() !== pdf.getPageCount()) {
     throw new Error('PDF page verification failed.');
   }
   verifyInk(verified, changes.strokes, changes.deletedStrokes);
+  verifyChoices(saved, changes.choices ?? new Map());
+  verifyMarks(verified, changes.marks ?? new Map(), changes.deletedMarks ?? new Set());
+  verifyShapes(verified, changes.shapes ?? new Map(), changes.deletedShapes ?? new Set());
+  verifyImages(verified, changes.images ?? new Map(), changes.deletedImages ?? new Set());
   for (const [name, value] of changes.values) {
     if (changes.deleted.has(name)) {
       continue;
     }
-    const field = verified.getForm().getTextField(name);
+    const field = saved.text(name);
     if ((field.getText() ?? '') !== value) {
       throw new Error(`PDF value verification failed for ${name}.`);
     }
@@ -813,7 +871,7 @@ export async function writeTextPdf(
     if (changes.deleted.has(name)) {
       continue;
     }
-    const field = verified.getForm().getTextField(name);
+    const field = saved.text(name);
     const da = field.acroField.getDefaultAppearance() ?? '';
     if (
       field.acroField.dict.get(PDFName.of('PFSFont'))?.toString() !== '/' + format.fontFamily ||
@@ -839,14 +897,13 @@ export async function writeTextPdf(
   for (const [name, format] of changes.formats) {
     if (
       format.alignment !== undefined &&
-      verified.getForm().getTextField(name).getAlignment() !==
-        { left: 0, center: 1, right: 2 }[format.alignment]
+      saved.text(name).getAlignment() !== { left: 0, center: 1, right: 2 }[format.alignment]
     ) {
       throw new Error('PDF alignment verification failed.');
     }
   }
   for (const name of changes.deleted) {
-    if (verified.getForm().getFieldMaybe(name)) {
+    if (saved.maybe(name)) {
       throw new Error(`PDF deletion verification failed for ${name}.`);
     }
   }
@@ -854,7 +911,7 @@ export async function writeTextPdf(
     if (changes.deleted.has(name)) {
       continue;
     }
-    const field = verified.getForm().getTextField(name);
+    const field = saved.text(name);
     const widget = field.acroField.getWidgets()[0]!;
     const { x, y, width, height } = widget.getRectangle();
     if (
@@ -875,10 +932,7 @@ export async function writeTextPdf(
     if (changes.deleted.has(name)) {
       continue;
     }
-    const layout = verified
-      .getForm()
-      .getTextField(name)
-      .acroField.dict.lookupMaybe(PDFName.of('PFSRuled'), PDFArray);
+    const layout = saved.text(name).acroField.dict.lookupMaybe(PDFName.of('PFSRuled'), PDFArray);
     if (
       expected
         ? !layout ||
@@ -907,6 +961,10 @@ export async function renderTextPdf(seed: Uint8Array): Promise<Uint8Array> {
           : [],
       ),
   );
+  // Editable choice controls are painted live by the editor layer as well.
+  for (const widget of editableChoiceWidgets(pdf)) {
+    textWidgets.add(widget);
+  }
   for (const page of pdf.getPages()) {
     const annotations = page.node.Annots();
     if (!annotations) {
@@ -929,6 +987,9 @@ export async function renderTextPdf(seed: Uint8Array): Promise<Uint8Array> {
       }
     }
   }
+  stripMarks(pdf);
+  stripShapes(pdf);
+  stripImages(pdf);
   return pdf.save(pdfSaveOptions(pdf));
 }
 function readInkId(dict: PDFDict): string | undefined {

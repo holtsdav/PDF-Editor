@@ -400,3 +400,9 @@ test('persisted colors require three finite numeric components and are copied', 
   color[0] = 1;
   assert.deepEqual(loaded.textColor, [0, 0.5, 1]);
 });
+
+test('PDFs keep the native viewer by default and the editor default persists when switched on', () => {
+  assert.equal(loadToolPreferences(null).openInEditor, false);
+  assert.equal(loadToolPreferences({ openInEditor: true }).openInEditor, true);
+  assert.equal(loadToolPreferences({ openInEditor: 'yes' }).openInEditor, false);
+});
