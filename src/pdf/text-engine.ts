@@ -121,6 +121,9 @@ export interface TextChanges {
   deletedImages?: Set<string>;
 }
 
+/** Autosave runs while the user types: let input and painting in between save phases. */
+const yieldToInput = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
 async function loadWritable(
   bytes: Uint8Array,
   loaded?: (pdf: PDFDocument) => void,
@@ -553,6 +556,7 @@ export async function writeTextPdf(
     pdf = await loadWritable(seed, (loaded) => {
       tracking = trackChanges(loaded, seed);
     });
+    await yieldToInput();
     pdf.registerFontkit(fontkit);
     const form = pdf.getForm();
     const fields = fieldIndex(form);
@@ -854,13 +858,16 @@ export async function writeTextPdf(
       await writeImages(pdf, changes.images ?? new Map(), changes.deletedImages ?? new Set());
     }
     await pdf.flush();
+    await yieldToInput();
     // Embedded fonts may only resolve after flush; expand the captured refs then.
     pruneReplacedObjects(pdf, referencedObjects(pdf, [...replaced]));
+    await yieldToInput();
     // Append only what changed to the original bytes; rewrite the file when that is not possible.
     bytes = incrementalBytes(seed, pdf, tracking!.tracker) ?? (await pdf.save(pdfSaveOptions(pdf)));
   } finally {
     tracking?.stop();
   }
+  await yieldToInput();
   // Reopen and verify logical values, widget appearances, and page count before any vault write.
   const verified = await loadPdfDocument(bytes);
   const saved = fieldIndex(verified.getForm());

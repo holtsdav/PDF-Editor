@@ -289,7 +289,11 @@ function readIndexedObject(
 }
 
 /** Build only indexed objects; obsolete compressed payloads remain opaque on later saves. */
-function loadIndexedObjects(pdf: PDFDocument, bytes: Uint8Array, index: ClassicIndex): void {
+async function loadIndexedObjects(
+  pdf: PDFDocument,
+  bytes: Uint8Array,
+  index: ClassicIndex,
+): Promise<void> {
   const context = pdf.context;
   const header = /%PDF-(\d+)\.(\d+)/.exec(decoder.decode(bytes.subarray(0, 1024)));
   if (!header) {
@@ -303,7 +307,11 @@ function loadIndexedObjects(pdf: PDFDocument, bytes: Uint8Array, index: ClassicI
   const activeEntries = [...index.entries]
     .filter(([, entry]) => entry.active)
     .sort((a, b) => a[1].offset - b[1].offset);
-  for (const [number, entry] of activeEntries) {
+  for (const [position, [number, entry]] of activeEntries.entries()) {
+    // Give typing and painting a turn while large files load (autosave reloads twice).
+    if (position && position % OBJECTS_PER_TICK === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
     const object = readIndexedObject(bytes, context, number, entry);
     if (
       object instanceof PDFStream &&
@@ -365,7 +373,7 @@ export async function loadPdfDocument(bytes: Uint8Array): Promise<PDFDocument> {
   if (encryption !== undefined && encryption !== PDFNull) {
     throw new Error('Encrypted PDFs are read only in this version.');
   }
-  loadIndexedObjects(pdf, bytes, index);
+  await loadIndexedObjects(pdf, bytes, index);
   populateCatalog(pdf);
   return pdf;
 }
