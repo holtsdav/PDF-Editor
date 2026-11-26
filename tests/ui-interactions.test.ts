@@ -2077,3 +2077,84 @@ test('snapped marker preview and saved PDF use the selected thickness as a minim
     }
   }
 });
+
+test('checkboxes, radio buttons and dropdowns are clickable on the page and autosave', async () => {
+  const pdf = await PDFDocument.create();
+  const page = pdf.addPage([600, 800]);
+  const form = pdf.getForm();
+  form.createCheckBox('agree').addToPage(page, { x: 40, y: 700, width: 16, height: 16 });
+  const radio = form.createRadioGroup('size');
+  radio.addOptionToPage('small', page, { x: 40, y: 650, width: 14, height: 14 });
+  radio.addOptionToPage('large', page, { x: 90, y: 650, width: 14, height: 14 });
+  const dropdown = form.createDropdown('country');
+  dropdown.addOptions(['Germany', 'Austria']);
+  dropdown.addToPage(page, { x: 40, y: 600, width: 160, height: 20 });
+  const locked = form.createCheckBox('locked');
+  locked.addToPage(page, { x: 40, y: 550, width: 16, height: 16 });
+  locked.enableReadOnly();
+  const f = await fixture(1, false, 0, await pdf.save());
+  try {
+    const checkbox = f.doc.querySelector<HTMLButtonElement>('button.pfs-choice-checkbox')!;
+    assert.ok(checkbox, 'editable checkbox is painted');
+    assert.equal(
+      f.doc.querySelectorAll('button.pfs-choice-checkbox').length,
+      1,
+      'read-only stays in background',
+    );
+    assert.equal(checkbox.getAttribute('aria-checked'), 'false');
+    // Placed over the PDF widget rectangle, including pdf-lib's half-border padding.
+    assert.deepEqual(
+      [checkbox.style.left, checkbox.style.top, checkbox.style.width, checkbox.style.height],
+      ['39.5px', '83.5px', '17px', '17px'],
+    );
+    checkbox.click();
+    assert.equal(checkbox.getAttribute('aria-checked'), 'true');
+    assert.equal(checkbox.textContent, '✔');
+    checkbox.click();
+    assert.equal(checkbox.getAttribute('aria-checked'), 'false');
+    checkbox.click();
+
+    const radios = [...f.doc.querySelectorAll<HTMLButtonElement>('button.pfs-choice-radio')];
+    assert.equal(radios.length, 2);
+    radios[1]!.click();
+    assert.deepEqual(
+      radios.map((button) => button.getAttribute('aria-checked')),
+      ['false', 'true'],
+    );
+    radios[0]!.click();
+    assert.deepEqual(
+      radios.map((button) => button.getAttribute('aria-checked')),
+      ['true', 'false'],
+    );
+
+    const select = f.doc.querySelector<HTMLSelectElement>('select.pfs-choice-select')!;
+    assert.deepEqual(
+      [...select.options].map((option) => option.value),
+      ['', 'Germany', 'Austria'],
+    );
+    select.value = 'Austria';
+    select.dispatchEvent(new f.doc.defaultView!.Event('change', { bubbles: true }));
+    assert.equal(
+      f.session.snapshot.choices!.find((field) => field.name === 'country')!.value,
+      'Austria',
+    );
+
+    // Undo reverts the last choice and the control follows.
+    f.session.undoStroke();
+    f.editor.refresh();
+    assert.equal(select.value, '');
+
+    select.value = 'Germany';
+    select.dispatchEvent(new f.doc.defaultView!.Event('change', { bubbles: true }));
+    await pause(1100);
+    await f.session.save();
+    assert.equal(f.session.status, 'saved');
+    const saved = (await PDFDocument.load(f.bytes())).getForm();
+    assert.equal(saved.getCheckBox('agree').isChecked(), true);
+    assert.equal(saved.getRadioGroup('size').getSelected(), 'small');
+    assert.deepEqual(saved.getDropdown('country').getSelected(), ['Germany']);
+    assert.equal(saved.getCheckBox('locked').isChecked(), false);
+  } finally {
+    f.dispose();
+  }
+});

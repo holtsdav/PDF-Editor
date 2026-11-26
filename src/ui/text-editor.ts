@@ -19,6 +19,7 @@ import { RecoveryPreview } from './recovery-preview';
 import { ToolPopover } from './tool-popover';
 import { ruledAnswerBlock } from '../pdf/ruled-text';
 import { labelOverlay } from './overlay-label';
+import type { ChoiceField, ChoiceWidget } from '../pdf/choice-engine';
 
 interface AnswerLine {
   page: number;
@@ -53,10 +54,15 @@ interface FieldControl {
   dispose?: () => void;
   cancel?: () => void;
 }
+interface ChoiceControl {
+  frame: HTMLElement;
+  select?: HTMLSelectElement;
+}
 interface PageLayer {
   page: NativePage;
   layer: HTMLElement;
   controls: Map<string, FieldControl>;
+  choices?: Map<string, ChoiceControl>;
   ink: InkLayer;
   cancelPlacement?: () => void;
   placing?: () => boolean;
@@ -2214,7 +2220,7 @@ export class TextEditor extends Component {
             error: (error) => this.showError(error),
           }),
         );
-        entry = { page, layer, controls: new Map(), ink };
+        entry = { page, layer, controls: new Map(), choices: new Map(), ink };
         this.layers.set(page.div, entry);
         this.bindPlacement(entry);
       }
@@ -2286,6 +2292,7 @@ export class TextEditor extends Component {
             (field.owned && field.widgets.length !== 1),
         );
       }
+      this.refreshChoices(entry);
       // Explicit reload/recovery can replace pages. Restore focus only when
       // the user has not deliberately moved it elsewhere.
       const active = page.div.ownerDocument.activeElement;
@@ -2311,6 +2318,154 @@ export class TextEditor extends Component {
     }
     this.selection?.update(pages);
     this.popover?.refreshSpacing();
+  }
+
+  /** Paint checkboxes, radio buttons, dropdowns and list boxes for one page. */
+  private refreshChoices(entry: PageLayer): void {
+    const session = this.session;
+    const controls = (entry.choices ??= new Map());
+    const widgets = (session?.snapshot.choices ?? [])
+      .filter((field) => !field.readOnly)
+      .flatMap((field) =>
+        field.widgets.flatMap((widget, index) =>
+          widget.page === entry.page.number
+            ? [{ field, widget, key: `${field.name}:${index}` }]
+            : [],
+        ),
+      );
+    const keys = new Set(widgets.map(({ key }) => key));
+    for (const [key, control] of controls) {
+      if (!keys.has(key)) {
+        control.frame.remove();
+        controls.delete(key);
+      }
+    }
+    const locked = !session || session.status === 'conflict' || session.replacing;
+    const drawing = this.tool === 'marker' || this.tool === 'scribble' || this.tool === 'eraser';
+    for (const { field, widget, key } of widgets) {
+      let control = controls.get(key);
+      if (!control) {
+        control = this.mountChoice(entry, field.name, key);
+        controls.set(key, control);
+      }
+      this.positionChoice(entry, control, field, widget, locked, drawing);
+    }
+  }
+
+  private mountChoice(entry: PageLayer, name: string, key: string): ChoiceControl {
+    const doc = entry.layer.ownerDocument;
+    const field = () => this.session?.snapshot.choices?.find((item) => item.name === name);
+    const index = Number(key.slice(key.lastIndexOf(':') + 1));
+    const apply = (value: string) => {
+      try {
+        this.session!.setChoice(name, value);
+        this.updateStatus();
+        this.refresh();
+        this.scheduleSave();
+      } catch (error) {
+        this.showError(error);
+      }
+    };
+    const stop = (event: Event) => event.stopPropagation();
+    const kind = field()?.kind;
+    let control: ChoiceControl;
+    if (kind === 'checkbox' || kind === 'radio') {
+      const button = doc.createElement('button');
+      button.type = 'button';
+      button.className = `pfs-choice pfs-choice-${kind}`;
+      button.setAttribute('role', kind);
+      button.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const current = field();
+        const onValue = current?.widgets[index]?.onValue;
+        if (!current || onValue === undefined) {
+          return;
+        }
+        // Checkboxes toggle; radio buttons switch the group to this option.
+        apply(kind === 'checkbox' && current.value === onValue ? '' : onValue);
+      });
+      control = { frame: button };
+    } else {
+      const frame = doc.createElement('div');
+      frame.className = `pfs-choice pfs-choice-${kind ?? 'dropdown'}`;
+      const select = doc.createElement('select');
+      select.className = 'pfs-choice-select';
+      select.addEventListener('change', () => apply(select.value));
+      frame.append(select);
+      control = { frame, select };
+    }
+    for (const type of ['pointerdown', 'mousedown', 'dblclick', 'keydown'] as const) {
+      control.frame.addEventListener(type, stop);
+    }
+    labelOverlay(control.frame, name);
+    entry.layer.append(control.frame);
+    return control;
+  }
+
+  private positionChoice(
+    entry: PageLayer,
+    control: ChoiceControl,
+    field: ChoiceField,
+    widget: ChoiceWidget,
+    locked: boolean,
+    drawing: boolean,
+  ): void {
+    const { frame, select } = control;
+    const scale = entry.page.viewport.scale;
+    const [left, top, right, bottom] = screenRectangle(entry.page.viewport, widget.rect);
+    const angle = (((entry.page.viewport.rotation - widget.rotation) % 360) + 360) % 360;
+    const width = angle === 90 || angle === 270 ? bottom - top : right - left;
+    const height = angle === 90 || angle === 270 ? right - left : bottom - top;
+    frame.style.left = `${angle === 90 || angle === 180 ? right : left}px`;
+    frame.style.top = `${angle === 180 || angle === 270 ? bottom : top}px`;
+    frame.style.width = `${width}px`;
+    frame.style.height = `${height}px`;
+    frame.style.transform = `rotate(${angle}deg)`;
+    frame.style.backgroundColor = widget.backgroundColor ? cssColor(widget.backgroundColor) : '';
+    frame.style.borderColor = widget.borderColor ? cssColor(widget.borderColor) : '';
+    frame.style.borderWidth = widget.borderColor
+      ? `${Math.max(1, (widget.borderWidth ?? 1) * scale)}px`
+      : '';
+    frame.tabIndex = drawing ? -1 : 0;
+    frame.classList.toggle('is-locked', locked);
+    if (!select) {
+      const on = !!field.value && field.value === widget.onValue;
+      const button = frame as HTMLButtonElement;
+      button.disabled = locked;
+      button.textContent = on ? (widget.mark ?? '✔') : '';
+      button.setAttribute('aria-checked', String(on));
+      button.style.fontSize = `${Math.min(width, height) * 0.8}px`;
+      button.classList.toggle('is-round', field.kind === 'radio' && widget.mark === '●');
+      setTooltip(
+        button,
+        widget.label && field.kind === 'radio' ? `${field.name}: ${widget.label}` : field.name,
+      );
+      return;
+    }
+    const options = [{ value: '', label: '—' }, ...field.options];
+    if (field.value && !field.options.some((option) => option.value === field.value)) {
+      options.push({ value: field.value, label: field.value });
+    }
+    const signature = JSON.stringify(options);
+    if (select.dataset.options !== signature) {
+      select.replaceChildren(
+        ...options.map(({ value, label }) => {
+          const option = select.ownerDocument.createElement('option');
+          option.value = value;
+          option.textContent = label;
+          return option;
+        }),
+      );
+      select.dataset.options = signature;
+    }
+    if (select.value !== field.value) {
+      select.value = field.value;
+    }
+    select.disabled = locked;
+    select.tabIndex = drawing ? -1 : 0;
+    const size = widget.fontSize ?? Math.min(12, (widget.rect[3] - widget.rect[1]) * 0.6);
+    select.style.fontSize = `${Math.max(6, size) * scale}px`;
   }
 
   private positionField(

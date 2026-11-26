@@ -395,12 +395,16 @@ test('gesture ownership prevents cancellation in another view from losing marks'
   assert.equal((await readTextPdf(file.bytes())).strokes.length, 1);
 });
 
-test('the controlled background excludes editable text appearances and retains checkbox widgets', async () => {
+test('the controlled background excludes editable text and choice appearances and retains read-only checkboxes', async () => {
   const file = await fixture();
   const pdf = await PDFDocument.load(file.bytes());
   const checkbox = pdf.getForm().createCheckBox('Check');
   checkbox.addToPage(pdf.getPages()[0]!, { x: 30, y: 30, width: 20, height: 20 });
   checkbox.check();
+  checkbox.enableReadOnly();
+  // Editable checkboxes are painted live by the editor layer instead.
+  const editable = pdf.getForm().createCheckBox('Editable');
+  editable.addToPage(pdf.getPages()[0]!, { x: 60, y: 30, width: 20, height: 20 });
   const copy = await PDFDocument.load(await renderTextPdf(await pdf.save()));
   const textWidgets = copy
     .getForm()
@@ -415,4 +419,5 @@ test('the controlled background excludes editable text appearances and retains c
   assert(!annots.some((dict) => textWidgets.includes(dict as PDFDict)));
   assert(annots.includes(copy.getForm().getCheckBox('Check').acroField.getWidgets()[0]!.dict));
   assert.equal(copy.getForm().getCheckBox('Check').isChecked(), true);
+  assert(!annots.includes(copy.getForm().getCheckBox('Editable').acroField.getWidgets()[0]!.dict));
 });
