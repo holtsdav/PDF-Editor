@@ -4764,7 +4764,16 @@ export class TextEditor extends Component {
     const color = widget?.color ?? field.color;
     const size = widget?.fontSize ?? field.fontSize;
     input.style.color = cssColor(color);
-    input.style.caretColor = cssColor(color);
+    // The caret follows the text colour unless that would be hard to see (white or pale
+    // text on the page or the field's own background), then it is dark or light instead.
+    const behind = widget?.appearance?.backgroundColor ?? [1, 1, 1];
+    const luminance = (c: PdfColor) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    input.style.caretColor =
+      Math.abs(luminance(color) - luminance(behind)) >= 0.35
+        ? cssColor(color)
+        : luminance(behind) > 0.5
+          ? '#161616'
+          : '#ffffff';
     input.style.fontSize = `${size * entry.page.viewport.scale}px`;
     input.style.textAlign = field.alignment ?? 'left';
     const appearance = widget?.appearance;

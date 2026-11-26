@@ -1,3 +1,10 @@
+:root {
+  /* Dark I-beam with a white outline: visible on white paper with any cursor theme. */
+  --pfs-text-cursor:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='24' viewBox='0 0 16 24'%3E%3Cpath d='M5 2h6M8 2v20M5 22h6' fill='none' stroke='%23fff' stroke-width='4' stroke-linecap='round'/%3E%3Cpath d='M5 2h6M8 2v20M5 22h6' fill='none' stroke='%23111' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E")
+      8 12,
+    text;
+}
 .pdf-form-studio-file {
   color: var(--text-muted);
   overflow-wrap: anywhere;
@@ -110,7 +117,7 @@
 }
 .pdf-form-studio-layer[data-tool='text'] {
   pointer-events: auto;
-  cursor: text;
+  cursor: var(--pfs-text-cursor);
   touch-action: none;
 }
 .pdf-form-studio-layer[data-tool='marker'],
@@ -142,7 +149,7 @@
   outline-color: #8b8b8b;
 }
 .pdf-form-studio-box.is-form-field {
-  cursor: text;
+  cursor: var(--pfs-text-cursor);
 }
 .pdf-form-studio-box:hover {
   outline-color: #8b8b8b;
@@ -162,7 +169,7 @@
   cursor: move;
 }
 .pdf-form-studio-box.is-answer-field {
-  cursor: text;
+  cursor: var(--pfs-text-cursor);
 }
 .pdf-form-studio-box.is-added.is-overflow.is-selected {
   outline-color: #c03434;
@@ -207,7 +214,7 @@
   color: #161616;
 }
 .pdf-form-studio-box > .pdf-form-studio-field {
-  cursor: text;
+  cursor: var(--pfs-text-cursor);
 }
 .pdf-form-studio-view .pdf-form-studio-box > button.pdf-form-studio-handle {
   display: none;
@@ -738,7 +745,7 @@
   color: transparent;
   position: absolute;
   white-space: pre;
-  cursor: text;
+  cursor: var(--pfs-text-cursor);
   transform-origin: 0% 0%;
 }
 .pfs-text-layer > :not(.markedContent),
@@ -1046,7 +1053,7 @@
 .pfs-page button.pfs-answer-suggestion {
   position: absolute;
   pointer-events: auto;
-  cursor: text;
+  cursor: var(--pfs-text-cursor);
   padding: 0;
   min-height: 0;
   border: 1px dashed #1476e5;
