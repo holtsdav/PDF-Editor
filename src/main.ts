@@ -1,5 +1,4 @@
-import { FuzzySuggestModal, Modal, Notice, Plugin, TFile } from 'obsidian';
-import type { View } from 'obsidian';
+import { FuzzySuggestModal, Modal, Notice, Plugin, TFile, View } from 'obsidian';
 import { PdfInspectionModal } from './ui/pdf-inspection-modal';
 import { findNativePdfs, watchNativePdfs } from './compat/native-pdf';
 import { PdfSurface } from './ui/pdf-surface';
@@ -69,6 +68,15 @@ export default class PdfEditor extends Plugin {
   }
 
   /** Pencil button in every PDF tab header that switches between the native viewer and the editor. */
+  /** The editor in the active tab (or an embed in the active note), preferring the focused one. */
+  private activeSurface(): PdfSurface | undefined {
+    const container = this.app.workspace.getActiveViewOfType(View)?.containerEl;
+    const surfaces = [...this.editors.values()].filter(
+      (surface) => !!container && surface.isWithin(container),
+    );
+    return surfaces.find((surface) => surface.hasFocus()) ?? surfaces[0];
+  }
+
   private syncHeaderActions(): void {
     for (const leaf of this.app.workspace.getLeavesOfType('pdf')) {
       const view = leaf.view as View & { file?: TFile | null };
@@ -78,7 +86,7 @@ export default class PdfEditor extends Plugin {
           view as View & {
             addAction(icon: string, title: string, callback: () => void): HTMLElement;
           }
-        ).addAction('pencil', 'Edit PDF form', () => {
+        ).addAction('pencil', 'Edit in PDF Editor', () => {
           if (view.file) {
             this.toggleEditing(view.file);
           }
@@ -91,7 +99,7 @@ export default class PdfEditor extends Plugin {
         action.toggleClass('is-active', on);
         action.setAttribute(
           'aria-label',
-          on ? "Back to Obsidian's PDF viewer (PDF++)" : 'Edit PDF form',
+          on ? "Open in Obsidian's PDF viewer" : 'Edit in PDF Editor',
         );
       }
     }
@@ -154,12 +162,12 @@ export default class PdfEditor extends Plugin {
     );
     this.addCommand({
       id: 'show-pdf-highlights',
-      name: 'Show highlights and comments of the PDF',
+      name: 'Show highlights and comments',
       callback: () => void this.showAnnotations(),
     });
     this.addCommand({
       id: 'export-pdf-highlights',
-      name: 'Export highlights and comments of the current PDF to a note',
+      name: 'Export highlights and comments to a note',
       checkCallback: (checking) => {
         const file = this.app.workspace.getActiveFile();
         if (file?.extension.toLowerCase() !== 'pdf') {
@@ -173,7 +181,7 @@ export default class PdfEditor extends Plugin {
     });
     this.addCommand({
       id: 'toggle-pdf-editing',
-      name: "Toggle editing for the current PDF (switch with Obsidian's viewer and PDF++)",
+      name: 'Toggle editing of this PDF',
       checkCallback: (checking) => {
         const file = this.app.workspace.getActiveFile();
         if (file?.extension.toLowerCase() !== 'pdf') {
@@ -185,9 +193,29 @@ export default class PdfEditor extends Plugin {
         return true;
       },
     });
+    // Editing actions for the PDF in the active tab or note, so they can get hotkeys.
+    for (const [action, name] of [
+      ['select', 'Select tool'],
+      ['text', 'Text box tool'],
+      ['marker', 'Highlighter tool'],
+      ['scribble', 'Pen tool'],
+      ['eraser', 'Eraser tool'],
+      ['note', 'Note tool'],
+      ['shape', 'Shape tool'],
+      ['highlight', 'Highlight selected text'],
+      ['underline', 'Underline selected text'],
+      ['strikeout', 'Strike through selected text'],
+      ['insert-image', 'Insert image…'],
+    ] as const) {
+      this.addCommand({
+        id: `action-${action}`,
+        name,
+        checkCallback: (checking) => this.activeSurface()?.runAction(action, checking) ?? false,
+      });
+    }
     this.addCommand({
       id: 'inspect-pdf-form-fields',
-      name: 'Inspect PDF form fields',
+      name: 'Inspect form fields',
       callback: () => {
         const active = this.app.workspace.getActiveFile();
         if (active?.extension.toLowerCase() === 'pdf') {
@@ -199,7 +227,7 @@ export default class PdfEditor extends Plugin {
     });
     this.addCommand({
       id: 'export-pending-pdf-recovery',
-      name: 'Export pending PDF recovery draft',
+      name: 'Export unsaved recovery draft',
       callback: () => {
         const active = this.app.workspace.getActiveFile();
         if (active?.extension.toLowerCase() === 'pdf') {
@@ -247,20 +275,25 @@ export default class PdfEditor extends Plugin {
         }
         menu.addItem((item) =>
           item
-            .setTitle(this.wantsEditor(file) ? "Open in Obsidian's PDF viewer" : 'Edit PDF form')
+            .setTitle(
+              this.wantsEditor(file) ? "Open in Obsidian's PDF viewer" : 'Edit in PDF Editor',
+            )
             .setIcon('pencil')
+            .setSection('pdf-editor')
             .onClick(() => this.toggleEditing(file)),
         );
         menu.addItem((item) =>
           item
             .setTitle('Export highlights and comments to a note')
             .setIcon('file-output')
+            .setSection('pdf-editor')
             .onClick(() => void exportMarks(this.app, this.sessions, file)),
         );
         menu.addItem((item) =>
           item
-            .setTitle('Inspect PDF form fields')
+            .setTitle('Inspect form fields')
             .setIcon('file-search')
+            .setSection('pdf-editor')
             .onClick(() => this.inspect(file)),
         );
       }),

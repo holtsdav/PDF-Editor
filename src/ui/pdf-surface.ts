@@ -11,6 +11,7 @@ import type { NativePage, NativePdf, EditorSurface } from '../compat/native-pdf'
 import type { TextSession } from '../pdf/text-session';
 import type { VaultSessions } from '../pdf/vault-sessions';
 import { TextEditor } from './text-editor';
+import type { EditorAction } from './text-editor';
 import { measureTextWords } from './text-geometry';
 import type { TextWord } from '../pdf/marker-text';
 import { renamedPdfPath } from '../pdf/file-name';
@@ -366,6 +367,19 @@ export class PdfSurface extends Component {
     this.queueFloatingToolbar();
     void this.open().catch((error) => this.fail(error));
   }
+  /** Whether this surface sits inside the given element (the active leaf). */
+  isWithin(element: Element): boolean {
+    return element.contains(this.root);
+  }
+
+  hasFocus(): boolean {
+    return this.root.contains(this.root.ownerDocument.activeElement);
+  }
+
+  runAction(action: EditorAction, checking: boolean): boolean {
+    return this.editor?.runAction(action, checking) ?? false;
+  }
+
   get file(): TFile {
     return this.native.file;
   }

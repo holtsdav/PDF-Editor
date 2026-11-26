@@ -430,7 +430,7 @@ export class TextSession {
       throw new Error('This highlight no longer exists.');
     }
     if (update.color && !validColor(update.color)) {
-      throw new Error('Invalid colour.');
+      throw new Error('Invalid color.');
     }
     if (
       (update.comment === undefined || update.comment === mark.comment) &&

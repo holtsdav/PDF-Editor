@@ -392,7 +392,7 @@ test('a 450-page PDF bounds editing layers while retaining an offscreen caret an
 });
 
 test('virtualized pages retain active placement and pen capture until cancelled, without adding history', async () => {
-  for (const tool of ['Add text box', 'Pen']) {
+  for (const tool of ['Text box', 'Pen']) {
     const visible = [1];
     const f = await fixture(450, false, 0, undefined, undefined, visible);
     try {
@@ -833,7 +833,7 @@ test('modifier-wheel zoom cancels text placement before changing its viewport an
       },
     });
     try {
-      f.tool('Add text box');
+      f.tool('Text box');
       f.pointer(layer, 'pointerdown', 80, 180);
       f.pointer(layer, 'pointermove', 240, 280);
       assert(f.doc.querySelector('.pdf-form-studio-placement'));
@@ -869,7 +869,7 @@ test('click and drag Text placement each return to Select after one box', async 
   try {
     const layer = f.doc.querySelector('.pdf-form-studio-layer')!;
     for (const drag of [false, true]) {
-      f.tool('Add text box');
+      f.tool('Text box');
       f.pointer(layer, 'pointerdown', drag ? 340 : 80, drag ? 250 : 180);
       if (drag) {
         f.pointer(layer, 'pointermove', 500, 300);
@@ -883,7 +883,7 @@ test('click and drag Text placement each return to Select after one box', async 
       );
       assert.equal(
         f.doc
-          .querySelector<HTMLButtonElement>('button[aria-label^="Add text box"]')!
+          .querySelector<HTMLButtonElement>('button[aria-label^="Text box"]')!
           .getAttribute('aria-pressed'),
         'false',
       );
@@ -1061,7 +1061,7 @@ test('detected answers use Select, reuse fields and never create boxes from subs
     );
     assert.equal(
       f.doc
-        .querySelector<HTMLButtonElement>('button[aria-label^="Add text box"]')!
+        .querySelector<HTMLButtonElement>('button[aria-label^="Text box"]')!
         .getAttribute('aria-pressed'),
       'false',
     );
@@ -1849,7 +1849,7 @@ test('host-first preview routing preserves typing undo and guards toolbar, compo
     assert.equal(shortcut(input).defaultPrevented, false);
     assert.equal(f.noteUndos(), 0);
     assert.equal(field.value, 'Typing');
-    const pen = f.doc.querySelector<HTMLButtonElement>('[aria-label="Pen"]')!;
+    const pen = f.doc.querySelector<HTMLButtonElement>('[aria-label^="Pen"]')!;
     pen.focus();
     assert.equal(shortcut(pen, { isComposing: true }).defaultPrevented, false);
     assert.equal(f.session.snapshot.fields.length, 1);
@@ -2060,7 +2060,7 @@ test('resize interruptions preserve redo and release autosave without partial ge
         f.doc.querySelector<HTMLButtonElement>('#outside')!.focus();
       }
       if (cancel === 'tool') {
-        f.tool('Add text box');
+        f.tool('Text box');
       }
       if (cancel === 'viewport') {
         f.viewports[0]!.width += 1;
@@ -2283,7 +2283,7 @@ test('selected PDF text is highlighted, commented and saved; notes are placed wi
     assert.ok(f.doc.querySelector('.pfs-mark-badge'), 'commented highlights show a badge');
 
     // Note tool: click places a note and opens its comment box.
-    f.tool('Add comment note');
+    f.tool('Note');
     const layer = f.doc.querySelector<HTMLElement>('.pdf-form-studio-layer')!;
     assert.equal(layer.dataset.tool, 'note');
     f.pointer(layer, 'pointerdown', 400, 200);
@@ -2296,7 +2296,7 @@ test('selected PDF text is highlighted, commented and saved; notes are placed wi
     assert.ok(f.doc.querySelector('.pfs-mark-note'));
 
     // A note closed without text is discarded.
-    f.tool('Add comment note');
+    f.tool('Note');
     f.pointer(layer, 'pointerdown', 300, 300);
     f.doc.querySelector<HTMLButtonElement>('.pfs-mark-popover .pfs-mark-done')!.click();
     assert.equal(f.session.snapshot.marks!.length, 2);
@@ -2424,7 +2424,7 @@ test('the toolbar highlight button highlights selected PDF text in the chosen co
     select();
     await ready();
     // Pick blue from the colour menu: with text selected this highlights immediately.
-    f.tool('Highlight colour');
+    f.tool('Highlight color');
     // The menu is a document-level portal: inside the scrolling toolbar it would be clipped.
     const menu = f.doc.querySelector<HTMLElement>('.pfs-highlight-colors')!;
     assert.equal(menu.parentElement, f.doc.body);
@@ -2461,11 +2461,7 @@ test('the toolbar highlight button highlights selected PDF text in the chosen co
     // Highlight + comment on highlighted text opens its comment box.
     select();
     await ready();
-    press(
-      f.doc.querySelector<HTMLButtonElement>(
-        'button[aria-label="Highlight selected text and comment"]',
-      )!,
-    );
+    press(f.doc.querySelector<HTMLButtonElement>('button[aria-label="Highlight and comment"]')!);
     assert.ok(f.doc.querySelector('.pfs-mark-popover textarea'));
     assert.equal(f.session.snapshot.marks!.length, 1);
     // Underline and strikethrough buttons add red lines; pressing again removes them.

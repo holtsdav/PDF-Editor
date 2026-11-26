@@ -68,6 +68,29 @@ const LINE_COLORS: { name: string; color: PdfColor }[] = [
 const colorsFor = (kind: MarkKind) =>
   kind === 'underline' || kind === 'strikeout' ? LINE_COLORS : MARK_COLORS;
 const MARK_UI = '.pfs-mark-ui';
+/** Key names as the platform shows them: Ctrl+Shift+Z on Windows/Linux, ⌘⇧Z on macOS. */
+const IS_MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
+export function keys(combo: string): string {
+  if (!IS_MAC) {
+    return combo.replace('Mod', 'Ctrl');
+  }
+  return combo
+    .replace('Mod+', '⌘')
+    .replace('Shift+', '⇧')
+    .replace('Alt+', '⌥')
+    .replace('Delete', '⌫');
+}
+const withKeys = (label: string, combo: string) => `${label} (${keys(combo)})`;
+const TOOL_ACTIONS: EditorTool[] = [
+  'select',
+  'text',
+  'marker',
+  'scribble',
+  'eraser',
+  'note',
+  'shape',
+];
+export type EditorAction = EditorTool | 'highlight' | 'underline' | 'strikeout' | 'insert-image';
 type Point = [number, number];
 type HighlightMode = 'toggle' | 'color' | 'comment';
 
@@ -325,18 +348,18 @@ export class TextEditor extends Component {
       parent.append(element);
       return element;
     };
-    for (const [tool, label, icon] of [
-      ['select', 'Select', 'mouse-pointer-2'],
-      ['text', 'Add text box', 'type'],
-      ['marker', 'Highlighter', 'highlighter'],
-      ['scribble', 'Pen', 'pencil'],
-      ['eraser', 'Eraser', 'eraser'],
-      ['note', 'Add comment note', 'message-square-plus'],
-      ['shape', 'Draw shapes', 'square'],
+    for (const [tool, label, icon, key] of [
+      ['select', 'Select', 'mouse-pointer-2', 'V'],
+      ['text', 'Text box', 'type', 'T'],
+      ['marker', 'Highlighter', 'highlighter', 'H'],
+      ['scribble', 'Pen', 'pencil', 'P'],
+      ['eraser', 'Eraser', 'eraser', 'E'],
+      ['note', 'Note', 'sticky-note', 'N'],
+      ['shape', 'Shape', 'square', 'R'],
     ] as const) {
       this.tools.set(
         tool,
-        button(this.toolbar, label, icon, () => {
+        button(this.toolbar, `${label} (${key})`, icon, () => {
           if (this.tool === tool) {
             this.closePopover();
           } else {
@@ -353,9 +376,7 @@ export class TextEditor extends Component {
         );
         options.classList.add('pfs-shape-options-button');
         this.register(() => this.closeShapeMenu());
-        button(this.toolbar, 'Insert picture (or paste one with Ctrl+V)', 'image-plus', () =>
-          this.chooseImageFile(),
-        );
+        button(this.toolbar, 'Insert image…', 'image-plus', () => this.chooseImageFile());
       }
     }
     // Highlight the PDF text selected on the page, with a colour menu.
@@ -370,11 +391,11 @@ export class TextEditor extends Component {
     this.highlightButton.classList.add('pfs-highlight-button');
     this.highlightCommentButton = button(
       highlightGroup,
-      'Highlight selected text and comment',
-      'message-square-text',
+      'Highlight and comment',
+      'message-square-plus',
       () => this.highlightSelection('comment'),
     );
-    const colorButton = button(highlightGroup, 'Highlight colour', 'chevron-down', () =>
+    const colorButton = button(highlightGroup, 'Highlight color', 'chevron-down', () =>
       this.toggleHighlightColors(colorButton),
     );
     const underlineButton = button(highlightGroup, 'Underline selected text', 'underline', () =>
@@ -433,7 +454,7 @@ export class TextEditor extends Component {
     this.editControls = doc.createElement('div');
     this.editControls.className = 'pdf-form-studio-edit-controls';
     this.toolbar.append(this.editControls);
-    this.propertiesButton = button(this.editControls, 'Tool settings', 'sliders-horizontal', () =>
+    this.propertiesButton = button(this.editControls, 'Properties', 'sliders-horizontal', () =>
       this.openProperties(),
     );
     this.propertiesButton.classList.add('pfs-properties-button');
@@ -446,7 +467,7 @@ export class TextEditor extends Component {
     this.propertiesButton.createSpan({ cls: 'pfs-tool-value' });
     this.saveButton = button(
       this.editControls,
-      'Save PDF',
+      withKeys('Save', 'Mod+S'),
       'save',
       () => {
         void this.save();
@@ -455,21 +476,21 @@ export class TextEditor extends Component {
     );
     this.removeButton = button(
       this.editControls,
-      'Remove selection',
+      withKeys('Delete selection', 'Delete'),
       'trash-2',
       () => this.removeSelection(),
       false,
     );
     this.undoButton = button(
       this.editControls,
-      'Undo',
+      withKeys('Undo', 'Mod+Z'),
       'undo-2',
       () => this.applyHistory(false),
       false,
     );
     this.redoButton = button(
       this.editControls,
-      'Redo',
+      withKeys('Redo', 'Mod+Shift+Z'),
       'redo-2',
       () => this.applyHistory(true),
       false,
@@ -480,7 +501,7 @@ export class TextEditor extends Component {
     this.status.className = 'pdf-form-studio-status';
     this.status.setAttribute('role', 'status');
     this.toolbar.append(this.status);
-    const more = button(this.toolbar, 'PDF options', 'ellipsis', () => this.openMenu(more));
+    const more = button(this.toolbar, 'More options', 'ellipsis', () => this.openMenu(more));
     this.message = doc.createElement('div');
     this.message.className = 'pdf-form-studio-message';
     this.message.setAttribute('role', 'status');
@@ -2247,7 +2268,11 @@ export class TextEditor extends Component {
         ? this.markerWidth
         : this.penWidth
       : (selected?.fontSize ?? this.fontSize);
-    setAttr(this.propertiesButton, 'aria-label', brush ? 'Brush settings' : 'Text settings');
+    setAttr(
+      this.propertiesButton,
+      'aria-label',
+      brush ? 'Pen and highlighter properties' : 'Text properties',
+    );
     setText(
       this.propertiesButton.querySelector('.pfs-tool-value')!,
       `${Number(width.toFixed(1))} pt`,
@@ -2277,11 +2302,14 @@ export class TextEditor extends Component {
         blocked,
     );
     setProp(this.removeButton, 'hidden', false);
-    const removeLabel = this.selection?.objects.length
-      ? 'Remove selection'
-      : stroke
-        ? 'Remove mark'
-        : 'Remove text box';
+    const removeLabel = withKeys(
+      this.selection?.objects.length
+        ? 'Delete selection'
+        : stroke
+          ? 'Delete drawing'
+          : 'Delete text box',
+      'Delete',
+    );
     if (this.removeButton.dataset.label !== removeLabel) {
       this.removeButton.dataset.label = removeLabel;
       setTooltip(this.removeButton, removeLabel, { classes: ['pfs-overlay-tooltip'] });
@@ -2910,6 +2938,36 @@ export class TextEditor extends Component {
     }
   }
 
+  /** Command palette actions for the active PDF; false when the action does not apply. */
+  runAction(action: EditorAction, checking: boolean): boolean {
+    if (!this.loaded || !this.session || this.session.replacing) {
+      return false;
+    }
+    if (TOOL_ACTIONS.includes(action as EditorTool)) {
+      if (!checking) {
+        this.setTool(action as EditorTool);
+      }
+      return true;
+    }
+    if (action === 'insert-image') {
+      if (!checking) {
+        this.chooseImageFile();
+      }
+      return true;
+    }
+    if (!this.selectionQuads()) {
+      return false;
+    }
+    if (!checking) {
+      if (action === 'highlight') {
+        this.highlightSelection('toggle');
+      } else {
+        this.lineSelection(action as 'underline' | 'strikeout');
+      }
+    }
+    return true;
+  }
+
   /** Underline or strike through the selected text; again on marked text removes it. */
   private lineSelection(kind: 'underline' | 'strikeout'): void {
     const pressed =
@@ -2970,7 +3028,7 @@ export class TextEditor extends Component {
     const menu = doc.createElement('div');
     menu.className = 'pfs-highlight-colors pfs-mark-ui';
     menu.setAttribute('role', 'menu');
-    menu.setAttribute('aria-label', 'Highlight colour');
+    menu.setAttribute('aria-label', 'Highlight color');
     for (const { name, color } of MARK_COLORS) {
       const swatch = doc.createElement('button');
       swatch.type = 'button';
@@ -3121,7 +3179,7 @@ export class TextEditor extends Component {
         'is-active',
         color.every((v, i) => v === this.markColor[i]),
       );
-      setTooltip(swatch, `Highlight (${name.toLowerCase()})`);
+      setTooltip(swatch, `Highlight ${name.toLowerCase()}`);
       swatch.addEventListener('click', () => {
         this.markColor = color;
         this.createHighlights(quads, 'color');
@@ -3157,7 +3215,7 @@ export class TextEditor extends Component {
       remove.type = 'button';
       remove.className = 'clickable-icon pfs-mark-remove-button';
       setIcon(remove, 'eraser');
-      setTooltip(remove, 'Remove highlight');
+      setTooltip(remove, 'Remove highlight from selection');
       remove.addEventListener('click', () => this.createHighlights(quads, 'toggle'));
       bar.append(remove);
     }
@@ -4238,7 +4296,7 @@ export class TextEditor extends Component {
       element.classList.toggle('is-filled', filled);
       element.disabled = !boxedKind && !selected()?.box;
     }
-    const colors = row('Colour');
+    const colors = row('Color');
     for (const { name, color } of SHAPE_COLORS) {
       const element = choice(
         colors,
@@ -4448,7 +4506,7 @@ export class TextEditor extends Component {
     const element = doc.createElement('div');
     element.className = 'pfs-mark-popover pfs-mark-ui';
     element.setAttribute('role', 'dialog');
-    element.setAttribute('aria-label', mark.kind === 'note' ? 'Comment note' : 'Highlight comment');
+    element.setAttribute('aria-label', mark.kind === 'note' ? 'Note' : 'Comment');
     if (mark.foreign) {
       const meta = doc.createElement('div');
       meta.className = 'pfs-mark-meta';
