@@ -39,7 +39,7 @@ import {
   validateMark,
 } from './mark-engine.ts';
 import type { MarkKind, PdfMark } from './mark-engine.ts';
-import { SHAPE_PREFIX, validateShape } from './shape-engine.ts';
+import { SHAPE_PREFIX, shapeRect, validateShape } from './shape-engine.ts';
 import type { PdfShape, Point as ShapePoint, ShapeKind } from './shape-engine.ts';
 import { IMAGE_PREFIX, storeImage, validateImage } from './image-engine.ts';
 import type { PdfImage, QuarterTurn } from './image-engine.ts';
@@ -76,7 +76,7 @@ type TextState = {
   formats: TextChanges['formats'];
 };
 export interface PdfObject {
-  kind: 'text' | 'ink';
+  kind: 'text' | 'ink' | 'shape' | 'image';
   id: string;
 }
 export type CopiedPdfObject =
@@ -104,7 +104,28 @@ export type CopiedPdfObject =
       width: number;
       color: PdfColor;
       opacity: number;
-    };
+    }
+  | { kind: 'shape'; page: number; rect: Rect; shape: PdfShape }
+  | { kind: 'image'; page: number; rect: Rect; image: PdfImage };
+
+/** Area a shape covers for group moves: its (turned) box, or the line between its ends. */
+export function shapeArea(shape: PdfShape): Rect {
+  if (shape.box) {
+    return shapeRect(shape);
+  }
+  const [a, b] = [shape.start!, shape.end!];
+  return [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[0], b[0]), Math.max(a[1], b[1])];
+}
+export function shiftShape(shape: PdfShape, dx: number, dy: number): PdfShape {
+  const next = structuredClone(shape);
+  if (next.box) {
+    next.box = [next.box[0] + dx, next.box[1] + dy, next.box[2] + dx, next.box[3] + dy];
+  } else {
+    next.start = [next.start![0] + dx, next.start![1] + dy];
+    next.end = [next.end![0] + dx, next.end![1] + dy];
+  }
+  return next;
+}
 type UndoEntry =
   | { kind: 'objects'; state: TextState; strokes: InkStroke[] }
   | { kind: 'ink'; strokes: InkStroke[] }
@@ -1263,6 +1284,20 @@ export class TextSession {
           }
           return { object, page: field.widgets[0]!.page, rect: field.widgets[0]!.rect };
         }
+        if (object.kind === 'shape') {
+          const shape = this.snapshot.shapes?.find((item) => item.id === object.id);
+          if (!shape || shape.locked) {
+            throw new Error('This shape cannot be edited as part of a group.');
+          }
+          return { object, page: shape.page, rect: shapeArea(shape) };
+        }
+        if (object.kind === 'image') {
+          const image = this.snapshot.images?.find((item) => item.id === object.id);
+          if (!image || image.locked) {
+            throw new Error('This picture cannot be edited as part of a group.');
+          }
+          return { object, page: image.page, rect: [...image.box] as Rect };
+        }
         if (object.kind !== 'ink') {
           throw new Error('Invalid object selection.');
         }
@@ -1292,6 +1327,18 @@ export class TextSession {
           ...(field.lineSpacing !== undefined ? { lineSpacing: field.lineSpacing } : {}),
           ...(field.ruled ? { ruled: { ...field.ruled } } : {}),
         };
+      }
+      if (object.kind === 'shape') {
+        const shape = this.snapshot.shapes!.find((item) => item.id === object.id)!;
+        const copy = structuredClone(shape);
+        delete copy.locked;
+        return { kind: 'shape', page, rect: [...rect] as Rect, shape: copy };
+      }
+      if (object.kind === 'image') {
+        const image = this.snapshot.images!.find((item) => item.id === object.id)!;
+        const copy = structuredClone(image);
+        delete copy.locked;
+        return { kind: 'image', page, rect: [...rect] as Rect, image: copy };
       }
       const stroke = this.snapshot.strokes.find((stroke) => stroke.id === object.id)!;
       return {
@@ -1364,6 +1411,10 @@ export class TextSession {
           },
           bounds,
         );
+      } else if (item.kind === 'shape') {
+        validateShape({ ...item.shape, id: SHAPE_PREFIX + 'copy', page: item.page }, bounds);
+      } else if (item.kind === 'image') {
+        validateImage({ ...item.image, id: IMAGE_PREFIX + 'copy', page: item.page }, bounds);
       } else {
         throw new Error('Invalid copied PDF object.');
       }
@@ -1420,6 +1471,28 @@ export class TextSession {
           ...(item.lineSpacing !== undefined ? { lineSpacing: item.lineSpacing } : {}),
         });
         created.push({ kind: 'text', id: name });
+      } else if (item.kind === 'shape') {
+        const shape: PdfShape = {
+          ...shiftShape(item.shape, dx, dy),
+          id: SHAPE_PREFIX + globalThis.crypto.randomUUID(),
+          page: item.page,
+          modified: pdfDate(),
+        };
+        (this.snapshot.shapes ??= []).push(shape);
+        (this.changes.shapes ??= new Map()).set(shape.id, structuredClone(shape));
+        created.push({ kind: 'shape', id: shape.id });
+      } else if (item.kind === 'image') {
+        const box = item.image.box;
+        const image: PdfImage = {
+          ...structuredClone(item.image),
+          id: IMAGE_PREFIX + globalThis.crypto.randomUUID(),
+          page: item.page,
+          box: [box[0] + dx, box[1] + dy, box[2] + dx, box[3] + dy],
+          modified: pdfDate(),
+        };
+        (this.snapshot.images ??= []).push(image);
+        (this.changes.images ??= new Map()).set(image.id, structuredClone(image));
+        created.push({ kind: 'image', id: image.id });
       } else {
         const id = INK_PREFIX + globalThis.crypto.randomUUID();
         const bounds = this.snapshot.pages[item.page - 1]!;
@@ -1488,6 +1561,21 @@ export class TextSession {
           ...(field.ruled ? { ruled: { ...field.ruled } } : {}),
         });
         this.changes.values.set(object.id, field.value);
+      } else if (object.kind === 'shape') {
+        const index = this.snapshot.shapes!.findIndex((item) => item.id === object.id);
+        const next = { ...shiftShape(this.snapshot.shapes![index]!, dx, dy), modified: pdfDate() };
+        this.snapshot.shapes![index] = next;
+        (this.changes.shapes ??= new Map()).set(object.id, structuredClone(next));
+      } else if (object.kind === 'image') {
+        const index = this.snapshot.images!.findIndex((item) => item.id === object.id);
+        const image = this.snapshot.images![index]!;
+        const next: PdfImage = {
+          ...structuredClone(image),
+          box: [rect[0] + dx, rect[1] + dy, rect[2] + dx, rect[3] + dy],
+          modified: pdfDate(),
+        };
+        this.snapshot.images![index] = next;
+        (this.changes.images ??= new Map()).set(object.id, structuredClone(next));
       } else {
         const index = this.snapshot.strokes.findIndex((stroke) => stroke.id === object.id);
         const stroke = this.snapshot.strokes[index]!;
@@ -1520,6 +1608,14 @@ export class TextSession {
         this.changes.formats.delete(object.id);
         this.snapshot.fields = this.snapshot.fields.filter((field) => field.name !== object.id);
         this.removedField(field);
+      } else if (object.kind === 'shape') {
+        this.snapshot.shapes = (this.snapshot.shapes ?? []).filter((item) => item.id !== object.id);
+        this.changes.shapes?.delete(object.id);
+        (this.changes.deletedShapes ??= new Set()).add(object.id);
+      } else if (object.kind === 'image') {
+        this.snapshot.images = (this.snapshot.images ?? []).filter((item) => item.id !== object.id);
+        this.changes.images?.delete(object.id);
+        (this.changes.deletedImages ??= new Set()).add(object.id);
       } else {
         this.changes.strokes.delete(object.id);
         if (this.seedStrokeIds.has(object.id)) {

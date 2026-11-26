@@ -908,6 +908,24 @@ test('click and drag Text placement each return to Select after one box', async 
 test('blank-space marquee selects mixed objects, moves as one group, cancels and undoes atomically', async () => {
   const f = await fixture();
   try {
+    // Shapes and pictures join groups too; a separate arrow and picture are added by Shift+click.
+    const shape = f.session.addShape({
+      page: 1,
+      kind: 'rectangle',
+      box: [200, 640, 260, 670],
+      color: [1, 0, 0],
+      width: 2,
+    });
+    const arrow = f.session.addShape({
+      page: 1,
+      kind: 'arrow',
+      start: [400, 300],
+      end: [500, 350],
+      color: [0, 0, 1],
+      width: 2,
+    });
+    const picture = f.session.addImage({ page: 1, box: [400, 100, 460, 130], bytes: png(4, 2) });
+    f.editor.refresh();
     const text = f.session.add(1, [80, 580, 180, 610], 14, true);
     f.session.setValue(text.name, 'Group answer');
     const stroke = f.session.addStroke(
@@ -924,7 +942,24 @@ test('blank-space marquee selects mixed objects, moves as one group, cancels and
     f.pointer(page, 'pointerdown', 60, 160);
     f.pointer(page, 'pointermove', 310, 240);
     f.pointer(page, 'pointerup', 310, 240);
-    assert.equal(f.doc.querySelectorAll('.is-multi-selected').length, 2);
+    assert.equal(f.doc.querySelectorAll('.is-multi-selected').length, 3);
+    for (const [selector, x, y] of [
+      [`[data-shape-id="${arrow.id}"] .pfs-shape-hit`, 450, 475],
+      [`[data-image-id="${picture.id}"]`, 430, 685],
+    ] as const) {
+      const down = f.pointer(f.doc.querySelector(selector)!, 'pointerdown', x, y, true);
+      assert.equal(down.defaultPrevented, true);
+    }
+    assert.deepEqual(
+      (f.editor as unknown as { selection: { objects: { kind: string }[] } }).selection.objects
+        .map((item) => item.kind)
+        .sort(),
+      ['image', 'ink', 'shape', 'shape', 'text'],
+    );
+    // Back to the marquee group for the move below.
+    f.pointer(page, 'pointerdown', 60, 160);
+    f.pointer(page, 'pointermove', 310, 240);
+    f.pointer(page, 'pointerup', 310, 240);
     const originalText = [...text.widgets[0]!.rect];
     const originalInk = structuredClone(stroke.points);
     const frame = f.doc.querySelector('.pdf-form-studio-box')!;
@@ -945,6 +980,8 @@ test('blank-space marquee selects mixed objects, moves as one group, cancels and
       f.session.snapshot.strokes[0]!.points,
       originalInk.map(([x, y]) => [x + 30, y - 20]),
     );
+    assert.deepEqual(f.session.snapshot.shapes![0]!.box, [230, 620, 290, 650]);
+    assert.equal(f.session.snapshot.shapes![0]!.id, shape.id);
     f.doc.body.dispatchEvent(f.key('z', { metaKey: true }));
     assert.deepEqual(f.session.snapshot.fields[0]!.widgets[0]!.rect, originalText);
     assert.deepEqual(f.session.snapshot.strokes[0]!.points, originalInk);
@@ -953,12 +990,19 @@ test('blank-space marquee selects mixed objects, moves as one group, cancels and
     const reopened = await readTextPdf(f.bytes());
     assert.equal(reopened.fields[0]!.value, 'Group answer');
     assert.equal(reopened.strokes.length, 1);
+    assert.equal(reopened.shapes!.length, 2);
     f.doc.body.dispatchEvent(f.key('Delete'));
     assert.equal(f.session.snapshot.fields.length, 0);
     assert.equal(f.session.snapshot.strokes.length, 0);
+    assert.deepEqual(
+      f.session.snapshot.shapes!.map((item) => item.id),
+      [arrow.id],
+    );
     f.session.undoStroke();
     assert.equal(f.session.snapshot.fields.length, 1);
     assert.equal(f.session.snapshot.strokes.length, 1);
+    assert.equal(f.session.snapshot.shapes!.length, 2);
+    assert.equal(f.session.snapshot.images!.length, 1);
   } finally {
     f.dispose();
   }

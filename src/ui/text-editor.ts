@@ -6,6 +6,7 @@ import type { Rect, TextField, TextWidget } from '../pdf/text-engine';
 import type { BackupKind } from '../pdf/recovery';
 import { usePdfFont } from './pdf-font';
 import type { CopiedPdfObject, PdfObject, TextSession } from '../pdf/text-session';
+import { shiftShape } from '../pdf/text-session';
 import type { VaultSessions } from '../pdf/vault-sessions';
 import { growBox, rotatedHandle, transformBox } from '../pdf/box-geometry';
 import type { ResizeHandle } from '../pdf/box-geometry';
@@ -1069,6 +1070,8 @@ export class TextEditor extends Component {
           endTyping: () => {
             this.selected = undefined;
             this.selectedStroke = undefined;
+            this.selectedShape = undefined;
+            this.selectedImage = undefined;
             this.focused = undefined;
             this.endTextEditing();
           },
@@ -1784,10 +1787,15 @@ export class TextEditor extends Component {
       this.selection?.selectObjects(objects);
     } else {
       this.selection?.clear();
-      if (objects[0]!.kind === 'text') {
-        this.selected = objects[0]!.id;
+      const [object] = objects as [PdfObject];
+      if (object.kind === 'text') {
+        this.selected = object.id;
+      } else if (object.kind === 'ink') {
+        this.selectedStroke = object.id;
+      } else if (object.kind === 'shape') {
+        this.selectedShape = object.id;
       } else {
-        this.selectedStroke = objects[0]!.id;
+        this.selectedImage = object.id;
       }
     }
     this.updateStatus();
@@ -3223,11 +3231,18 @@ export class TextEditor extends Component {
     const page = entry.page.number;
     const shapeId = target.closest<HTMLElement | SVGElement>('[data-shape-id]')?.dataset.shapeId;
     const shape = shapeId && snapshot.shapes?.find((item) => item.id === shapeId);
+    const group = this.selection?.objects ?? [];
+    if (shape && group.length > 1 && group.some((item) => item.id === shape.id)) {
+      return { kind: 'objects', objects: [...group] };
+    }
     if (shape) {
       return { kind: 'shape', shape };
     }
     const imageId = target.closest<HTMLElement>('[data-image-id]')?.dataset.imageId;
     const image = imageId && snapshot.images?.find((item) => item.id === imageId);
+    if (image && group.length > 1 && group.some((item) => item.id === image.id)) {
+      return { kind: 'objects', objects: [...group] };
+    }
     if (image) {
       return { kind: 'image', image };
     }
@@ -3498,9 +3513,22 @@ export class TextEditor extends Component {
         item.rect[2] + dx,
         item.rect[3] + dy,
       ];
-      return item.kind === 'ink'
-        ? { ...item, page, rect, points: item.points.map(([x, y]) => [x + dx, y + dy]) }
-        : { ...item, page, rect };
+      if (item.kind === 'ink') {
+        return { ...item, page, rect, points: item.points.map(([x, y]) => [x + dx, y + dy]) };
+      }
+      if (item.kind === 'shape') {
+        return { ...item, page, rect, shape: shiftShape(item.shape, dx, dy) };
+      }
+      if (item.kind === 'image') {
+        const b = item.image.box;
+        return {
+          ...item,
+          page,
+          rect,
+          image: { ...item.image, box: [b[0] + dx, b[1] + dy, b[2] + dx, b[3] + dy] },
+        };
+      }
+      return { ...item, page, rect };
     });
     this.selectCreated(session.pasteObjects(moved, [0, 0]));
   }
