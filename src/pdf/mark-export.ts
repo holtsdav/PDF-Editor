@@ -102,6 +102,23 @@ export function colourName(color: readonly number[]): string {
   return best[0];
 }
 
+/**
+ * A highlight as a PDF++-style callout: the link ("file, p.N") is the title,
+ * the marked text and then the comment are the body.
+ */
+export function markCallout(
+  pdfPath: string,
+  basename: string,
+  mark: Pick<PdfMark, 'page' | 'color' | 'comment'>,
+  text: string,
+): string {
+  const body = [text.trim(), mark.comment.trim()].filter(Boolean).join('\n\n') || '…';
+  return [
+    `> [!PDF|${colourName(mark.color)}] [[${pdfPath}#page=${mark.page}|${basename}, p.${mark.page}]]`,
+    ...body.split('\n').map((line) => (line.trim() ? `> ${line.trim()}` : '>')),
+  ].join('\n');
+}
+
 export const BLOCK_START = '<!-- pdf-editor:highlights -->';
 export const BLOCK_END = '<!-- /pdf-editor:highlights -->';
 

@@ -24,6 +24,7 @@ import { labelOverlay } from './overlay-label';
 import { setAttr, setProp, setStyle, setText } from './dom';
 import type { ChoiceField, ChoiceWidget } from '../pdf/choice-engine';
 import { isTextMark, lineQuads, textLine } from '../pdf/mark-engine';
+import { markCallout } from '../pdf/mark-export';
 import type { MarkKind, TextMarkKind } from '../pdf/mark-engine';
 import { continueList, indent, toggleList } from '../pdf/list-format';
 import type { TextEdit } from '../pdf/list-format';
@@ -3630,7 +3631,7 @@ export class TextEditor extends Component {
       if (isTextMark(mark.kind)) {
         next('clipboard');
         add('Copy text', 'copy', () => void this.copyMarkText(entry, mark, false));
-        add('Copy as quote with link', 'quote', () => void this.copyMarkText(entry, mark, true));
+        add('Copy with link', 'quote', () => void this.copyMarkText(entry, mark, true));
       }
       next('color');
       label('Color');
@@ -3880,8 +3881,9 @@ export class TextEditor extends Component {
 
   private async copyMarkText(entry: PageLayer, mark: PdfMark, quote: boolean): Promise<void> {
     const text = this.markText(entry, mark);
-    const link = `[[${this.native.file.path}#page=${mark.page}|${this.native.file.basename}, p. ${mark.page}]]`;
-    const value = quote ? `> ${text || '…'}\n>\n> — ${link}` : text;
+    const value = quote
+      ? markCallout(this.native.file.path, this.native.file.basename, mark, text)
+      : text;
     await this.native.element.ownerDocument.defaultView?.navigator.clipboard?.writeText(value);
   }
 

@@ -6,6 +6,7 @@ import {
   BLOCK_END,
   BLOCK_START,
   colourName,
+  markCallout,
   marksMarkdown,
   textInQuads,
   upsertBlock,
@@ -123,5 +124,23 @@ test('exporting again refreshes only the generated block and keeps own notes', (
   assert.equal(
     upsertBlock('Eigene Notiz', `${BLOCK_START}\nx\n${BLOCK_END}`),
     `Eigene Notiz\n\n${BLOCK_START}\nx\n${BLOCK_END}\n`,
+  );
+});
+
+test('a copied highlight is a PDF++-style callout titled with its page link', () => {
+  const mark = {
+    page: 175,
+    color: [1, 0.9, 0.2] as [number, number, number],
+    comment: 'Check the contractors.',
+  };
+  assert.equal(
+    markCallout('Betra/40600_V9_0_DE.pdf', '40600_V9_0_DE', mark, 'Verteilung an\nAuftragnehmer'),
+    [
+      '> [!PDF|yellow] [[Betra/40600_V9_0_DE.pdf#page=175|40600_V9_0_DE, p.175]]',
+      '> Verteilung an',
+      '> Auftragnehmer',
+      '>',
+      '> Check the contractors.',
+    ].join('\n'),
   );
 });
