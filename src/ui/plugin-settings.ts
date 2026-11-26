@@ -96,7 +96,7 @@ export class PdfSettingsTab extends PluginSettingTab {
           this.toggle(
             'autoDetectLines',
             'Detect answer lines on PDF open',
-            `Scan for blank answer lines when a PDF opens. For larger PDFs, use the scan button beside Add text box to scan up to ${MAX_AUTO_DETECT_PAGES} pages at a time.`,
+            `Scan for blank answer lines when a PDF opens. For larger PDFs, use the scan button beside the Text box tool to scan up to ${MAX_AUTO_DETECT_PAGES} pages at a time.`,
           ),
           this.slider(
             'autoDetectPageLimit',

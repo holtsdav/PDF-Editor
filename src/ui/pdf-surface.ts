@@ -506,7 +506,7 @@ export class PdfSurface extends Component {
     if (this.autoDetectOnOpen && this.sessions.preferences.autoDetectLines) {
       const limit = this.sessions.preferences.autoDetectPageLimit;
       if (this.entries.length > limit) {
-        this.message.textContent = `Automatic answer-line detection skipped: ${this.entries.length} pages exceeds the ${limit}-page limit. Use the scan button beside Add text box to scan up to ${MAX_AUTO_DETECT_PAGES} pages at a time.`;
+        this.message.textContent = `Automatic answer-line detection skipped: ${this.entries.length} pages exceeds the ${limit}-page limit. Use the scan button beside the Text box tool to scan up to ${MAX_AUTO_DETECT_PAGES} pages at a time.`;
       } else {
         await this.detectLines();
       }
