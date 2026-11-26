@@ -10,6 +10,8 @@ Click an editable form field to type, or add your own text box. Adjust font, siz
 
 Use **Detect answer lines** to find places to type on worksheets. Longer answers can wrap across consecutive lines.
 
+Checkboxes, radio buttons, dropdowns and list boxes in PDF forms can be filled in directly.
+
 ### Draw and highlight
 
 <img src="assets/demos/ink-and-shapes.gif" alt="Draw, highlight and hold for shapes" width="480">
@@ -23,6 +25,8 @@ Enable **Snap to text** in the highlighter options to follow printed text. When 
 <img src="assets/demos/embeds-and-popouts.gif" alt="Edit PDFs in notes and pop-out windows" width="480">
 
 Work in Reading view, Live Preview or a separate PDF window. Scrolling continues into the surrounding note when you reach the PDF's edge.
+
+PDFs open in Obsidian's own viewer by default, so viewer plugins such as PDF++ keep working. Switch editing on for a PDF with the pencil button in its tab header, the file menu or the command palette, or turn on **Open every PDF in PDF Editor** in the settings.
 
 Select printed text to copy it. Zoom with the viewer controls or **Cmd/Ctrl + wheel**, and use **Fit width** to reset. Undo and redo are shared across views of the same PDF.
 
