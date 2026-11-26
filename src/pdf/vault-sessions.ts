@@ -116,6 +116,11 @@ export class VaultSessions {
     };
   }
 
+  /** The session already open for a file, without opening one. */
+  peek(file: TFile): Promise<TextSession> | undefined {
+    return this.sessions.get(file);
+  }
+
   get(file: TFile): Promise<TextSession> {
     if (isRecoveryPath(file.path, this.root)) {
       return Promise.reject(

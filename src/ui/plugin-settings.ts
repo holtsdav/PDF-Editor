@@ -33,23 +33,62 @@ export class PdfSettingsTab extends PluginSettingTab {
     // Definitions are also requested for search indexing. Read storage only
     // while rendering, and keep saves routed through the shared preferences.
     return [
-      this.slider(
-        'toolbarTopOffset',
-        'PDF toolbar top offset',
-        'Move the PDF toolbar down. When it floats, the space above it covers the PDF.',
-        0,
-        MAX_TOOLBAR_TOP_OFFSET,
-      ),
-      this.toggle(
-        'floatingToolbar',
-        'Floating PDF toolbar',
-        'Keep the PDF controls and editing tools visible at the top of a note while its PDF is on screen. You can also switch this from the PDF options menu.',
-      ),
-      this.toggle(
-        'trashImportedOriginals',
-        'Move original PDF to Trash after import',
-        'After an external PDF is dropped into a note, verify the native attachment and move its original to system Trash. Off by default. Failed, changed or unsupported imports skip cleanup. Vault PDFs and recovery copies are never removed.',
-      ),
+      {
+        type: 'group',
+        heading: 'General',
+        items: [
+          this.toggle(
+            'openInEditor',
+            'Open every PDF in PDF Editor',
+            "Off: PDFs open in Obsidian's own viewer, so viewer plugins such as PDF++ keep working. Switch editing on for one PDF with the pencil button in its tab header, the file menu or the command palette. On: every PDF opens in the editor.",
+          ),
+          this.slider(
+            'autosaveDelay',
+            'Autosave delay',
+            'Milliseconds to wait after your last change before the PDF is saved. Longer delays save less often while you type.',
+            300,
+            5000,
+            100,
+          ),
+          this.toggle(
+            'trashImportedOriginals',
+            'Move original PDF to Trash after import',
+            'After an external PDF is dropped into a note, verify the native attachment and move its original to system Trash. Off by default. Failed, changed or unsupported imports skip cleanup. Vault PDFs and recovery copies are never removed.',
+          ),
+        ],
+      },
+      {
+        type: 'group',
+        heading: 'Toolbar',
+        items: [
+          this.toggle(
+            'floatingToolbar',
+            'Floating toolbar',
+            'Keep the PDF controls and editing tools visible at the top of a note while its PDF is on screen. You can also switch this from the More options menu.',
+          ),
+          this.slider(
+            'toolbarTopOffset',
+            'Toolbar top offset',
+            'Move the PDF toolbar down. When it floats, the space above it covers the PDF.',
+            0,
+            MAX_TOOLBAR_TOP_OFFSET,
+          ),
+        ],
+      },
+      {
+        type: 'group',
+        heading: 'Highlights',
+        items: [
+          this.slider(
+            'highlightOpacity',
+            'Highlight strength',
+            'Opacity of new highlights in percent. Highlights blend with the page, so text under them stays readable; other PDF readers show the same strength.',
+            20,
+            80,
+            5,
+          ),
+        ],
+      },
       {
         type: 'group',
         heading: 'Answer lines',
@@ -57,7 +96,7 @@ export class PdfSettingsTab extends PluginSettingTab {
           this.toggle(
             'autoDetectLines',
             'Detect answer lines on PDF open',
-            `Scan for blank answer lines when a PDF opens. For larger PDFs, use the scan button beside Add text box to scan up to ${MAX_AUTO_DETECT_PAGES} pages at a time.`,
+            `Scan for blank answer lines when a PDF opens. For larger PDFs, use the scan button beside the Text box tool to scan up to ${MAX_AUTO_DETECT_PAGES} pages at a time.`,
           ),
           this.slider(
             'autoDetectPageLimit',
@@ -212,7 +251,8 @@ export class PdfSettingsTab extends PluginSettingTab {
       | 'floatingToolbar'
       | 'autoDetectLines'
       | 'flowAnswerLines'
-      | 'keepOriginalBackups',
+      | 'keepOriginalBackups'
+      | 'openInEditor',
     name: string,
     desc: string,
   ): SettingDefinition {
@@ -230,11 +270,12 @@ export class PdfSettingsTab extends PluginSettingTab {
   }
 
   private slider(
-    key: 'toolbarTopOffset' | 'autoDetectPageLimit',
+    key: 'toolbarTopOffset' | 'autoDetectPageLimit' | 'highlightOpacity' | 'autosaveDelay',
     name: string,
     desc: string,
     min: number,
     max: number,
+    step = 1,
   ): SettingDefinition {
     return {
       name,
@@ -242,7 +283,8 @@ export class PdfSettingsTab extends PluginSettingTab {
       render: (setting) => {
         setting.addSlider((slider) =>
           slider
-            .setLimits(min, max, 1)
+            .setLimits(min, max, step)
+            .setDynamicTooltip()
             .setValue(this.sessions.preferences[key])
             .onChange((value) => this.savePreference(key, value)),
         );
@@ -257,8 +299,11 @@ export class PdfSettingsTab extends PluginSettingTab {
       | 'autoDetectLines'
       | 'flowAnswerLines'
       | 'keepOriginalBackups'
+      | 'openInEditor'
       | 'toolbarTopOffset'
-      | 'autoDetectPageLimit',
+      | 'autoDetectPageLimit'
+      | 'highlightOpacity'
+      | 'autosaveDelay',
     value: boolean | number,
   ): Promise<void> {
     if (this.unloaded) {

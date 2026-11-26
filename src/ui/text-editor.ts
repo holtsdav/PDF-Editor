@@ -6,19 +6,93 @@ import type { Rect, TextField, TextWidget } from '../pdf/text-engine';
 import type { BackupKind } from '../pdf/recovery';
 import { usePdfFont } from './pdf-font';
 import type { CopiedPdfObject, PdfObject, TextSession } from '../pdf/text-session';
+import { shiftShape } from '../pdf/text-session';
 import type { VaultSessions } from '../pdf/vault-sessions';
 import { growBox, rotatedHandle, transformBox } from '../pdf/box-geometry';
 import type { ResizeHandle } from '../pdf/box-geometry';
 import { ObjectSelection } from './object-selection';
 import { InkLayer } from './ink-layer';
 import type { EditorTool } from './ink-layer';
-import { cssColor, fontFaces } from '../pdf/text-format';
+import { cssColor, fontFaces, normalizeSymbols } from '../pdf/text-format';
 import type { FontFamily, PdfColor, TextFormat } from '../pdf/text-format';
 import { RecoveryInfo } from './recovery-info';
+import { exportMarks } from './annotation-view';
 import { RecoveryPreview } from './recovery-preview';
 import { ToolPopover } from './tool-popover';
 import { ruledAnswerBlock } from '../pdf/ruled-text';
 import { labelOverlay } from './overlay-label';
+import { setAttr, setProp, setStyle, setText } from './dom';
+import type { ChoiceField, ChoiceWidget } from '../pdf/choice-engine';
+import { isTextMark, lineQuads, textLine } from '../pdf/mark-engine';
+import { markCallout } from '../pdf/mark-export';
+import type { MarkKind, TextMarkKind } from '../pdf/mark-engine';
+import { continueList, indent, toggleList } from '../pdf/list-format';
+import type { TextEdit } from '../pdf/list-format';
+import { ShapeLayer, shapeExtent } from './shape-layer';
+import { hitsStroke } from '../pdf/ink-geometry';
+import { ImageLayer } from './image-layer';
+import { imageMime, imageSize, storedImage } from '../pdf/image-engine';
+import type { PdfImage, QuarterTurn } from '../pdf/image-engine';
+import type { ShapeStyle } from './shape-layer';
+import type { PdfShape, ShapeKind } from '../pdf/shape-engine';
+import { shapeRect } from '../pdf/shape-engine';
+
+const SHAPE_KINDS: { kind: ShapeKind; label: string; icon: string }[] = [
+  { kind: 'rectangle', label: 'Rectangle', icon: 'square' },
+  { kind: 'ellipse', label: 'Ellipse', icon: 'circle' },
+  { kind: 'line', label: 'Line', icon: 'minus' },
+  { kind: 'arrow', label: 'Arrow', icon: 'move-up-right' },
+];
+/** One palette for lines: shapes, underlines and strikethroughs (yellow only fills shapes). */
+const LINE_COLORS: { name: string; color: PdfColor }[] = [
+  { name: 'Red', color: [0.85, 0.15, 0.15] },
+  { name: 'Blue', color: [0.15, 0.4, 0.85] },
+  { name: 'Green', color: [0.15, 0.6, 0.25] },
+  { name: 'Orange', color: [0.95, 0.55, 0.1] },
+  { name: 'Black', color: [0.1, 0.1, 0.1] },
+];
+const SHAPE_COLORS: { name: string; color: PdfColor }[] = [
+  ...LINE_COLORS.slice(0, 4),
+  { name: 'Yellow', color: [1, 0.85, 0.1] },
+  LINE_COLORS[4]!,
+];
+const SHAPE_WIDTHS = [1, 2, 4];
+import type { PdfMark } from '../pdf/mark-engine';
+
+const MARK_COLORS: { name: string; color: PdfColor }[] = [
+  { name: 'Yellow', color: [1, 0.85, 0.1] },
+  { name: 'Green', color: [0.45, 0.9, 0.45] },
+  { name: 'Blue', color: [0.45, 0.75, 1] },
+  { name: 'Pink', color: [1, 0.55, 0.75] },
+];
+const colorsFor = (kind: MarkKind) =>
+  kind === 'underline' || kind === 'strikeout' ? LINE_COLORS : MARK_COLORS;
+const MARK_UI = '.pfs-mark-ui';
+/** Key names as the platform shows them: Ctrl+Shift+Z on Windows/Linux, ⌘⇧Z on macOS. */
+const IS_MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
+export function keys(combo: string): string {
+  if (!IS_MAC) {
+    return combo.replace('Mod', 'Ctrl');
+  }
+  return combo
+    .replace('Mod+', '⌘')
+    .replace('Shift+', '⇧')
+    .replace('Alt+', '⌥')
+    .replace('Delete', '⌫');
+}
+const withKeys = (label: string, combo: string) => `${label} (${keys(combo)})`;
+const TOOL_ACTIONS: EditorTool[] = [
+  'select',
+  'text',
+  'marker',
+  'scribble',
+  'eraser',
+  'note',
+  'shape',
+];
+export type EditorAction = EditorTool | 'highlight' | 'underline' | 'strikeout' | 'insert-image';
+type Point = [number, number];
+type HighlightMode = 'toggle' | 'color' | 'comment';
 
 interface AnswerLine {
   page: number;
@@ -35,6 +109,16 @@ interface ObjectCopy {
   write?: Promise<void>;
 }
 let copiedObjects: ObjectCopy | undefined;
+/** A shape copied with the context menu or Ctrl+C; cleared when objects are copied. */
+let copiedShape: PdfShape | undefined;
+/** The last picture copied here: a matching clipboard picture keeps its size and turn. */
+let copiedImage: PdfImage | undefined;
+type ContextTarget =
+  | { kind: 'shape'; shape: PdfShape }
+  | { kind: 'image'; image: PdfImage }
+  | { kind: 'mark'; mark: PdfMark }
+  | { kind: 'objects'; objects: PdfObject[] }
+  | { kind: 'page' };
 function objectClipboardHtml(doc: Document, text: string, token: string): string {
   const span = doc.createElement('span');
   span.dataset.pdfEditorObjects = token;
@@ -49,14 +133,29 @@ function objectClipboardHtml(doc: Document, text: string, token: string): string
 interface FieldControl {
   frame: HTMLElement;
   input: HTMLInputElement | HTMLTextAreaElement;
+  /** Inputs of the last layout write; refresh skips unchanged boxes. */
+  layout?: string;
   preview?: Rect;
   dispose?: () => void;
   cancel?: () => void;
+}
+interface ChoiceControl {
+  frame: HTMLElement;
+  select?: HTMLSelectElement;
+  layout?: string;
 }
 interface PageLayer {
   page: NativePage;
   layer: HTMLElement;
   controls: Map<string, FieldControl>;
+  choices?: Map<string, ChoiceControl>;
+  marks?: Map<string, HTMLElement>;
+  /** Highlight bands under the printed text, multiplied with the page like a real marker. */
+  highlights?: HTMLElement;
+  /** Comment badges of highlights (above the page, clickable). */
+  badges?: Map<string, HTMLElement>;
+  shapes?: ShapeLayer;
+  images?: ImageLayer;
   ink: InkLayer;
   cancelPlacement?: () => void;
   placing?: () => boolean;
@@ -131,6 +230,45 @@ export class TextEditor extends Component {
   private answerLines: AnswerLine[] = [];
   private answerFields = new Set<string>();
   private releaseEditing?: () => void;
+  private markColor: PdfColor = MARK_COLORS[0]!.color;
+  private lineColor: PdfColor = LINE_COLORS[0]!.color;
+  private selectionBar?: { element: HTMLElement; quads: Map<PageLayer, Rect[]> };
+  private markPopover?: {
+    id: string;
+    element: HTMLElement;
+    entry: PageLayer;
+    textarea: HTMLTextAreaElement;
+    created: boolean;
+  };
+  private markClickPages = new WeakSet<HTMLElement>();
+  private listEditing = false;
+  private shapeStyle: ShapeStyle = {
+    kind: 'rectangle',
+    filled: false,
+    color: SHAPE_COLORS[0]!.color,
+    width: 2,
+  };
+  private selectedShape?: string;
+  private selectedImage?: string;
+  private measure?: HTMLTextAreaElement;
+  private imageUrls = new Map<string, string>();
+  /** Page and PDF point under the pointer, for placing pasted pictures. */
+  private hover?: { div: HTMLElement; x: number; y: number };
+  private pasteSeen = 0;
+  private objectPasteAt = 0;
+  private shapeMenu?: HTMLElement;
+  private closeShapeMenuListeners?: () => void;
+  private listGroup!: HTMLElement;
+  private listInput?: { input: HTMLTextAreaElement; name: string };
+  private highlightButton!: HTMLButtonElement;
+  private highlightCommentButton!: HTMLButtonElement;
+  private highlightColors?: HTMLElement;
+  private closeColors?: () => void;
+  /** Selection captured when a toolbar highlight control is pressed, before focus can move. */
+  private pressedSelection?: {
+    found: NonNullable<ReturnType<TextEditor['selectionQuads']>>;
+    time: number;
+  };
 
   /** Attach document-local editing controls and shortcut ownership to the shared session registry. */
   constructor(app: App, native: EditorSurface, sessions: VaultSessions, state?: EditorState) {
@@ -210,16 +348,18 @@ export class TextEditor extends Component {
       parent.append(element);
       return element;
     };
-    for (const [tool, label, icon] of [
-      ['select', 'Select', 'mouse-pointer-2'],
-      ['text', 'Add text box', 'type'],
-      ['marker', 'Highlighter', 'highlighter'],
-      ['scribble', 'Pen', 'pencil'],
-      ['eraser', 'Eraser', 'eraser'],
+    for (const [tool, label, icon, key] of [
+      ['select', 'Select', 'mouse-pointer-2', 'V'],
+      ['text', 'Text box', 'type', 'T'],
+      ['marker', 'Highlighter', 'highlighter', 'H'],
+      ['scribble', 'Pen', 'pencil', 'P'],
+      ['eraser', 'Eraser', 'eraser', 'E'],
+      ['note', 'Note', 'sticky-note', 'N'],
+      ['shape', 'Shape', 'square', 'R'],
     ] as const) {
       this.tools.set(
         tool,
-        button(this.toolbar, label, icon, () => {
+        button(this.toolbar, `${label} (${key})`, icon, () => {
           if (this.tool === tool) {
             this.closePopover();
           } else {
@@ -230,11 +370,97 @@ export class TextEditor extends Component {
       if (tool === 'text') {
         this.toolbar.append(this.native.answerLineButton());
       }
+      if (tool === 'shape') {
+        const options = button(this.toolbar, 'Shape options', 'chevron-down', () =>
+          this.toggleShapeMenu(options),
+        );
+        options.classList.add('pfs-shape-options-button');
+        this.register(() => this.closeShapeMenu());
+        button(this.toolbar, 'Insert image…', 'image-plus', () => this.chooseImageFile());
+      }
     }
+    const separator = () =>
+      this.toolbar.createSpan({ cls: 'pfs-toolbar-separator', attr: { 'aria-hidden': 'true' } });
+    separator();
+    // Highlight the PDF text selected on the page, with a colour menu.
+    const highlightGroup = doc.createElement('div');
+    highlightGroup.className = 'pdf-form-studio-highlight-controls';
+    highlightGroup.setAttribute('role', 'group');
+    highlightGroup.setAttribute('aria-label', 'Highlight selected text');
+    this.toolbar.append(highlightGroup);
+    this.highlightButton = button(highlightGroup, 'Highlight selected text', 'baseline', () =>
+      this.highlightSelection('toggle'),
+    );
+    this.highlightButton.classList.add('pfs-highlight-button');
+    this.highlightCommentButton = button(
+      highlightGroup,
+      'Highlight and comment',
+      'message-square-plus',
+      () => this.highlightSelection('comment'),
+    );
+    const colorButton = button(highlightGroup, 'Highlight color', 'chevron-down', () =>
+      this.toggleHighlightColors(colorButton),
+    );
+    const underlineButton = button(highlightGroup, 'Underline selected text', 'underline', () =>
+      this.lineSelection('underline'),
+    );
+    const strikeButton = button(
+      highlightGroup,
+      'Strike through selected text',
+      'strikethrough',
+      () => this.lineSelection('strikeout'),
+    );
+    this.register(() => this.closeHighlightColors());
+    colorButton.classList.add('pfs-highlight-color-button');
+    for (const element of [
+      this.highlightButton,
+      this.highlightCommentButton,
+      colorButton,
+      underlineButton,
+      strikeButton,
+    ]) {
+      // Keep the PDF text selection while pressing toolbar buttons.
+      element.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        this.capturePressedSelection();
+      });
+      element.addEventListener('mousedown', (event) => event.preventDefault());
+    }
+    this.registerDomEvent(doc, 'selectionchange', () =>
+      doc.defaultView!.setTimeout(() => this.updateHighlightButton(), 0),
+    );
+    // Lists and indentation for the selected text box.
+    this.listGroup = doc.createElement('div');
+    this.listGroup.className = 'pdf-form-studio-list-controls';
+    // Its separator lives inside the group, so it disappears with it.
+    this.listGroup.createSpan({ cls: 'pfs-toolbar-separator', attr: { 'aria-hidden': 'true' } });
+    this.listGroup.setAttribute('role', 'group');
+    this.listGroup.setAttribute('aria-label', 'Lists and indentation');
+    this.toolbar.append(this.listGroup);
+    for (const [label, icon, fallback, action] of [
+      ['Bulleted list (Ctrl+Shift+8)', 'list', '•', (e: TextEdit) => toggleList(e, 'bullet')],
+      [
+        'Numbered list (Ctrl+Shift+7)',
+        'list-ordered',
+        '1.',
+        (e: TextEdit) => toggleList(e, 'number'),
+      ],
+      ['Decrease indent (Shift+Tab)', 'indent-decrease', '⇤', (e: TextEdit) => indent(e, -1)],
+      ['Increase indent (Tab)', 'indent-increase', '⇥', (e: TextEdit) => indent(e, 1)],
+    ] as const) {
+      const element = button(this.listGroup, label, icon, () => this.listAction(action));
+      if (!element.querySelector('svg')) {
+        element.textContent = fallback;
+      }
+      // Keep the caret and selection in the text box while clicking.
+      element.addEventListener('pointerdown', (event) => event.preventDefault());
+      element.addEventListener('mousedown', (event) => event.preventDefault());
+    }
+    separator();
     this.editControls = doc.createElement('div');
     this.editControls.className = 'pdf-form-studio-edit-controls';
     this.toolbar.append(this.editControls);
-    this.propertiesButton = button(this.editControls, 'Tool settings', 'sliders-horizontal', () =>
+    this.propertiesButton = button(this.editControls, 'Properties', 'sliders-horizontal', () =>
       this.openProperties(),
     );
     this.propertiesButton.classList.add('pfs-properties-button');
@@ -247,30 +473,32 @@ export class TextEditor extends Component {
     this.propertiesButton.createSpan({ cls: 'pfs-tool-value' });
     this.saveButton = button(
       this.editControls,
-      'Save PDF',
+      withKeys('Save', 'Mod+S'),
       'save',
       () => {
         void this.save();
       },
       false,
     );
+    // Autosave makes this rare: it lives in the More options menu (and Ctrl+S).
+    this.saveButton.remove();
     this.removeButton = button(
       this.editControls,
-      'Remove selection',
+      withKeys('Delete selection', 'Delete'),
       'trash-2',
       () => this.removeSelection(),
       false,
     );
     this.undoButton = button(
       this.editControls,
-      'Undo',
+      withKeys('Undo', 'Mod+Z'),
       'undo-2',
       () => this.applyHistory(false),
       false,
     );
     this.redoButton = button(
       this.editControls,
-      'Redo',
+      withKeys('Redo', 'Mod+Shift+Z'),
       'redo-2',
       () => this.applyHistory(true),
       false,
@@ -281,12 +509,175 @@ export class TextEditor extends Component {
     this.status.className = 'pdf-form-studio-status';
     this.status.setAttribute('role', 'status');
     this.toolbar.append(this.status);
-    const more = button(this.toolbar, 'PDF options', 'ellipsis', () => this.openMenu(more));
+    const more = button(this.toolbar, 'More options', 'ellipsis', () => this.openMenu(more));
     this.message = doc.createElement('div');
     this.message.className = 'pdf-form-studio-message';
     this.message.setAttribute('role', 'status');
     this.mountToolbar();
     this.register(() => this.menu?.hide());
+    // Text highlights: show the highlight bar after a text selection on a PDF page.
+    const queueBar = () => doc.defaultView!.setTimeout(() => this.updateSelectionBar(), 0);
+    this.registerDomEvent(doc, 'pointerup', queueBar);
+    this.registerDomEvent(doc, 'keyup', (event) => {
+      if (event.shiftKey || event.key === 'Shift') {
+        queueBar();
+      }
+    });
+    this.registerDomEvent(doc, 'selectionchange', () => {
+      if (doc.getSelection()?.isCollapsed !== false) {
+        this.hideSelectionBar();
+      }
+    });
+    this.registerDomEvent(
+      doc,
+      'pointerdown',
+      (event) => {
+        const target = event.target;
+        if (
+          this.markPopover &&
+          !(target instanceof doc.defaultView!.Node && this.markPopover.element.contains(target))
+        ) {
+          this.closeMarkPopover();
+        }
+      },
+      true,
+    );
+    this.register(() => {
+      this.hideSelectionBar();
+      this.markPopover?.element.remove();
+      this.markPopover = undefined;
+    });
+    // Shapes: a click elsewhere deselects; keys delete, nudge or deselect the selected shape.
+    this.registerDomEvent(
+      doc,
+      'pointerdown',
+      (event) => {
+        const target = event.target;
+        const inside = (selector: string) =>
+          target instanceof doc.defaultView!.Element &&
+          (!!target.closest(selector) || this.toolbar.contains(target));
+        if (this.selectedShape && !inside('.pfs-shape-hit, .pfs-shape-handle, .pfs-shape-menu')) {
+          this.selectedShape = undefined;
+          this.refresh();
+        }
+        if (this.selectedImage && !inside('.pfs-image')) {
+          this.selectedImage = undefined;
+          this.refresh();
+        }
+      },
+      true,
+    );
+    this.registerDomEvent(doc, 'keydown', (event) => this.imageKey(event), true);
+    // Pictures from the system clipboard (screenshots, copied images).
+    this.registerDomEvent(doc, 'paste', (event) => this.pasteEvent(event), true);
+    this.registerDomEvent(
+      doc,
+      'keydown',
+      (event) => {
+        const id = this.selectedShape;
+        const target = event.target;
+        const mod = event.metaKey || event.ctrlKey;
+        const clip = event.key.toLowerCase();
+        if (
+          id &&
+          this.session &&
+          mod &&
+          !event.altKey &&
+          !event.shiftKey &&
+          ['c', 'x', 'v', 'd'].includes(clip) &&
+          (clip !== 'v' || !!copiedShape || !!copiedObjects) &&
+          !(
+            target instanceof doc.defaultView!.Element &&
+            target.closest('input, textarea, select, [contenteditable="true"]')
+          )
+        ) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          if (event.repeat && clip !== 'v') {
+            return;
+          }
+          try {
+            if (clip === 'c') {
+              this.copyShape(id);
+            } else if (clip === 'x') {
+              this.cutShape(id);
+            } else if (clip === 'd') {
+              this.duplicateShape(id);
+            } else {
+              this.objectPasteAt = Date.now();
+              const shape = this.session.snapshot.shapes?.find((item) => item.id === id);
+              this.pasteCopied(shape?.page ?? 1);
+            }
+            this.scheduleSave();
+          } catch (error) {
+            this.showError(error);
+          }
+          this.refresh();
+          return;
+        }
+        if (
+          !id ||
+          !this.session ||
+          event.metaKey ||
+          event.ctrlKey ||
+          event.altKey ||
+          (target instanceof doc.defaultView!.Element &&
+            target.closest('input, textarea, select, [contenteditable="true"]'))
+        ) {
+          return;
+        }
+        const shape = this.session.snapshot.shapes?.find((item) => item.id === id);
+        if (!shape) {
+          return;
+        }
+        const step = event.shiftKey ? 10 : 1;
+        const delta: Record<string, [number, number]> = {
+          ArrowLeft: [-step, 0],
+          ArrowRight: [step, 0],
+          ArrowUp: [0, step],
+          ArrowDown: [0, -step],
+        };
+        try {
+          if (event.key === 'Delete' || event.key === 'Backspace') {
+            this.session.deleteShape(id);
+            this.selectedShape = undefined;
+          } else if (event.key === 'Escape') {
+            this.selectedShape = undefined;
+            this.refresh();
+          } else if (delta[event.key]) {
+            const [dx, dy] = delta[event.key]!;
+            const bounds = this.session.snapshot.pages[shape.page - 1]!;
+            const extent: Rect = shape.box
+              ? shapeRect(shape)
+              : [
+                  Math.min(shape.start![0], shape.end![0]),
+                  Math.min(shape.start![1], shape.end![1]),
+                  Math.max(shape.start![0], shape.end![0]),
+                  Math.max(shape.start![1], shape.end![1]),
+                ];
+            const x = Math.max(bounds[0] - extent[0], Math.min(bounds[2] - extent[2], dx));
+            const y = Math.max(bounds[1] - extent[1], Math.min(bounds[3] - extent[3], dy));
+            this.session.updateShape(
+              id,
+              shape.box
+                ? { box: [shape.box[0] + x, shape.box[1] + y, shape.box[2] + x, shape.box[3] + y] }
+                : {
+                    start: [shape.start![0] + x, shape.start![1] + y],
+                    end: [shape.end![0] + x, shape.end![1] + y],
+                  },
+            );
+          } else {
+            return;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+          this.scheduleSave();
+        } catch (error) {
+          this.showError(error);
+        }
+      },
+      true,
+    );
     this.registerDomEvent(
       doc,
       'pointerdown',
@@ -310,7 +701,8 @@ export class TextEditor extends Component {
         }
         if (
           !ownControl &&
-          (!inPdf || !target.closest('.pdf-form-studio-box, .pdf-form-studio-ink-control'))
+          (!inPdf ||
+            !target.closest(`.pdf-form-studio-box, .pdf-form-studio-ink-control, ${MARK_UI}`))
         ) {
           this.selected = undefined;
           this.selectedStroke = undefined;
@@ -430,6 +822,8 @@ export class TextEditor extends Component {
               p: 'scribble',
               h: 'marker',
               e: 'eraser',
+              n: 'note',
+              r: 'shape',
             };
             const tool = shortcut[event.key.toLowerCase()];
             if (tool) {
@@ -733,6 +1127,8 @@ export class TextEditor extends Component {
           endTyping: () => {
             this.selected = undefined;
             this.selectedStroke = undefined;
+            this.selectedShape = undefined;
+            this.selectedImage = undefined;
             this.focused = undefined;
             this.endTextEditing();
           },
@@ -801,6 +1197,11 @@ export class TextEditor extends Component {
       active.blur();
     }
     this.tool = tool;
+    if (tool !== 'select') {
+      this.selectedShape = undefined;
+    }
+    this.hideSelectionBar();
+    this.closeMarkPopover();
     this.selected = retain;
     this.selectedStroke = undefined;
     this.updateStatus();
@@ -1075,6 +1476,9 @@ export class TextEditor extends Component {
     if (key === 'v' && !copiedObjects) {
       return false;
     }
+    if (key === 'v') {
+      this.objectPasteAt = Date.now();
+    }
     const view = this.native.element.ownerDocument.defaultView!;
     const answer =
       key === 'v' &&
@@ -1295,6 +1699,8 @@ export class TextEditor extends Component {
     return (
       this.toolbar.contains(target) ||
       !!this.popover?.element.contains(target) ||
+      !!this.highlightColors?.contains(target) ||
+      !!this.shapeMenu?.contains(target) ||
       (this.openingPopover && !!target.closest('.pfs-tool-popover'))
     );
   }
@@ -1432,14 +1838,21 @@ export class TextEditor extends Component {
     this.clearBrowserSelection();
     this.selected = undefined;
     this.selectedStroke = undefined;
+    this.selectedShape = undefined;
+    this.selectedImage = undefined;
     if (objects.length > 1) {
       this.selection?.selectObjects(objects);
     } else {
       this.selection?.clear();
-      if (objects[0]!.kind === 'text') {
-        this.selected = objects[0]!.id;
+      const [object] = objects as [PdfObject];
+      if (object.kind === 'text') {
+        this.selected = object.id;
+      } else if (object.kind === 'ink') {
+        this.selectedStroke = object.id;
+      } else if (object.kind === 'shape') {
+        this.selectedShape = object.id;
       } else {
-        this.selectedStroke = objects[0]!.id;
+        this.selectedImage = object.id;
       }
     }
     this.updateStatus();
@@ -1803,7 +2216,13 @@ export class TextEditor extends Component {
         this.selection.remove();
         return;
       }
-      if (this.selectedStroke) {
+      if (this.selectedShape) {
+        this.deleteShapeSelection(this.selectedShape);
+        this.scheduleSave();
+      } else if (this.selectedImage) {
+        this.deleteImageSelection(this.selectedImage);
+        this.scheduleSave();
+      } else if (this.selectedStroke) {
         this.session?.deleteStroke(this.selectedStroke);
         this.selectedStroke = undefined;
         this.scheduleSave();
@@ -1842,57 +2261,91 @@ export class TextEditor extends Component {
     this.syncObjectScope();
     const session = this.session;
     const blocked = session?.status === 'conflict' || !!session?.replacing;
+    setProp(this.listGroup, 'hidden', blocked || !this.listTargetNow());
+    this.updateHighlightButton();
     const selected = session?.snapshot.fields.find((field) => field.name === this.selected);
     const brush = this.tool === 'marker' || this.tool === 'scribble';
-    this.propertiesButton.disabled =
-      !session || blocked || (!brush && this.tool !== 'text' && !selected) || !!selected?.readOnly;
+    setProp(
+      this.propertiesButton,
+      'disabled',
+      !session || blocked || (!brush && this.tool !== 'text' && !selected) || !!selected?.readOnly,
+    );
     const color = brush
       ? this.tool === 'marker'
         ? this.markerColor
         : this.penColor
       : (selected?.color ?? this.textColor);
-    this.propertiesButton.style.setProperty('--pdf-tool-color', cssColor(color));
-    this.propertiesButton.setAttribute('aria-haspopup', 'dialog');
+    setStyle(this.propertiesButton, '--pdf-tool-color', cssColor(color));
+    setAttr(this.propertiesButton, 'aria-haspopup', 'dialog');
     const width = brush
       ? this.tool === 'marker'
         ? this.markerWidth
         : this.penWidth
       : (selected?.fontSize ?? this.fontSize);
-    this.propertiesButton.setAttribute('aria-label', brush ? 'Brush settings' : 'Text settings');
-    this.propertiesButton.querySelector('.pfs-tool-value')!.textContent =
-      `${Number(width.toFixed(1))} pt`;
+    setAttr(
+      this.propertiesButton,
+      'aria-label',
+      brush ? 'Pen and highlighter properties' : 'Text properties',
+    );
+    setText(
+      this.propertiesButton.querySelector('.pfs-tool-value')!,
+      `${Number(width.toFixed(1))} pt`,
+    );
     for (const [tool, button] of this.tools) {
       if (tool === 'marker' || tool === 'scribble') {
-        button.style.setProperty(
+        setStyle(
+          button,
           '--pdf-tool-color',
           cssColor(tool === 'marker' ? this.markerColor : this.penColor),
         );
       }
-      button.setAttribute('aria-pressed', String(this.tool === tool));
-      button.disabled = !session || blocked;
+      setAttr(button, 'aria-pressed', String(this.tool === tool));
+      if (tool === 'shape') {
+        // The shape tool shows the shape it will draw.
+        const icon = SHAPE_KINDS.find((item) => item.kind === this.shapeStyle.kind)!.icon;
+        if (button.dataset.icon !== icon) {
+          button.dataset.icon = icon;
+          setIcon(button, icon);
+        }
+      }
+      setProp(button, 'disabled', !session || blocked);
     }
-    this.editControls.hidden = false;
+    setProp(this.editControls, 'hidden', false);
     this.native.element.classList.toggle('pdf-form-studio-editing', !!session);
-    this.native.element.dataset.pdfTool = this.tool;
-    this.saveButton.disabled = !session?.dirty || blocked;
+    setAttr(this.native.element, 'data-pdf-tool', this.tool);
+    setProp(this.saveButton, 'disabled', !session?.dirty || blocked);
     const stroke = session?.snapshot.strokes.find((stroke) => stroke.id === this.selectedStroke);
-    this.removeButton.disabled =
-      (!this.selection?.objects.length && !selected?.owned && !stroke) ||
-      !!selected?.readOnly ||
-      !!stroke?.readOnly ||
-      blocked;
-    this.removeButton.hidden = false;
-    setTooltip(
+    setProp(
       this.removeButton,
-      this.selection?.objects.length
-        ? 'Remove selection'
-        : stroke
-          ? 'Remove mark'
-          : 'Remove text box',
-      { classes: ['pfs-overlay-tooltip'] },
+      'disabled',
+      (!this.selection?.objects.length &&
+        !selected?.owned &&
+        !stroke &&
+        !this.selectedShape &&
+        !this.selectedImage) ||
+        !!selected?.readOnly ||
+        !!stroke?.readOnly ||
+        blocked,
     );
-    this.undoButton.disabled = !session?.canUndoStroke || blocked;
-    this.redoButton.disabled = !session?.canRedoStroke || blocked;
+    setProp(this.removeButton, 'hidden', this.removeButton.disabled);
+    const removeLabel = withKeys(
+      this.selection?.objects.length
+        ? 'Delete selection'
+        : stroke
+          ? 'Delete drawing'
+          : this.selectedShape
+            ? 'Delete shape'
+            : this.selectedImage
+              ? 'Delete image'
+              : 'Delete text box',
+      'Delete',
+    );
+    if (this.removeButton.dataset.label !== removeLabel) {
+      this.removeButton.dataset.label = removeLabel;
+      setTooltip(this.removeButton, removeLabel, { classes: ['pfs-overlay-tooltip'] });
+    }
+    setProp(this.undoButton, 'disabled', !session?.canUndoStroke || blocked);
+    setProp(this.redoButton, 'disabled', !session?.canRedoStroke || blocked);
     const status = session
       ? {
           saved: 'Saved to PDF',
@@ -1902,33 +2355,38 @@ export class TextEditor extends Component {
           conflict: 'File changed',
         }[session.status]
       : 'Loading…';
-    this.status.replaceChildren();
-    setIcon(
-      this.status,
-      session?.status === 'saved'
-        ? 'check'
-        : session?.status === 'error' || blocked
-          ? 'triangle-alert'
-          : 'loader-circle',
-    );
-    this.status.removeAttribute('aria-label');
-    this.status.dataset.state = session?.status;
-    const accessible = this.status.ownerDocument.createElement('span');
-    accessible.className = 'pdf-form-studio-sr-only';
-    accessible.textContent = status;
-    this.status.append(accessible);
-    {
-      accessible.className = 'pfs-save-label';
-      accessible.textContent =
+    // Rebuild the status only when it changes (it is updated on every refresh).
+    const statusKey = `${session?.status}|${blocked}|${status}`;
+    if (this.status.dataset.key !== statusKey || !this.status.childElementCount) {
+      this.status.dataset.key = statusKey;
+      this.status.replaceChildren();
+      setIcon(
+        this.status,
         session?.status === 'saved'
-          ? 'Saved'
-          : session?.status === 'saving'
-            ? 'Saving…'
-            : session?.status === 'unsaved'
-              ? 'Unsaved'
-              : status;
+          ? 'check'
+          : session?.status === 'error' || blocked
+            ? 'triangle-alert'
+            : 'loader-circle',
+      );
+      this.status.removeAttribute('aria-label');
+      this.status.dataset.state = session?.status;
+      const accessible = this.status.ownerDocument.createElement('span');
+      accessible.className = 'pdf-form-studio-sr-only';
+      accessible.textContent = status;
+      this.status.append(accessible);
+      {
+        accessible.className = 'pfs-save-label';
+        accessible.textContent =
+          session?.status === 'saved'
+            ? 'Saved'
+            : session?.status === 'saving'
+              ? 'Saving…'
+              : session?.status === 'unsaved'
+                ? 'Unsaved'
+                : status;
+      }
     }
-    this.message.textContent = session?.error || this.loadError;
+    setText(this.message, session?.error || this.loadError);
     this.message.classList.toggle(
       'is-error',
       !!this.loadError || session?.status === 'error' || blocked,
@@ -1958,65 +2416,82 @@ export class TextEditor extends Component {
       this.session?.status === 'conflict' ||
       this.session?.replacing ||
       this.session?.status === 'saving';
-    menu.addItem((item) =>
-      item
-        .setTitle('Floating toolbar')
-        .setIcon('pin')
-        .setChecked(this.sessions.preferences.floatingToolbar)
-        .onClick(() => {
-          void this.sessions
-            .updatePreferences({
-              ...this.sessions.preferences,
-              floatingToolbar: !this.sessions.preferences.floatingToolbar,
-            })
-            .catch((error) => this.showError(error));
-        }),
+    const commands = (
+      this.app as unknown as {
+        commands?: { executeCommandById(id: string): boolean };
+      }
+    ).commands;
+    const item = (
+      section: string,
+      title: string,
+      icon: string,
+      run: () => void,
+      options: { disabled?: boolean; checked?: boolean } = {},
+    ) =>
+      menu.addItem((entry) => {
+        entry.setTitle(title).setIcon(icon).setSection(section).onClick(run);
+        if (options.disabled) {
+          entry.setDisabled(true);
+        }
+        if (options.checked !== undefined) {
+          entry.setChecked(options.checked);
+        }
+      });
+    item('file', withKeys('Save', 'Mod+S'), 'save', () => void this.save(), {
+      disabled: !this.session?.dirty || !!blocked,
+    });
+    item('file', 'Reload PDF', 'refresh-cw', () => this.requestReload(), {
+      disabled: !this.session,
+    });
+    item('marks', 'Show highlights and comments', 'highlighter', () =>
+      commands?.executeCommandById('pdf-editor:show-pdf-highlights'),
     );
-    menu.addSeparator();
-    menu.addItem((item) =>
-      item
-        .setTitle('Reload PDF')
-        .setIcon('refresh-cw')
-        .setDisabled(!this.session)
-        .onClick(() => this.requestReload()),
+    item(
+      'marks',
+      'Export highlights and comments to a note',
+      'file-output',
+      () => void exportMarks(this.app, this.sessions, file),
     );
-    menu.addSeparator();
-    menu.addItem((item) =>
-      item
-        .setTitle('Recovery copies…')
-        .setIcon('shield-check')
-        .onClick(() => {
-          const modal = new RecoveryInfo(this.app, this.sessions, file);
+    item(
+      'view',
+      'Floating toolbar',
+      'pin',
+      () => {
+        void this.sessions
+          .updatePreferences({
+            ...this.sessions.preferences,
+            floatingToolbar: !this.sessions.preferences.floatingToolbar,
+          })
+          .catch((error) => this.showError(error));
+      },
+      { checked: this.sessions.preferences.floatingToolbar },
+    );
+    item(
+      'backups',
+      'Preview original PDF',
+      'folder-open',
+      () => {
+        if (original) {
+          const modal = new RecoveryPreview(this.app, () => this.sessions.readRecovery(file));
           this.register(() => modal.close());
           modal.open();
-        }),
+        }
+      },
+      { disabled: !original },
     );
-    menu.addItem((item) =>
-      item
-        .setTitle('Preview original PDF')
-        .setIcon('folder-open')
-        .setDisabled(!original)
-        .onClick(() => {
-          if (original) {
-            const modal = new RecoveryPreview(this.app, () => this.sessions.readRecovery(file));
-            this.register(() => modal.close());
-            modal.open();
-          }
-        }),
-    );
-    menu.addItem((item) =>
-      item
-        .setTitle('Restore original backup…')
-        .setIcon('history')
-        .setDisabled(!original || blocked)
-        .onClick(() => this.requestRestore('original')),
-    );
-    menu.addItem((item) =>
-      item
-        .setTitle('Undo last restore…')
-        .setIcon('undo-2')
-        .setDisabled(!recovery || blocked)
-        .onClick(() => this.requestRestore('recovery')),
+    item('backups', 'Restore original…', 'history', () => this.requestRestore('original'), {
+      disabled: !original || !!blocked,
+    });
+    item('backups', 'Undo last restore…', 'undo-2', () => this.requestRestore('recovery'), {
+      disabled: !recovery || !!blocked,
+    });
+    item('backups', 'Recovery copies…', 'shield-check', () => {
+      const modal = new RecoveryInfo(this.app, this.sessions, file);
+      this.register(() => modal.close());
+      modal.open();
+    });
+    item('exit', "Open in Obsidian's PDF viewer", 'book-open', () =>
+      commands?.executeCommandById('pdf-editor:toggle-pdf-editing'),
     );
     const bounds = anchor.getBoundingClientRect();
     menu.showAtPosition({ x: bounds.left, y: bounds.bottom }, anchor.ownerDocument);
@@ -2049,7 +2524,7 @@ export class TextEditor extends Component {
         ?.checkpoint()
         .then(() => this.session?.save())
         .catch((error) => this.showError(error));
-    }, 900);
+    }, this.sessions.preferences.autosaveDelay);
   }
 
   private releaseFocus(): void {
@@ -2150,11 +2625,14 @@ export class TextEditor extends Component {
           this.releaseFocus();
         }
         entry.cancelPlacement?.();
+        entry.shapes?.dispose();
+        entry.images?.dispose();
         this.removeChild(entry.ink);
         for (const control of entry.controls.values()) {
           control.dispose?.();
         }
         entry.layer.remove();
+        entry.highlights?.remove();
         this.layers.delete(div);
       }
     }
@@ -2214,12 +2692,15 @@ export class TextEditor extends Component {
             error: (error) => this.showError(error),
           }),
         );
-        entry = { page, layer, controls: new Map(), ink };
+        entry = { page, layer, controls: new Map(), choices: new Map(), marks: new Map(), ink };
         this.layers.set(page.div, entry);
         this.bindPlacement(entry);
+        this.bindMarks(page.div, layer);
+        entry.shapes = this.shapeLayer(page, layer);
+        entry.images = this.imageLayer(page, layer);
       }
       entry.page = page;
-      entry.layer.dataset.tool = this.tool;
+      setAttr(entry.layer, 'data-tool', this.tool);
       entry.ink.update(page);
       const fieldWidgets = this.session.snapshot.fields
         .filter((field) => !field.readOnly)
@@ -2254,15 +2735,18 @@ export class TextEditor extends Component {
         if (!this.composing.has(control.input) && control.input.value !== field.value) {
           control.input.value = field.value;
         }
-        control.input.disabled = field.readOnly;
-        control.input.readOnly =
+        setProp(control.input, 'disabled', field.readOnly);
+        setProp(
+          control.input,
+          'readOnly',
           this.session.status === 'conflict' ||
-          this.session.replacing ||
-          this.editing !== field.name;
+            this.session.replacing ||
+            this.editing !== field.name,
+        );
         const drawing =
           this.tool === 'marker' || this.tool === 'scribble' || this.tool === 'eraser';
-        control.input.tabIndex = !drawing && this.editing === field.name ? 0 : -1;
-        control.frame.tabIndex = drawing ? -1 : 0;
+        setProp(control.input, 'tabIndex', !drawing && this.editing === field.name ? 0 : -1);
+        setProp(control.frame, 'tabIndex', drawing ? -1 : 0);
         control.frame.classList.toggle(
           'is-answer-field',
           this.answerFields.has(field.name) || !!field.ruled,
@@ -2286,6 +2770,10 @@ export class TextEditor extends Component {
             (field.owned && field.widgets.length !== 1),
         );
       }
+      this.refreshChoices(entry);
+      this.refreshMarks(entry);
+      (entry.shapes ??= this.shapeLayer(entry.page, entry.layer)).update(entry.page, this.session);
+      (entry.images ??= this.imageLayer(entry.page, entry.layer)).update(entry.page, this.session);
       // Explicit reload/recovery can replace pages. Restore focus only when
       // the user has not deliberately moved it elsewhere.
       const active = page.div.ownerDocument.activeElement;
@@ -2313,6 +2801,2349 @@ export class TextEditor extends Component {
     this.popover?.refreshSpacing();
   }
 
+  /** Replace a text box's value with a list edit and run the normal input path (history, autosave). */
+  private applyListEdit(input: HTMLTextAreaElement, edit: TextEdit | undefined): boolean {
+    if (
+      !edit ||
+      input.readOnly ||
+      input.disabled ||
+      (input.maxLength > 0 && edit.value.length > input.maxLength)
+    ) {
+      return false;
+    }
+    input.value = edit.value;
+    input.setSelectionRange(edit.start, edit.end);
+    this.listEditing = true;
+    try {
+      input.dispatchEvent(new input.ownerDocument.defaultView!.Event('input'));
+    } finally {
+      this.listEditing = false;
+    }
+    return true;
+  }
+
+  private listTarget(name: string): boolean {
+    const field = this.session?.snapshot.fields.find((item) => item.name === name);
+    // Detected answer lines keep Tab for moving between lines.
+    return !!field && !field.ruled && !this.answerFields.has(name);
+  }
+
+  /** Enter continues lists; Tab/Shift+Tab indent; Ctrl/Cmd+Shift+8/7 toggle bullets/numbers. */
+  private listKey(event: KeyboardEvent, input: HTMLTextAreaElement, name: string): void {
+    if (event.isComposing || event.altKey || !this.listTarget(name)) {
+      return;
+    }
+    const edit = { value: input.value, start: input.selectionStart, end: input.selectionEnd };
+    const mod = event.metaKey || event.ctrlKey;
+    let handled = false;
+    if (event.key === 'Enter' && !mod && !event.shiftKey) {
+      handled = this.applyListEdit(input, continueList(edit));
+    } else if (event.key === 'Tab' && !mod) {
+      handled = this.applyListEdit(input, indent(edit, event.shiftKey ? -1 : 1));
+    } else if (mod && event.shiftKey && (event.code === 'Digit8' || event.code === 'Digit7')) {
+      handled = this.applyListEdit(
+        input,
+        toggleList(edit, event.code === 'Digit8' ? 'bullet' : 'number'),
+      );
+    }
+    if (handled) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+  }
+
+  /** The text box that list buttons act on: the one being edited or selected. */
+  private listTargetNow(): { input: HTMLTextAreaElement; name: string } | undefined {
+    const doc = this.native.element.ownerDocument;
+    const remembered = this.listInput;
+    if (
+      remembered?.input.isConnected &&
+      this.listTarget(remembered.name) &&
+      (doc.activeElement === remembered.input ||
+        this.editing === remembered.name ||
+        this.selected === remembered.name ||
+        this.activeBox === remembered.name)
+    ) {
+      return remembered;
+    }
+    const name = this.selected ?? this.activeBox;
+    if (!name || !this.listTarget(name)) {
+      return undefined;
+    }
+    for (const entry of this.layers.values()) {
+      for (const control of entry.controls.values()) {
+        if (
+          control.input.dataset.pdfField === name &&
+          control.input instanceof doc.defaultView!.HTMLTextAreaElement
+        ) {
+          return { input: control.input, name };
+        }
+      }
+    }
+    return undefined;
+  }
+
+  /** Toolbar list action: edit the session value directly, then restore caret and focus. */
+  private listAction(action: (edit: TextEdit) => TextEdit): void {
+    const target = this.listTargetNow();
+    const session = this.session;
+    const field = session?.snapshot.fields.find((item) => item.name === target?.name);
+    if (!target || !session || !field || field.readOnly) {
+      return;
+    }
+    const { input, name } = target;
+    // The textarea keeps its selection after losing focus; fall back to all lines.
+    const synced = input.value === field.value;
+    const edit = action({
+      value: field.value,
+      start: synced ? input.selectionStart : 0,
+      end: synced ? input.selectionEnd : field.value.length,
+    });
+    if (field.maxLength !== undefined && edit.value.length > field.maxLength) {
+      return;
+    }
+    try {
+      session.setValue(name, edit.value, true);
+    } catch (error) {
+      this.showError(error);
+      return;
+    }
+    input.value = edit.value;
+    input.focus({ preventScroll: true });
+    input.setSelectionRange(edit.start, edit.end);
+    for (const entry of this.layers.values()) {
+      for (const control of entry.controls.values()) {
+        if (control.input === input) {
+          this.growField(entry, control);
+        }
+      }
+    }
+    this.scheduleSave();
+    this.updateStatus();
+  }
+
+  /** Convert a client point to PDF coordinates on one page layer. */
+  private pdfPoint(entry: PageLayer, clientX: number, clientY: number): [number, number] {
+    const box = entry.layer.getBoundingClientRect();
+    const { viewport } = entry.page;
+    const x = ((clientX - box.left) * viewport.width) / (box.width || viewport.width);
+    const y = ((clientY - box.top) * viewport.height) / (box.height || viewport.height);
+    const [px, py] = viewport.convertToPdfPoint(x, y);
+    return [px!, py!];
+  }
+
+  private hideSelectionBar(): void {
+    this.selectionBar?.element.remove();
+    this.selectionBar = undefined;
+  }
+
+  /** Cheap check without layout reads: is PDF text selected in this viewer? */
+  private hasTextSelection(): boolean {
+    const selection = this.native.element.ownerDocument.getSelection();
+    if (this.tool !== 'select' || !selection || selection.isCollapsed || !selection.rangeCount) {
+      return false;
+    }
+    return [selection.anchorNode, selection.focusNode].some((node) => {
+      const element = node?.nodeType === 1 ? (node as Element) : node?.parentElement;
+      return (
+        !!element &&
+        this.native.element.contains(element) &&
+        !!element.closest('.pfs-text-layer, .textLayer')
+      );
+    });
+  }
+
+  private updateHighlightButton(): void {
+    if (!this.highlightButton) {
+      return;
+    }
+    const ready = this.hasTextSelection();
+    if (!ready) {
+      setAttr(this.highlightButton, 'aria-pressed', 'false');
+    }
+    if (
+      this.highlightButton.disabled === !ready &&
+      this.highlightButton.dataset.color === String(this.markColor)
+    ) {
+      return;
+    }
+    this.highlightButton.dataset.color = String(this.markColor);
+    for (const element of [this.highlightButton, this.highlightCommentButton]) {
+      element.disabled = !ready;
+    }
+    this.highlightButton.style.setProperty('--pdf-tool-color', cssColor(this.markColor));
+    setTooltip(
+      this.highlightButton,
+      ready ? 'Highlight selected text' : 'Select text on the PDF to highlight it',
+    );
+  }
+
+  private capturePressedSelection(): void {
+    const found = this.selectionQuads();
+    if (found) {
+      this.pressedSelection = { found, time: Date.now() };
+    }
+  }
+
+  /** Command palette actions for the active PDF; false when the action does not apply. */
+  runAction(action: EditorAction, checking: boolean): boolean {
+    if (!this.loaded || !this.session || this.session.replacing) {
+      return false;
+    }
+    if (TOOL_ACTIONS.includes(action as EditorTool)) {
+      if (!checking) {
+        this.setTool(action as EditorTool);
+      }
+      return true;
+    }
+    if (action === 'insert-image') {
+      if (!checking) {
+        this.chooseImageFile();
+      }
+      return true;
+    }
+    if (!this.selectionQuads()) {
+      return false;
+    }
+    if (!checking) {
+      if (action === 'highlight') {
+        this.highlightSelection('toggle');
+      } else {
+        this.lineSelection(action as 'underline' | 'strikeout');
+      }
+    }
+    return true;
+  }
+
+  /** Underline or strike through the selected text; again on marked text removes it. */
+  private lineSelection(kind: 'underline' | 'strikeout'): void {
+    const pressed =
+      this.pressedSelection && Date.now() - this.pressedSelection.time < 30000
+        ? this.pressedSelection.found
+        : undefined;
+    const found = this.selectionQuads() ?? pressed;
+    this.pressedSelection = undefined;
+    if (found) {
+      this.createTextMarks(found.quads, kind);
+    }
+  }
+
+  private createTextMarks(quads: Map<PageLayer, Rect[]>, kind: TextMarkKind): void {
+    const session = this.session!;
+    try {
+      for (const [entry, rects] of quads) {
+        if (session.highlightsAt(entry.page.number, rects, kind).length) {
+          session.eraseHighlights(entry.page.number, rects, kind);
+          continue;
+        }
+        session.addMark({ page: entry.page.number, kind, quads: rects, color: this.lineColor });
+      }
+    } catch (error) {
+      this.showError(error);
+    }
+    this.native.element.ownerDocument.getSelection()?.removeAllRanges();
+    this.hideSelectionBar();
+    this.updateHighlightButton();
+    this.refresh();
+    this.scheduleSave();
+  }
+
+  private highlightSelection(mode: HighlightMode): void {
+    const pressed =
+      this.pressedSelection && Date.now() - this.pressedSelection.time < 30000
+        ? this.pressedSelection.found
+        : undefined;
+    const found = this.selectionQuads() ?? pressed;
+    this.pressedSelection = undefined;
+    if (found) {
+      this.createHighlights(found.quads, mode);
+    }
+    this.updateHighlightButton();
+  }
+
+  /** Small colour menu under the toolbar; picking a colour also highlights a current selection. */
+  /**
+   * Colour menu for the toolbar highlight button. It is a document-level portal at the
+   * button's position: inside the toolbar it would be clipped by the scrolling tool row.
+   */
+  private toggleHighlightColors(anchor: HTMLElement): void {
+    if (this.highlightColors) {
+      this.closeHighlightColors();
+      return;
+    }
+    const doc = anchor.ownerDocument;
+    const menu = doc.createElement('div');
+    menu.className = 'pfs-highlight-colors pfs-mark-ui';
+    menu.setAttribute('role', 'menu');
+    menu.setAttribute('aria-label', 'Highlight color');
+    // Two rows: highlight colours, then line colours for underline and strikethrough.
+    const rows = [
+      { title: 'Highlight', colors: MARK_COLORS, line: false },
+      { title: 'Underline and strikethrough', colors: LINE_COLORS, line: true },
+    ];
+    for (const { title, colors, line } of rows) {
+      const row = menu.createDiv({
+        cls: 'pfs-highlight-colors-row',
+        attr: { 'aria-label': title },
+      });
+      for (const { name, color } of colors) {
+        const current = line ? this.lineColor : this.markColor;
+        const swatch = doc.createElement('button');
+        swatch.type = 'button';
+        swatch.className = line ? 'pfs-mark-swatch is-line' : 'pfs-mark-swatch';
+        swatch.setAttribute('role', 'menuitemradio');
+        swatch.setAttribute('aria-checked', String(color.every((v, i) => v === current[i])));
+        swatch.style.backgroundColor = cssColor(color);
+        setTooltip(swatch, line ? `${name} lines` : `Highlight ${name.toLowerCase()}`);
+        swatch.addEventListener('pointerdown', (event) => {
+          event.preventDefault();
+          this.capturePressedSelection();
+        });
+        swatch.addEventListener('mousedown', (event) => event.preventDefault());
+        swatch.addEventListener('click', () => {
+          this.closeHighlightColors();
+          if (line) {
+            this.lineColor = color;
+            return;
+          }
+          this.markColor = color;
+          this.highlightSelection('color');
+        });
+        row.append(swatch);
+      }
+    }
+    const box = anchor.getBoundingClientRect();
+    const view = doc.defaultView!;
+    menu.style.left = `${Math.max(4, Math.min(box.left - 60, view.innerWidth - 150))}px`;
+    menu.style.top = `${box.bottom + 4}px`;
+    doc.body.append(menu);
+    this.highlightColors = menu;
+    const outside = (event: Event) => {
+      const target = event.target;
+      if (!(target instanceof view.Node) || (!menu.contains(target) && !anchor.contains(target))) {
+        this.closeHighlightColors();
+      }
+    };
+    const key = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        this.closeHighlightColors();
+      }
+    };
+    const moved = () => this.closeHighlightColors();
+    doc.addEventListener('pointerdown', outside, true);
+    doc.addEventListener('keydown', key, true);
+    view.addEventListener('resize', moved);
+    doc.addEventListener('scroll', moved, true);
+    this.closeColors = () => {
+      doc.removeEventListener('pointerdown', outside, true);
+      doc.removeEventListener('keydown', key, true);
+      view.removeEventListener('resize', moved);
+      doc.removeEventListener('scroll', moved, true);
+    };
+  }
+
+  private closeHighlightColors(): void {
+    this.closeColors?.();
+    this.closeColors = undefined;
+    this.highlightColors?.remove();
+    this.highlightColors = undefined;
+  }
+
+  /** PDF text currently selected on this viewer's pages, as one quad per line per page. */
+  private selectionQuads():
+    | { quads: Map<PageLayer, Rect[]>; last: { entry: PageLayer; x: number; y: number } }
+    | undefined {
+    const doc = this.native.element.ownerDocument;
+    const selection = doc.getSelection();
+    const session = this.session;
+    if (
+      this.tool !== 'select' ||
+      !session ||
+      session.status === 'conflict' ||
+      session.replacing ||
+      !selection ||
+      selection.isCollapsed ||
+      !selection.rangeCount
+    ) {
+      return undefined;
+    }
+    const inText = (node: Node | null) => {
+      const element = node?.nodeType === 1 ? (node as Element) : node?.parentElement;
+      return (
+        !!element &&
+        this.native.element.contains(element) &&
+        !!element.closest('.pfs-text-layer, .textLayer')
+      );
+    };
+    if (!inText(selection.anchorNode) && !inText(selection.focusNode)) {
+      return undefined;
+    }
+    const rects = [...selection.getRangeAt(0).getClientRects()].filter(
+      (rect) => rect.width > 0.5 && rect.height > 0.5,
+    );
+    const quads = new Map<PageLayer, Rect[]>();
+    let last: { entry: PageLayer; x: number; y: number } | undefined;
+    for (const entry of this.layers.values()) {
+      const box = entry.layer.getBoundingClientRect();
+      if (!box.width || !box.height) {
+        continue;
+      }
+      const sx = entry.page.viewport.width / box.width;
+      const sy = entry.page.viewport.height / box.height;
+      const own: Rect[] = [];
+      for (const rect of rects) {
+        const cx = (rect.left + rect.right) / 2;
+        const cy = (rect.top + rect.bottom) / 2;
+        if (cx < box.left || cx > box.right || cy < box.top || cy > box.bottom) {
+          continue;
+        }
+        const start: [number, number] = [(rect.left - box.left) * sx, (rect.top - box.top) * sy];
+        const end: [number, number] = [(rect.right - box.left) * sx, (rect.bottom - box.top) * sy];
+        own.push(pdfRectangle(entry.page.viewport, start, end));
+        last = { entry, x: start[0], y: end[1] };
+      }
+      const lines = lineQuads(own);
+      if (lines.length) {
+        quads.set(entry, lines);
+      }
+    }
+    return last && quads.size ? { quads, last } : undefined;
+  }
+
+  /** Offer highlight colours and a comment button next to selected PDF text. */
+  private updateSelectionBar(): void {
+    this.updateHighlightButton();
+    const doc = this.native.element.ownerDocument;
+    const found = this.selectionQuads();
+    if (!found) {
+      this.hideSelectionBar();
+      return;
+    }
+    const { quads, last } = found;
+    const highlighted = [...quads].some(
+      ([entry, rects]) => this.session!.highlightsAt(entry.page.number, rects).length,
+    );
+    setAttr(this.highlightButton, 'aria-pressed', String(highlighted));
+    setTooltip(
+      this.highlightButton,
+      highlighted ? 'Remove highlight from selected text' : 'Highlight selected text',
+    );
+    this.hideSelectionBar();
+    const bar = doc.createElement('div');
+    bar.className = 'pfs-selection-bar pfs-mark-ui';
+    bar.setAttribute('role', 'toolbar');
+    bar.setAttribute('aria-label', 'Highlight selected text');
+    for (const { name, color } of MARK_COLORS) {
+      const swatch = doc.createElement('button');
+      swatch.type = 'button';
+      swatch.className = 'pfs-mark-swatch';
+      swatch.style.backgroundColor = cssColor(color);
+      swatch.classList.toggle(
+        'is-active',
+        color.every((v, i) => v === this.markColor[i]),
+      );
+      setTooltip(swatch, `Highlight ${name.toLowerCase()}`);
+      swatch.addEventListener('click', () => {
+        this.markColor = color;
+        this.createHighlights(quads, 'color');
+      });
+      bar.append(swatch);
+    }
+    const divider = () =>
+      bar.createSpan({ cls: 'pfs-bar-separator', attr: { 'aria-hidden': 'true' } });
+    divider();
+    const comment = doc.createElement('button');
+    comment.type = 'button';
+    comment.className = 'clickable-icon pfs-mark-comment-button';
+    setIcon(comment, 'message-square-plus');
+    setTooltip(comment, 'Highlight and comment');
+    comment.addEventListener('click', () => this.createHighlights(quads, 'comment'));
+    bar.append(comment);
+    divider();
+    for (const [kind, icon, label] of [
+      ['underline', 'underline', 'Underline'],
+      ['strikeout', 'strikethrough', 'Strike through'],
+    ] as const) {
+      const line = doc.createElement('button');
+      line.type = 'button';
+      line.className = `clickable-icon pfs-mark-${kind}-button`;
+      setIcon(line, icon);
+      setTooltip(line, label);
+      line.addEventListener('click', () => this.createTextMarks(quads, kind));
+      bar.append(line);
+    }
+    // Already highlighted text: offer removing just the selected part.
+    if (
+      [...quads].some(
+        ([entry, rects]) => this.session!.highlightsAt(entry.page.number, rects).length,
+      )
+    ) {
+      const remove = doc.createElement('button');
+      remove.type = 'button';
+      remove.className = 'clickable-icon pfs-mark-remove-button';
+      divider();
+      setIcon(remove, 'x');
+      setTooltip(remove, 'Remove highlight from selection');
+      remove.addEventListener('click', () => this.createHighlights(quads, 'toggle'));
+      bar.append(remove);
+    }
+    // Keep the text selection while pressing the bar.
+    for (const type of ['pointerdown', 'mousedown'] as const) {
+      bar.addEventListener(type, (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      });
+    }
+    const width = last.entry.page.viewport.width;
+    bar.style.left = `${Math.max(0, Math.min(last.x, width - 250))}px`;
+    bar.style.top = `${last.y + 6}px`;
+    last.entry.layer.append(bar);
+    this.selectionBar = { element: bar, quads };
+  }
+
+  /**
+   * toggle: highlight, or remove the selected part if it is already highlighted.
+   * color: highlight in the chosen colour; already highlighted text in the same colour
+   * is removed, in another colour it is re-coloured.
+   * comment: highlight and open the comment (or open the existing highlight's comment).
+   */
+  private createHighlights(quads: Map<PageLayer, Rect[]>, mode: HighlightMode): void {
+    const session = this.session!;
+    let opened: { entry: PageLayer; id: string } | undefined;
+    try {
+      for (const [entry, rects] of quads) {
+        const existing = session.highlightsAt(entry.page.number, rects);
+        if (mode === 'comment' && existing.length) {
+          opened = { entry, id: existing[0]!.id };
+          continue;
+        }
+        if (existing.length) {
+          const sameColour = existing.every((mark) =>
+            mark.color.every((value, i) => Math.abs(value - this.markColor[i]!) < 0.001),
+          );
+          session.eraseHighlights(entry.page.number, rects);
+          if (mode === 'toggle' || sameColour) {
+            continue;
+          }
+        }
+        const mark = session.addMark({
+          page: entry.page.number,
+          kind: 'highlight',
+          quads: rects,
+          color: this.markColor,
+          opacity: this.sessions.preferences.highlightOpacity / 100,
+        });
+        opened = { entry, id: mark.id };
+      }
+    } catch (error) {
+      this.showError(error);
+    }
+    this.native.element.ownerDocument.getSelection()?.removeAllRanges();
+    this.hideSelectionBar();
+    this.updateHighlightButton();
+    this.refresh();
+    this.scheduleSave();
+    if (mode === 'comment' && opened) {
+      this.openMarkPopover(opened.entry, opened.id, false);
+    }
+  }
+
+  /** Clicks on a highlight open its comment; the note tool places a new note. */
+  private bindMarks(div: HTMLElement, layer: HTMLElement): void {
+    layer.addEventListener('pointerdown', (event) => {
+      const entry = this.layers.get(div);
+      if (this.tool !== 'note' || event.target !== layer || event.button !== 0 || !entry) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      try {
+        const mark = this.session!.addMark({
+          page: entry.page.number,
+          kind: 'note',
+          at: this.pdfPoint(entry, event.clientX, event.clientY),
+          color: MARK_COLORS[0]!.color,
+        });
+        this.setTool('select');
+        this.openMarkPopover(entry, mark.id, true);
+      } catch (error) {
+        this.showError(error);
+      }
+    });
+    if (this.markClickPages.has(div)) {
+      return;
+    }
+    this.markClickPages.add(div);
+    this.bindContextMenu(div);
+    this.registerDomEvent(div, 'click', (event) => {
+      const entry = this.layers.get(div);
+      const target = event.target as Element;
+      if (
+        !entry ||
+        this.tool !== 'select' ||
+        div.ownerDocument.getSelection()?.isCollapsed === false ||
+        target.closest(`.pdf-form-studio-box, .pfs-choice, ${MARK_UI}`)
+      ) {
+        return;
+      }
+      const [x, y] = this.pdfPoint(entry, event.clientX, event.clientY);
+      const mark = this.session?.snapshot.marks?.find(
+        (item) =>
+          item.page === entry.page.number &&
+          isTextMark(item.kind) &&
+          item.quads.some((q) => x >= q[0] && x <= q[2] && y >= q[1] && y <= q[3]),
+      );
+      if (mark) {
+        this.openMarkPopover(entry, mark.id, false);
+      }
+    });
+  }
+
+  /** Right-click menu for shapes, highlights, notes, text boxes, drawings and the page. */
+  private bindContextMenu(div: HTMLElement): void {
+    // Only remember the pointer here: measuring the page on every move forces layout.
+    this.registerDomEvent(div, 'pointermove', (event) => {
+      this.hover = { div, x: event.clientX, y: event.clientY };
+    });
+    this.registerDomEvent(div, 'pointerleave', () => {
+      if (this.hover?.div === div) {
+        this.hover = undefined;
+      }
+    });
+    this.registerDomEvent(div, 'contextmenu', (event) => {
+      const entry = this.layers.get(div);
+      const target = event.target as Element;
+      if (
+        !entry ||
+        !this.session ||
+        !this.loaded ||
+        !(target instanceof div.ownerDocument.defaultView!.Element)
+      ) {
+        return;
+      }
+      // Typing keeps the native spelling/clipboard menu; selected PDF text keeps
+      // Obsidian's (and PDF++'s) menu for copying text and links.
+      const typing = target.closest(
+        'input, textarea, [contenteditable="true"]',
+      ) as HTMLInputElement | null;
+      if (
+        (typing && !typing.readOnly) ||
+        target.closest('.pfs-choice') ||
+        (target.closest('.pfs-mark-ui') && !target.closest('[data-mark-id]')) ||
+        (div.ownerDocument.getSelection()?.isCollapsed === false && target.closest('.textLayer'))
+      ) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      const at = this.pdfPoint(entry, event.clientX, event.clientY);
+      this.openContextMenu(entry, this.contextTarget(entry, target, at), at, event);
+    });
+  }
+
+  private contextTarget(entry: PageLayer, target: Element, [x, y]: Point): ContextTarget {
+    const snapshot = this.session!.snapshot;
+    const page = entry.page.number;
+    const shapeId = target.closest<HTMLElement | SVGElement>('[data-shape-id]')?.dataset.shapeId;
+    const shape = shapeId && snapshot.shapes?.find((item) => item.id === shapeId);
+    const group = this.selection?.objects ?? [];
+    if (shape && group.length > 1 && group.some((item) => item.id === shape.id)) {
+      return { kind: 'objects', objects: [...group] };
+    }
+    if (shape) {
+      return { kind: 'shape', shape };
+    }
+    const imageId = target.closest<HTMLElement>('[data-image-id]')?.dataset.imageId;
+    const image = imageId && snapshot.images?.find((item) => item.id === imageId);
+    if (image && group.length > 1 && group.some((item) => item.id === image.id)) {
+      return { kind: 'objects', objects: [...group] };
+    }
+    if (image) {
+      return { kind: 'image', image };
+    }
+    const markId = target.closest<HTMLElement>('[data-mark-id]')?.dataset.markId;
+    const note = markId && snapshot.marks?.find((item) => item.id === markId);
+    if (note) {
+      return { kind: 'mark', mark: note };
+    }
+    const fieldName = target
+      .closest('.pdf-form-studio-box')
+      ?.querySelector<HTMLElement>('[data-pdf-field]')?.dataset.pdfField;
+    const field =
+      fieldName &&
+      snapshot.fields.find((item) => item.name === fieldName && item.owned && !item.readOnly);
+    const scale = entry.page.viewport.scale || 1;
+    const stroke = field
+      ? undefined
+      : [...snapshot.strokes]
+          .reverse()
+          .find(
+            (item) =>
+              item.page === page &&
+              !item.readOnly &&
+              !item.hidden &&
+              hitsStroke(item.points, [x, y], [x, y], item.width / 2 + 6 / scale),
+          );
+    if (field || stroke) {
+      const object: PdfObject = field
+        ? { kind: 'text', id: field.name }
+        : { kind: 'ink', id: stroke!.id };
+      const selected = this.selectedObjects();
+      if (selected.some((item) => item.kind === object.kind && item.id === object.id)) {
+        return { kind: 'objects', objects: selected };
+      }
+      this.selectCreated([object]);
+      return { kind: 'objects', objects: [object] };
+    }
+    const highlight = [...(snapshot.marks ?? [])]
+      .reverse()
+      .find(
+        (item) =>
+          item.page === page &&
+          isTextMark(item.kind) &&
+          item.quads.some((q) => x >= q[0] && x <= q[2] && y >= q[1] && y <= q[3]),
+      );
+    return highlight ? { kind: 'mark', mark: highlight } : { kind: 'page' };
+  }
+
+  private openContextMenu(
+    entry: PageLayer,
+    target: ContextTarget,
+    at: Point,
+    event: MouseEvent,
+  ): void {
+    this.menu?.hide();
+    const menu = (this.menu = new Menu());
+    const session = this.session!;
+    // Sections in a fixed order (Obsidian draws a separator between sections):
+    // main action, clipboard, edit, color, arrange, lock, danger.
+    let section = 'main';
+    const add = (
+      title: string,
+      icon: string,
+      run: () => void,
+      options: { disabled?: boolean; checked?: boolean; warning?: boolean } = {},
+    ) =>
+      menu.addItem((item) => {
+        item.setTitle(title).setIcon(icon).setSection(section);
+        if (options.disabled) {
+          item.setDisabled(true);
+        }
+        if (options.checked !== undefined) {
+          item.setChecked(options.checked);
+        }
+        if (options.warning) {
+          item.setWarning(true);
+        }
+        item.onClick(() => {
+          try {
+            run();
+          } catch (error) {
+            this.showError(error);
+          }
+          this.scheduleSave();
+          this.refresh();
+        });
+      });
+    const label = (title: string) =>
+      menu.addItem((item) => item.setTitle(title).setIsLabel(true).setSection(section));
+    const next = (name: string) => {
+      section = name;
+    };
+    const page = entry.page.number;
+    const canPaste = !!copiedObjects || !!copiedShape || this.clipboardReadable();
+    const paste = () => this.pasteHere(page, at);
+    const arrange = (kind: 'shape' | 'image', id: string) => {
+      next('arrange');
+      add('Bring to front', 'bring-to-front', () => session.reorder(kind, id, 'front'));
+      add('Send to back', 'send-to-back', () => session.reorder(kind, id, 'back'));
+    };
+    if (target.kind === 'shape') {
+      const { shape } = target;
+      const locked = !!shape.locked;
+      this.selectedShape = shape.id;
+      this.selected = undefined;
+      this.selectedStroke = undefined;
+      this.selectedImage = undefined;
+      if (!locked) {
+        add('Properties…', 'sliders-horizontal', () => this.openShapeProperties());
+      }
+      next('clipboard');
+      if (!locked) {
+        add('Cut', 'scissors', () => this.cutShape(shape.id));
+      }
+      add('Copy', 'copy', () => this.copyShape(shape.id));
+      add('Paste', 'clipboard-paste', paste, { disabled: !canPaste });
+      add('Duplicate', 'copy-plus', () => this.duplicateShape(shape.id));
+      if (!locked) {
+        next('edit');
+        add('Rotate right 90°', 'rotate-cw', () => this.turnShape(shape.id, -90));
+        add('Rotate left 90°', 'rotate-ccw', () => this.turnShape(shape.id, 90));
+        add('Flip horizontally', 'flip-horizontal-2', () => this.flipShape(shape.id, 'x'));
+        add('Flip vertically', 'flip-vertical-2', () => this.flipShape(shape.id, 'y'));
+        arrange('shape', shape.id);
+      }
+      next('lock');
+      add(locked ? 'Unlock' : 'Lock', locked ? 'unlock' : 'lock', () =>
+        session.updateShape(shape.id, { locked: !locked }),
+      );
+      if (!locked) {
+        next('danger');
+        add('Delete', 'trash-2', () => this.deleteShapeSelection(shape.id), { warning: true });
+      }
+    } else if (target.kind === 'image') {
+      const { image } = target;
+      const locked = !!image.locked;
+      this.selectedImage = image.id;
+      this.selectedShape = undefined;
+      this.selected = undefined;
+      this.selectedStroke = undefined;
+      next('clipboard');
+      if (!locked) {
+        add('Cut', 'scissors', () => this.cutImage(image.id));
+      }
+      add('Copy', 'copy', () => this.copyImage(image.id));
+      add('Paste', 'clipboard-paste', paste, { disabled: !canPaste });
+      add('Duplicate', 'copy-plus', () => this.duplicateImage(image.id));
+      next('edit');
+      if (!locked) {
+        add('Rotate right 90°', 'rotate-cw', () => this.turnImage(image.id, -90));
+        add('Rotate left 90°', 'rotate-ccw', () => this.turnImage(image.id, 90));
+        add('Original size', 'maximize', () => this.originalImageSize(image.id));
+      }
+      add('Save image to vault', 'download', () => void this.saveImageToVault(image.id));
+      if (!locked) {
+        arrange('image', image.id);
+      }
+      next('lock');
+      add(locked ? 'Unlock' : 'Lock', locked ? 'unlock' : 'lock', () =>
+        session.updateImage(image.id, { locked: !locked }),
+      );
+      if (!locked) {
+        next('danger');
+        add('Delete', 'trash-2', () => this.deleteImageSelection(image.id), { warning: true });
+      }
+    } else if (target.kind === 'mark') {
+      const { mark } = target;
+      add(mark.comment ? 'Edit comment…' : 'Add comment…', 'message-square', () =>
+        this.openMarkPopover(entry, mark.id, false),
+      );
+      if (isTextMark(mark.kind)) {
+        next('clipboard');
+        add('Copy text', 'copy', () => void this.copyMarkText(entry, mark, false));
+        add('Copy with link', 'quote', () => void this.copyMarkText(entry, mark, true));
+      }
+      next('color');
+      label('Color');
+      for (const { name, color } of colorsFor(mark.kind)) {
+        add(name, 'palette', () => session.updateMark(mark.id, { color }), {
+          checked: color.every((value, index) => Math.abs(value - mark.color[index]!) < 0.01),
+        });
+      }
+      if (isTextMark(mark.kind)) {
+        next('edit');
+        for (const [kind, title, icon] of [
+          ['highlight', 'Turn into highlight', 'highlighter'],
+          ['underline', 'Turn into underline', 'underline'],
+          ['strikeout', 'Turn into strikethrough', 'strikethrough'],
+        ] as const) {
+          if (kind !== mark.kind) {
+            add(title, icon, () => {
+              session.convertMark(
+                mark.id,
+                kind,
+                kind === 'highlight' ? this.markColor : this.lineColor,
+              );
+            });
+          }
+        }
+      }
+      next('danger');
+      const deleteLabels: Record<MarkKind, string> = {
+        note: 'Delete note',
+        highlight: 'Delete highlight',
+        underline: 'Delete underline',
+        strikeout: 'Delete strikethrough',
+      };
+      add(deleteLabels[mark.kind], 'trash-2', () => session.deleteMark(mark.id), {
+        warning: true,
+      });
+    } else if (target.kind === 'objects') {
+      const { objects } = target;
+      const single = objects.length === 1 ? objects[0]! : undefined;
+      if (single?.kind === 'text') {
+        add('Edit text', 'pencil', () => this.editTextBox(single.id));
+        add('Properties…', 'sliders-horizontal', () => this.openProperties());
+      }
+      next('clipboard');
+      // Clicking a menu item is a pointerdown outside the editor, which clears
+      // the selection first, so these actions use the objects the menu opened on.
+      const remove = () => {
+        this.selection?.clear();
+        session.deleteObjects(objects);
+        this.selectedStroke = undefined;
+        this.selected = undefined;
+      };
+      add('Cut', 'scissors', () => {
+        this.copyObjectsFromMenu(objects);
+        remove();
+      });
+      add('Copy', 'copy', () => this.copyObjectsFromMenu(objects));
+      add('Paste', 'clipboard-paste', paste, { disabled: !canPaste });
+      add('Duplicate', 'copy-plus', () =>
+        this.selectCreated(session.pasteObjects(session.copyObjects(objects))),
+      );
+      const onPage = objects.filter((object) =>
+        session.objectRects([object]).every((item) => item.page === page),
+      );
+      if (onPage.length > 1) {
+        next('arrange');
+        for (const [mode, title, icon] of [
+          ['left', 'Align left', 'align-start-vertical'],
+          ['center', 'Align center', 'align-center-vertical'],
+          ['right', 'Align right', 'align-end-vertical'],
+          ['top', 'Align top', 'align-start-horizontal'],
+          ['middle', 'Align middle', 'align-center-horizontal'],
+          ['bottom', 'Align bottom', 'align-end-horizontal'],
+        ] as const) {
+          add(title, icon, () => this.alignObjects(entry, onPage, mode));
+        }
+        if (onPage.length > 2) {
+          add('Distribute horizontally', 'align-horizontal-space-around', () =>
+            this.distributeObjects(entry, onPage, 'x'),
+          );
+          add('Distribute vertically', 'align-vertical-space-around', () =>
+            this.distributeObjects(entry, onPage, 'y'),
+          );
+        }
+      }
+      next('select');
+      add('Select all on page', 'box-select', () => this.selectPage(page));
+      if (objects.length > 1) {
+        add('Clear selection', 'x', () => this.selection?.clear());
+      }
+      next('danger');
+      add(objects.length > 1 ? `Delete ${objects.length} objects` : 'Delete', 'trash-2', remove, {
+        warning: true,
+      });
+    } else {
+      next('clipboard');
+      add('Paste', 'clipboard-paste', paste, { disabled: !canPaste });
+      next('insert');
+      add('Text box here', 'type', () => this.addTextBoxAt(entry, at));
+      add('Note here', 'sticky-note', () => {
+        const mark = session.addMark({ page, kind: 'note', at, color: MARK_COLORS[0]!.color });
+        this.openMarkPopover(entry, mark.id, true);
+      });
+      add('Insert image…', 'image-plus', () => this.chooseImageFile({ page, at }));
+      next('select');
+      add('Select all on page', 'box-select', () => this.selectPage(page));
+    }
+    // Show the menu first; painting the selection can follow.
+    menu.showAtMouseEvent(event);
+    this.refresh();
+  }
+
+  /** Paste the newest copy at a point: objects copied here, else an image on the clipboard. */
+  private pasteHere(page: number, at: Point): void {
+    const internal =
+      copiedShape ?? (copiedObjects && !copiedObjects.blurred ? copiedObjects : undefined);
+    if (internal || !this.clipboardReadable()) {
+      this.pasteCopied(page, at);
+      return;
+    }
+    void this.pasteClipboardImage({ page, at }, !!copiedObjects).then((placed) => {
+      // No image on the clipboard: fall back to an older copy made here.
+      if (!placed && copiedObjects) {
+        this.pasteCopied(page, at);
+        this.scheduleSave();
+        this.refresh();
+      }
+    });
+  }
+
+  private openShapeProperties(): void {
+    const button = this.toolbar.querySelector<HTMLElement>('.pfs-shape-options-button');
+    if (button && !this.shapeMenu) {
+      this.toggleShapeMenu(button);
+    }
+  }
+
+  private editTextBox(name: string): void {
+    for (const entry of this.layers.values()) {
+      for (const control of entry.controls.values()) {
+        if (control.input.dataset.pdfField === name) {
+          this.selected = name;
+          control.input.focus({ preventScroll: true });
+          return;
+        }
+      }
+    }
+  }
+
+  /** Align a group's edges or centres in screen terms (left is left on a turned page too). */
+  private alignObjects(
+    entry: PageLayer,
+    objects: PdfObject[],
+    mode: 'left' | 'center' | 'right' | 'top' | 'middle' | 'bottom',
+  ): void {
+    const items = this.screenItems(entry, objects);
+    const left = Math.min(...items.map((item) => item.box[0]));
+    const right = Math.max(...items.map((item) => item.box[2]));
+    const top = Math.min(...items.map((item) => item.box[1]));
+    const bottom = Math.max(...items.map((item) => item.box[3]));
+    this.moveOnScreen(
+      entry,
+      items.map(({ object, box }) => {
+        const [x0, y0, x1, y1] = box;
+        const dx =
+          mode === 'left'
+            ? left - x0
+            : mode === 'right'
+              ? right - x1
+              : mode === 'center'
+                ? (left + right) / 2 - (x0 + x1) / 2
+                : 0;
+        const dy =
+          mode === 'top'
+            ? top - y0
+            : mode === 'bottom'
+              ? bottom - y1
+              : mode === 'middle'
+                ? (top + bottom) / 2 - (y0 + y1) / 2
+                : 0;
+        return { object, dx, dy };
+      }),
+    );
+  }
+
+  /** Even gaps between the outermost objects, keeping their order. */
+  private distributeObjects(entry: PageLayer, objects: PdfObject[], axis: 'x' | 'y'): void {
+    const a = axis === 'x' ? 0 : 1;
+    const b = axis === 'x' ? 2 : 3;
+    const items = this.screenItems(entry, objects).sort((p, q) => p.box[a] - q.box[a]);
+    const span = items.at(-1)!.box[b] - items[0]!.box[a];
+    const used = items.reduce((sum, item) => sum + item.box[b] - item.box[a], 0);
+    const gap = (span - used) / (items.length - 1);
+    let cursor = items[0]!.box[a];
+    this.moveOnScreen(
+      entry,
+      items.map(({ object, box }) => {
+        const shift = cursor - box[a];
+        cursor += box[b] - box[a] + gap;
+        return { object, dx: axis === 'x' ? shift : 0, dy: axis === 'y' ? shift : 0 };
+      }),
+    );
+  }
+
+  private screenItems(entry: PageLayer, objects: PdfObject[]) {
+    return this.session!.objectRects(objects).map(({ object, rect }) => ({
+      object,
+      box: screenRectangle(entry.page.viewport, rect) as Rect,
+    }));
+  }
+
+  private moveOnScreen(
+    entry: PageLayer,
+    moves: { object: PdfObject; dx: number; dy: number }[],
+  ): void {
+    const viewport = entry.page.viewport;
+    const [ox, oy] = viewport.convertToPdfPoint(0, 0);
+    this.session!.moveEach(
+      moves.map(({ object, dx, dy }) => {
+        const [px, py] = viewport.convertToPdfPoint(dx, dy);
+        return { object, delta: [px! - ox!, py! - oy!] as Point };
+      }),
+    );
+  }
+
+  /** The printed words under a highlight, read from the page's text layer. */
+  private markText(entry: PageLayer, mark: PdfMark): string {
+    const layer = entry.page.div.querySelector('.pfs-text-layer, .textLayer');
+    const boxes = mark.quads.map((quad) => screenRectangle(entry.page.viewport, quad));
+    const origin = entry.layer.getBoundingClientRect();
+    const scaleX = entry.page.viewport.width / (origin.width || entry.page.viewport.width);
+    const scaleY = entry.page.viewport.height / (origin.height || entry.page.viewport.height);
+    const words: string[] = [];
+    for (const span of layer?.querySelectorAll<HTMLElement>('span') ?? []) {
+      if (span.children.length) {
+        continue;
+      }
+      const r = span.getBoundingClientRect();
+      const x = ((r.left + r.right) / 2 - origin.left) * scaleX;
+      const y = ((r.top + r.bottom) / 2 - origin.top) * scaleY;
+      if (boxes.some(([l, t, rr, b]) => x >= l && x <= rr && y >= t && y <= b)) {
+        words.push(span.textContent ?? '');
+      }
+    }
+    return normalizeSymbols(words.join(' ').replace(/\s+/g, ' ').trim());
+  }
+
+  private async copyMarkText(entry: PageLayer, mark: PdfMark, quote: boolean): Promise<void> {
+    const text = this.markText(entry, mark);
+    const value = quote
+      ? markCallout(this.native.file.path, this.native.file.basename, mark, text)
+      : text;
+    await this.native.element.ownerDocument.defaultView?.navigator.clipboard?.writeText(value);
+  }
+
+  private originalImageSize(id: string): void {
+    const session = this.session!;
+    const image = session.snapshot.images?.find((item) => item.id === id);
+    const stored = image && storedImage(image.source);
+    const size = stored && imageSize(stored.bytes);
+    if (!image || !size) {
+      return;
+    }
+    const bounds = session.snapshot.pages[image.page - 1]!;
+    const sideways = image.rotation === 90 || image.rotation === 270;
+    const scale = Math.min(
+      0.75,
+      (bounds[2] - bounds[0]) / (sideways ? size[1] : size[0]),
+      (bounds[3] - bounds[1]) / (sideways ? size[0] : size[1]),
+    );
+    const w = (sideways ? size[1] : size[0]) * scale;
+    const h = (sideways ? size[0] : size[1]) * scale;
+    const [x0, y0, x1, y1] = image.box;
+    const left = Math.max(bounds[0], Math.min(bounds[2] - w, (x0 + x1) / 2 - w / 2));
+    const bottom = Math.max(bounds[1], Math.min(bounds[3] - h, (y0 + y1) / 2 - h / 2));
+    session.updateImage(id, { box: [left, bottom, left + w, bottom + h] });
+  }
+
+  /** Store a pasted image as a file next to the note's attachments. */
+  private async saveImageToVault(id: string): Promise<void> {
+    const image = this.session?.snapshot.images?.find((item) => item.id === id);
+    const stored = image && storedImage(image.source);
+    if (!image || !stored) {
+      return;
+    }
+    try {
+      const extension = stored.mime === 'image/png' ? 'png' : 'jpg';
+      const path = await this.app.fileManager.getAvailablePathForAttachment(
+        `${this.native.file.basename} p${image.page}.${extension}`,
+        this.native.file.path,
+      );
+      await this.app.vault.createBinary(
+        path,
+        stored.bytes.buffer.slice(
+          stored.bytes.byteOffset,
+          stored.bytes.byteOffset + stored.bytes.byteLength,
+        ) as ArrayBuffer,
+      );
+      new Notice(`Saved ${path}`);
+    } catch (error) {
+      this.showError(error);
+    }
+  }
+
+  private copyObjectsFromMenu(objects: PdfObject[]): void {
+    const data = this.session!.copyObjects(objects);
+    const text =
+      data
+        .filter((item) => item.kind === 'text')
+        .map((item) => item.value)
+        .join('\n') || 'PDF Editor elements';
+    copiedShape = undefined;
+    const copy: ObjectCopy = {
+      token: globalThis.crypto.randomUUID(),
+      objects: data,
+      text,
+      custom: false,
+    };
+    copiedObjects = copy;
+    // Ctrl+V compares the clipboard text with this copy before pasting objects.
+    copy.write = Promise.resolve(
+      this.native.element.ownerDocument.defaultView?.navigator.clipboard?.writeText?.(text),
+    ).catch(() => undefined);
+  }
+
+  private copyShape(id: string): void {
+    const shape = this.session?.snapshot.shapes?.find((item) => item.id === id);
+    if (shape) {
+      copiedShape = structuredClone(shape);
+      delete copiedShape.locked;
+      copiedObjects = undefined;
+    }
+  }
+
+  private cutShape(id: string): void {
+    this.copyShape(id);
+    this.deleteShapeSelection(id);
+  }
+
+  private deleteShapeSelection(id: string): void {
+    this.session!.deleteShape(id);
+    if (this.selectedShape === id) {
+      this.selectedShape = undefined;
+    }
+  }
+
+  private duplicateShape(id: string): void {
+    const shape = this.session?.snapshot.shapes?.find((item) => item.id === id);
+    if (shape) {
+      this.placeShape(shape, shape.page);
+    }
+  }
+
+  /** Paste the last copy at a PDF point (context menu) or offset from the original. */
+  private pasteCopied(page: number, at?: Point): void {
+    const session = this.session!;
+    if (copiedShape) {
+      this.placeShape(copiedShape, page, at);
+      return;
+    }
+    const copy = copiedObjects;
+    if (!copy?.objects.length) {
+      return;
+    }
+    if (!at) {
+      this.selectCreated(session.pasteObjects(copy.objects));
+      return;
+    }
+    // Move the group so its top-left corner sits at the clicked point on this page.
+    const left = Math.min(...copy.objects.map((item) => item.rect[0]));
+    const top = Math.max(...copy.objects.map((item) => item.rect[3]));
+    const bounds = session.snapshot.pages[page - 1]!;
+    const right = Math.max(...copy.objects.map((item) => item.rect[2]));
+    const bottom = Math.min(...copy.objects.map((item) => item.rect[1]));
+    const dx = Math.max(bounds[0] - left, Math.min(bounds[2] - right, at[0] - left));
+    const dy = Math.max(bounds[1] - bottom, Math.min(bounds[3] - top, at[1] - top));
+    const moved = copy.objects.map((item): CopiedPdfObject => {
+      const rect: Rect = [
+        item.rect[0] + dx,
+        item.rect[1] + dy,
+        item.rect[2] + dx,
+        item.rect[3] + dy,
+      ];
+      if (item.kind === 'ink') {
+        return { ...item, page, rect, points: item.points.map(([x, y]) => [x + dx, y + dy]) };
+      }
+      if (item.kind === 'shape') {
+        return { ...item, page, rect, shape: shiftShape(item.shape, dx, dy) };
+      }
+      if (item.kind === 'image') {
+        const b = item.image.box;
+        return {
+          ...item,
+          page,
+          rect,
+          image: { ...item.image, box: [b[0] + dx, b[1] + dy, b[2] + dx, b[3] + dy] },
+        };
+      }
+      return { ...item, page, rect };
+    });
+    this.selectCreated(session.pasteObjects(moved, [0, 0]));
+  }
+
+  private placeShape(shape: PdfShape, page: number, at?: Point): void {
+    const session = this.session!;
+    const bounds = session.snapshot.pages[page - 1];
+    if (!bounds) {
+      return;
+    }
+    const extent = shape.box ? shapeRect(shape) : shapeExtent(shape);
+    const want: Point = at ? [at[0] - extent[0], at[1] - extent[3]] : [12, -12];
+    const dx = Math.max(bounds[0] - extent[0], Math.min(bounds[2] - extent[2], want[0]));
+    const dy = Math.max(bounds[1] - extent[1], Math.min(bounds[3] - extent[3], want[1]));
+    const shift = ([x, y]: [number, number]): [number, number] => [x + dx, y + dy];
+    const created = session.addShape({
+      page,
+      kind: shape.kind,
+      ...(shape.box
+        ? {
+            box: [shape.box[0] + dx, shape.box[1] + dy, shape.box[2] + dx, shape.box[3] + dy],
+          }
+        : { start: shift(shape.start!), end: shift(shape.end!) }),
+      color: shape.color,
+      ...(shape.fill ? { fill: shape.fill } : {}),
+      width: shape.width,
+      opacity: shape.opacity,
+      ...(shape.rotation ? { rotation: shape.rotation } : {}),
+    });
+    this.selectedShape = created.id;
+    this.selected = undefined;
+    this.selectedStroke = undefined;
+  }
+
+  /** Turn a shape by 90° steps (positive is counter-clockwise, as in PDF space). */
+  private turnShape(id: string, degrees: number): void {
+    const session = this.session!;
+    const shape = session.snapshot.shapes?.find((item) => item.id === id);
+    if (!shape) {
+      return;
+    }
+    if (shape.box) {
+      session.updateShape(id, { rotation: (shape.rotation ?? 0) + degrees });
+      return;
+    }
+    const [cx, cy] = [(shape.start![0] + shape.end![0]) / 2, (shape.start![1] + shape.end![1]) / 2];
+    const sign = degrees > 0 ? 1 : -1;
+    const turn = ([x, y]: [number, number]): [number, number] => [
+      cx - sign * (y - cy),
+      cy + sign * (x - cx),
+    ];
+    session.updateShape(id, { start: turn(shape.start!), end: turn(shape.end!) });
+  }
+
+  private flipShape(id: string, axis: 'x' | 'y'): void {
+    const session = this.session!;
+    const shape = session.snapshot.shapes?.find((item) => item.id === id);
+    if (!shape) {
+      return;
+    }
+    if (shape.box) {
+      // Rectangles and ellipses are symmetric: mirroring only reverses the rotation.
+      if (shape.rotation) {
+        session.updateShape(id, { rotation: -shape.rotation });
+      }
+      return;
+    }
+    const [cx, cy] = [(shape.start![0] + shape.end![0]) / 2, (shape.start![1] + shape.end![1]) / 2];
+    const flip = ([x, y]: [number, number]): [number, number] =>
+      axis === 'x' ? [2 * cx - x, y] : [x, 2 * cy - y];
+    session.updateShape(id, { start: flip(shape.start!), end: flip(shape.end!) });
+  }
+
+  private selectPage(page: number): void {
+    const snapshot = this.session!.snapshot;
+    const objects: PdfObject[] = [
+      ...snapshot.fields
+        .filter((field) => field.owned && !field.readOnly && field.widgets[0]?.page === page)
+        .map((field): PdfObject => ({ kind: 'text', id: field.name })),
+      ...snapshot.strokes
+        .filter((stroke) => stroke.page === page && !stroke.readOnly && !stroke.hidden)
+        .map((stroke): PdfObject => ({ kind: 'ink', id: stroke.id })),
+    ];
+    this.selectedShape = undefined;
+    this.selectCreated(objects);
+  }
+
+  private addTextBoxAt(entry: PageLayer, [x, y]: Point): void {
+    const session = this.session!;
+    const bounds = session.snapshot.pages[entry.page.number - 1]!;
+    const width = Math.min(240, bounds[2] - bounds[0]);
+    const height = this.fontSize * 1.4 + 8;
+    const left = Math.max(bounds[0], Math.min(bounds[2] - width, x));
+    const top = Math.max(bounds[1] + height, Math.min(bounds[3], y + this.fontSize));
+    const field = session.add(
+      entry.page.number,
+      [left, top - height, left + width, top],
+      this.fontSize,
+      true,
+      entry.page.viewport.rotation,
+    );
+    session.formatField(field.name, {
+      fontFamily: this.textFamily,
+      color: this.textColor,
+      alignment: this.textAlignment,
+      letterSpacing: this.letterSpacing,
+      ...(field.ruled ? {} : { lineSpacing: this.lineSpacing }),
+    });
+    this.selected = field.name;
+    this.selectedStroke = undefined;
+    this.updateStatus();
+    this.refresh();
+    entry.controls.get(`${field.name}:0`)?.input.focus({ preventScroll: true });
+  }
+
+  private imageLayer(page: NativePage, layer: HTMLElement): ImageLayer {
+    return new ImageLayer(page, layer, this.session!, {
+      tool: () => this.tool,
+      selected: () => this.selectedImage,
+      select: (id) => this.selectImage(id),
+      url: (source) => this.imageUrl(source),
+      changed: () => this.scheduleSave(),
+      error: (error) => this.showError(error),
+    });
+  }
+
+  private selectImage(id: string | undefined): void {
+    this.selectedImage = id;
+    if (id) {
+      this.selectedShape = undefined;
+      this.selected = undefined;
+      this.selectedStroke = undefined;
+      this.selection?.clear();
+    }
+    this.refresh();
+  }
+
+  private imageUrl(source: string): string {
+    let url = this.imageUrls.get(source);
+    const stored = storedImage(source);
+    if (!url && stored) {
+      const view = this.native.element.ownerDocument.defaultView!;
+      try {
+        url = view.URL.createObjectURL(
+          new view.Blob([stored.bytes as Uint8Array<ArrayBuffer>], { type: stored.mime }),
+        );
+        this.imageUrls.set(source, url);
+      } catch {
+        return '';
+      }
+    }
+    return url ?? '';
+  }
+
+  private clipboardReadable(): boolean {
+    return (
+      typeof this.native.element.ownerDocument.defaultView?.navigator.clipboard?.read === 'function'
+    );
+  }
+
+  /** Is this PDF where a paste should go (focused, or under the pointer without a note caret)? */
+  private ownsPaste(target: EventTarget | null): boolean {
+    const doc = this.native.element.ownerDocument;
+    const view = doc.defaultView!;
+    if (!this.loaded || !this.session || !this.session.canEditObjects) {
+      return false;
+    }
+    if (
+      target instanceof view.Element &&
+      target.closest('input, textarea, select, [contenteditable="true"]') &&
+      !(target instanceof view.HTMLInputElement && target.readOnly)
+    ) {
+      return false;
+    }
+    if (target instanceof view.Node && this.native.element.contains(target)) {
+      return true;
+    }
+    return !!this.hover && (doc.activeElement === doc.body || !doc.activeElement);
+  }
+
+  private pasteEvent(event: ClipboardEvent): void {
+    this.pasteSeen = Date.now();
+    if (!this.ownsPaste(event.target)) {
+      return;
+    }
+    const file = [...(event.clipboardData?.files ?? [])].find((item) =>
+      item.type.startsWith('image/'),
+    );
+    if (!file) {
+      return;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    void this.placeImageBlob(file);
+  }
+
+  /** Keys for a selected picture, and Ctrl+V when the host swallows the paste event. */
+  private imageKey(event: KeyboardEvent): void {
+    const doc = this.native.element.ownerDocument;
+    const view = doc.defaultView!;
+    const mod = event.ctrlKey || event.metaKey;
+    const key = event.key.toLowerCase();
+    if (mod && key === 'v' && !event.altKey && !event.shiftKey && this.ownsPaste(event.target)) {
+      const pressed = Date.now();
+      view.setTimeout(() => {
+        if (
+          this.pasteSeen >= pressed ||
+          this.objectPasteAt >= pressed ||
+          !this.clipboardReadable()
+        ) {
+          return;
+        }
+        void this.pasteClipboardImage(undefined, true);
+      }, 120);
+    }
+    const id = this.selectedImage;
+    const image = id && this.session?.snapshot.images?.find((item) => item.id === id);
+    if (
+      !image ||
+      event.altKey ||
+      (event.target instanceof view.Element &&
+        event.target.closest('input, textarea, select, [contenteditable="true"]'))
+    ) {
+      return;
+    }
+    const step = event.shiftKey ? 10 : 1;
+    const delta: Record<string, Point> = {
+      ArrowLeft: [-step, 0],
+      ArrowRight: [step, 0],
+      ArrowUp: [0, step],
+      ArrowDown: [0, -step],
+    };
+    const claim = () => {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+    try {
+      if (mod && ['c', 'x', 'd'].includes(key) && !event.shiftKey) {
+        claim();
+        if (!event.repeat) {
+          if (key === 'c') {
+            this.copyImage(image.id);
+          } else if (key === 'x') {
+            this.cutImage(image.id);
+          } else {
+            this.duplicateImage(image.id);
+          }
+        }
+      } else if (mod) {
+        return;
+      } else if (event.key === 'Delete' || event.key === 'Backspace') {
+        claim();
+        this.deleteImageSelection(image.id);
+      } else if (event.key === 'Escape') {
+        claim();
+        this.selectedImage = undefined;
+      } else if (delta[event.key]) {
+        claim();
+        const [dx, dy] = delta[event.key]!;
+        const bounds = this.session!.snapshot.pages[image.page - 1]!;
+        const box = image.box;
+        const x = Math.max(bounds[0] - box[0], Math.min(bounds[2] - box[2], dx));
+        const y = Math.max(bounds[1] - box[1], Math.min(bounds[3] - box[3], dy));
+        this.session!.updateImage(image.id, {
+          box: [box[0] + x, box[1] + y, box[2] + x, box[3] + y],
+        });
+      } else {
+        return;
+      }
+      this.scheduleSave();
+    } catch (error) {
+      this.showError(error);
+    }
+    this.refresh();
+  }
+
+  private copyImage(id: string): void {
+    const image = this.session?.snapshot.images?.find((item) => item.id === id);
+    const stored = image && storedImage(image.source);
+    if (!image || !stored) {
+      return;
+    }
+    copiedImage = structuredClone(image);
+    copiedObjects = undefined;
+    copiedShape = undefined;
+    // Other apps receive a PNG; pasting it back here keeps size and turn.
+    const view = this.native.element.ownerDocument.defaultView!;
+    const clipboard = view.navigator.clipboard;
+    if (clipboard?.write && typeof view.ClipboardItem === 'function') {
+      void this.pngBlob(
+        new view.Blob([stored.bytes as Uint8Array<ArrayBuffer>], { type: stored.mime }),
+      )
+        .then((png) => clipboard.write([new view.ClipboardItem({ 'image/png': png })]))
+        .catch(() => undefined);
+    }
+  }
+
+  private cutImage(id: string): void {
+    this.copyImage(id);
+    this.deleteImageSelection(id);
+  }
+
+  private deleteImageSelection(id: string): void {
+    this.session!.deleteImage(id);
+    if (this.selectedImage === id) {
+      this.selectedImage = undefined;
+    }
+  }
+
+  private duplicateImage(id: string): void {
+    const session = this.session!;
+    const image = session.snapshot.images?.find((item) => item.id === id);
+    if (!image) {
+      return;
+    }
+    const bounds = session.snapshot.pages[image.page - 1]!;
+    const [x0, y0, x1, y1] = image.box;
+    const dx = Math.max(bounds[0] - x0, Math.min(bounds[2] - x1, 12));
+    const dy = Math.max(bounds[1] - y0, Math.min(bounds[3] - y1, -12));
+    const created = session.addImage({
+      page: image.page,
+      box: [x0 + dx, y0 + dy, x1 + dx, y1 + dy],
+      source: image.source,
+      ...(image.rotation ? { rotation: image.rotation } : {}),
+    });
+    this.selectImage(created.id);
+  }
+
+  /** Quarter turn about the centre; the box swaps width and height. */
+  private turnImage(id: string, degrees: 90 | -90): void {
+    const session = this.session!;
+    const image = session.snapshot.images?.find((item) => item.id === id);
+    if (!image) {
+      return;
+    }
+    const [x0, y0, x1, y1] = image.box;
+    const cx = (x0 + x1) / 2;
+    const cy = (y0 + y1) / 2;
+    const hw = (y1 - y0) / 2;
+    const hh = (x1 - x0) / 2;
+    session.updateImage(id, {
+      box: [cx - hw, cy - hh, cx + hw, cy + hh],
+      rotation: (((((image.rotation ?? 0) + degrees) % 360) + 360) % 360) as QuarterTurn,
+    });
+  }
+
+  /** PNG or JPEG bytes for a picture of any format the browser can draw. */
+  private async pictureBytes(blob: Blob): Promise<Uint8Array> {
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    return imageMime(bytes)
+      ? bytes
+      : new Uint8Array(await (await this.pngBlob(blob)).arrayBuffer());
+  }
+
+  private async pngBlob(blob: Blob): Promise<Blob> {
+    if (blob.type === 'image/png') {
+      return blob;
+    }
+    const view = this.native.element.ownerDocument.defaultView!;
+    const bitmap = await view.createImageBitmap(blob);
+    const canvas = this.native.element.ownerDocument.createElement('canvas');
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    canvas.getContext('2d')!.drawImage(bitmap, 0, 0);
+    bitmap.close();
+    return new Promise((resolve, reject) =>
+      canvas.toBlob(
+        (png) => (png ? resolve(png) : reject(new Error('This picture cannot be read.'))),
+        'image/png',
+      ),
+    );
+  }
+
+  private async pasteClipboardImage(
+    target?: { page: number; at: Point },
+    quiet = false,
+  ): Promise<boolean> {
+    const clipboard = this.native.element.ownerDocument.defaultView?.navigator.clipboard;
+    try {
+      for (const item of (await clipboard?.read()) ?? []) {
+        const type = item.types.find((entry) => entry.startsWith('image/'));
+        if (type) {
+          await this.placeImageBlob(await item.getType(type), target);
+          return true;
+        }
+      }
+      if (!quiet) {
+        this.showError(new Error('There is no image on the clipboard.'));
+      }
+    } catch (error) {
+      if (!quiet) {
+        this.showError(error);
+      }
+    }
+    return false;
+  }
+
+  private chooseImageFile(target?: { page: number; at: Point }): void {
+    const input = this.native.element.ownerDocument.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.addEventListener('change', () => {
+      const file = input.files?.[0];
+      if (file) {
+        void this.placeImageBlob(file, target);
+      }
+    });
+    input.click();
+  }
+
+  private async placeImageBlob(blob: Blob, target?: { page: number; at: Point }): Promise<void> {
+    try {
+      this.placeImage(await this.pictureBytes(blob), target);
+    } catch (error) {
+      this.showError(error);
+    }
+  }
+
+  /**
+   * Add a picture centred on the clicked point, the pointer, or the visible part of
+   * the page in view. A picture copied here comes back at its size and turn.
+   */
+  placeImage(bytes: Uint8Array, target?: { page: number; at: Point }): PdfImage | undefined {
+    const session = this.session;
+    if (!session || !this.loaded) {
+      return undefined;
+    }
+    const hovered = this.hover && this.layers.get(this.hover.div);
+    const entry =
+      (target && [...this.layers.values()].find((item) => item.page.number === target.page)) ??
+      hovered ??
+      this.visiblePage();
+    if (!entry) {
+      return undefined;
+    }
+    const page = entry.page.number;
+    const bounds = session.snapshot.pages[page - 1]!;
+    const copy =
+      copiedImage && storedImage(copiedImage.source)?.bytes.length === bytes.length
+        ? copiedImage
+        : undefined;
+    const same =
+      copy && storedImage(copy.source)!.bytes.every((value, index) => value === bytes[index]);
+    let width: number;
+    let height: number;
+    if (same) {
+      width = copy.box[2] - copy.box[0];
+      height = copy.box[3] - copy.box[1];
+    } else {
+      const [w, h] = imageSize(bytes) ?? [200, 150];
+      // Screen pixels to points (96 → 72 dpi), at most 60 % of the page.
+      const scale = Math.min(
+        0.75,
+        ((bounds[2] - bounds[0]) * 0.6) / w,
+        ((bounds[3] - bounds[1]) * 0.6) / h,
+      );
+      width = Math.max(4, w * scale);
+      height = Math.max(4, h * scale);
+    }
+    const centre: Point =
+      target?.at ??
+      (hovered ? this.pdfPoint(hovered, this.hover!.x, this.hover!.y) : undefined) ??
+      (same && copy.page === page
+        ? [(copy.box[0] + copy.box[2]) / 2 + 12, (copy.box[1] + copy.box[3]) / 2 - 12]
+        : this.visibleCentre(entry));
+    const left = Math.max(bounds[0], Math.min(bounds[2] - width, centre[0] - width / 2));
+    const bottom = Math.max(bounds[1], Math.min(bounds[3] - height, centre[1] - height / 2));
+    const image = session.addImage({
+      page,
+      box: [
+        left,
+        bottom,
+        left + Math.min(width, bounds[2] - bounds[0]),
+        bottom + Math.min(height, bounds[3] - bounds[1]),
+      ],
+      bytes,
+      ...(same && copy.rotation ? { rotation: copy.rotation } : {}),
+    });
+    this.setTool('select');
+    this.selectImage(image.id);
+    this.scheduleSave();
+    return image;
+  }
+
+  /** The page with the largest visible area. */
+  private visiblePage(): PageLayer | undefined {
+    const view = this.native.element.getBoundingClientRect();
+    let best: PageLayer | undefined;
+    let area = -1;
+    for (const entry of this.layers.values()) {
+      const box = entry.layer.getBoundingClientRect();
+      const visible =
+        Math.max(0, Math.min(box.right, view.right) - Math.max(box.left, view.left)) *
+        Math.max(0, Math.min(box.bottom, view.bottom) - Math.max(box.top, view.top));
+      if (visible > area || (visible === area && best && entry.page.number < best.page.number)) {
+        best = entry;
+        area = visible;
+      }
+    }
+    return best;
+  }
+
+  private visibleCentre(entry: PageLayer): Point {
+    const view = this.native.element.getBoundingClientRect();
+    const box = entry.layer.getBoundingClientRect();
+    const left = Math.max(box.left, view.left);
+    const right = Math.min(box.right, view.right);
+    const top = Math.max(box.top, view.top);
+    const bottom = Math.min(box.bottom, view.bottom);
+    if (right <= left || bottom <= top) {
+      const bounds = this.session!.snapshot.pages[entry.page.number - 1]!;
+      return [(bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2];
+    }
+    return this.pdfPoint(entry, (left + right) / 2, (top + bottom) / 2);
+  }
+
+  private shapeLayer(page: NativePage, layer: HTMLElement): ShapeLayer {
+    return new ShapeLayer(page, layer, this.session!, {
+      tool: () => this.tool,
+      style: () => this.shapeStyle,
+      selected: () => this.selectedShape,
+      select: (id) => {
+        this.selectedShape = id;
+        this.selectedImage = undefined;
+        this.selected = undefined;
+        this.selectedStroke = undefined;
+        this.refresh();
+      },
+      drawn: (id) => {
+        // Like Word: after drawing, the new shape is selected for moving or resizing.
+        this.setTool('select');
+        this.selectedShape = id;
+        this.refresh();
+      },
+      changed: () => this.scheduleSave(),
+      error: (error) => this.showError(error),
+    });
+  }
+
+  /** Shape kind, outline/filled, colour and line width; also restyles the selected shape. */
+  private toggleShapeMenu(anchor: HTMLElement): void {
+    if (this.shapeMenu) {
+      this.closeShapeMenu();
+      return;
+    }
+    const doc = anchor.ownerDocument;
+    const menu = doc.createElement('div');
+    menu.className = 'pfs-shape-menu pfs-mark-ui';
+    menu.setAttribute('role', 'dialog');
+    menu.setAttribute('aria-label', 'Shape options');
+    const row = (label: string) => {
+      const element = doc.createElement('div');
+      element.className = 'pfs-shape-menu-row';
+      element.setAttribute('role', 'group');
+      element.setAttribute('aria-label', label);
+      menu.append(element);
+      return element;
+    };
+    const choice = (parent: HTMLElement, label: string, pressed: boolean, apply: () => void) => {
+      const element = doc.createElement('button');
+      element.type = 'button';
+      element.className = 'clickable-icon pfs-shape-choice';
+      element.setAttribute('aria-pressed', String(pressed));
+      setTooltip(element, label);
+      element.addEventListener('pointerdown', (event) => event.preventDefault());
+      element.addEventListener('click', () => {
+        apply();
+        this.closeShapeMenu();
+        this.toggleShapeMenu(anchor);
+      });
+      parent.append(element);
+      return element;
+    };
+    const selected = () =>
+      this.session?.snapshot.shapes?.find((item) => item.id === this.selectedShape);
+    const restyle = (update: Parameters<TextSession['updateShape']>[1]) => {
+      const shape = selected();
+      if (shape) {
+        try {
+          this.session!.updateShape(shape.id, update);
+          this.scheduleSave();
+        } catch (error) {
+          this.showError(error);
+        }
+      }
+    };
+    const kinds = row('Shape');
+    for (const { kind, label, icon } of SHAPE_KINDS) {
+      setIcon(
+        choice(kinds, label, this.shapeStyle.kind === kind, () => {
+          this.shapeStyle = { ...this.shapeStyle, kind };
+          setIcon(this.tools.get('shape')!, icon);
+          this.setTool('shape');
+        }),
+        icon,
+      );
+    }
+    const fill = row('Fill');
+    const boxedKind = this.shapeStyle.kind === 'rectangle' || this.shapeStyle.kind === 'ellipse';
+    for (const filled of [false, true]) {
+      const element = choice(
+        fill,
+        filled ? 'Filled' : 'Outline only',
+        this.shapeStyle.filled === filled,
+        () => {
+          this.shapeStyle = { ...this.shapeStyle, filled };
+          restyle({ fill: filled ? (selected()?.color ?? this.shapeStyle.color) : null });
+        },
+      );
+      element.classList.add('pfs-shape-fill-choice');
+      element.classList.toggle('is-filled', filled);
+      element.disabled = !boxedKind && !selected()?.box;
+    }
+    const colors = row('Color');
+    for (const { name, color } of SHAPE_COLORS) {
+      const element = choice(
+        colors,
+        name,
+        color.every((v, i) => v === this.shapeStyle.color[i]),
+        () => {
+          this.shapeStyle = { ...this.shapeStyle, color };
+          const shape = selected();
+          restyle({ color, ...(shape?.fill ? { fill: color } : {}) });
+        },
+      );
+      element.classList.add('pfs-mark-swatch');
+      element.style.backgroundColor = cssColor(color);
+    }
+    const widths = row('Line width');
+    for (const width of SHAPE_WIDTHS) {
+      const element = choice(widths, `${width} pt line`, this.shapeStyle.width === width, () => {
+        this.shapeStyle = { ...this.shapeStyle, width };
+        restyle({ width });
+      });
+      element.classList.add('pfs-shape-width-choice');
+      element.style.setProperty('--pfs-line-width', `${width}px`);
+    }
+    const box = anchor.getBoundingClientRect();
+    const view = doc.defaultView!;
+    menu.style.left = `${Math.max(4, Math.min(box.left - 80, view.innerWidth - 200))}px`;
+    menu.style.top = `${box.bottom + 4}px`;
+    doc.body.append(menu);
+    this.shapeMenu = menu;
+    const outside = (event: Event) => {
+      if (
+        !(event.target instanceof view.Node) ||
+        (!menu.contains(event.target) && !anchor.contains(event.target))
+      ) {
+        this.closeShapeMenu();
+      }
+    };
+    const key = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        this.closeShapeMenu();
+      }
+    };
+    doc.addEventListener('pointerdown', outside, true);
+    doc.addEventListener('keydown', key, true);
+    this.closeShapeMenuListeners = () => {
+      doc.removeEventListener('pointerdown', outside, true);
+      doc.removeEventListener('keydown', key, true);
+    };
+  }
+
+  private closeShapeMenu(): void {
+    this.closeShapeMenuListeners?.();
+    this.closeShapeMenuListeners = undefined;
+    this.shapeMenu?.remove();
+    this.shapeMenu = undefined;
+  }
+
+  /** Paint this page's highlights and notes; the background render omits them. */
+  private refreshMarks(entry: PageLayer): void {
+    const doc = entry.layer.ownerDocument;
+    const elements = (entry.marks ??= new Map());
+    const marks = (this.session?.snapshot.marks ?? []).filter(
+      (mark) => mark.page === entry.page.number,
+    );
+    const ids = new Set(marks.map((mark) => mark.id));
+    const badges = (entry.badges ??= new Map());
+    for (const [id, element] of elements) {
+      if (!ids.has(id)) {
+        element.remove();
+        elements.delete(id);
+        badges.get(id)?.remove();
+        badges.delete(id);
+      }
+    }
+    // The editor layer sits above the text in its own stacking context, where a
+    // multiply blend has nothing to darken; highlights live directly on the page.
+    const pageDiv = entry.page.div;
+    let highlights = entry.highlights;
+    if (!highlights || highlights.parentElement !== pageDiv) {
+      highlights ??= doc.createElement('div');
+      highlights.className = 'pfs-highlights';
+      pageDiv.insertBefore(
+        highlights,
+        pageDiv.querySelector(':scope > .pfs-text-layer, :scope > .textLayer') ?? entry.layer,
+      );
+      entry.highlights = highlights;
+    }
+    const { viewport } = entry.page;
+    const drawing = this.tool === 'marker' || this.tool === 'scribble' || this.tool === 'eraser';
+    for (const mark of marks) {
+      const signature = JSON.stringify([
+        mark.quads,
+        mark.rect,
+        mark.color,
+        mark.opacity,
+        mark.comment,
+        viewport.width,
+        viewport.height,
+        viewport.rotation,
+      ]);
+      let element = elements.get(mark.id);
+      if (!element) {
+        element = mark.kind === 'note' ? doc.createElement('button') : doc.createElement('div');
+        element.dataset.markId = mark.id;
+        if (mark.kind === 'note') {
+          entry.layer.prepend(element);
+        } else {
+          highlights.append(element);
+        }
+        elements.set(mark.id, element);
+      }
+      element.classList.toggle('is-passive', drawing);
+      if (element.dataset.signature === signature) {
+        continue;
+      }
+      element.dataset.signature = signature;
+      element.replaceChildren();
+      badges.get(mark.id)?.remove();
+      badges.delete(mark.id);
+      const color = cssColor(mark.color);
+      const open = (event: Event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this.openMarkPopover(entry, mark.id, false);
+      };
+      if (mark.kind === 'note') {
+        const [left, top, right, bottom] = screenRectangle(viewport, mark.rect);
+        element.className = 'pfs-mark-note pfs-mark-ui';
+        (element as HTMLButtonElement).type = 'button';
+        Object.assign(element.style, {
+          left: `${left}px`,
+          top: `${top}px`,
+          width: `${right - left}px`,
+          height: `${bottom - top}px`,
+          backgroundColor: color,
+        });
+        setIcon(element, 'sticky-note');
+        setTooltip(element, mark.comment || 'Comment');
+        element.onclick = open;
+        continue;
+      }
+      element.className = 'pfs-mark-highlight';
+      for (const quad of mark.quads) {
+        let area = quad;
+        if (mark.kind === 'underline' || mark.kind === 'strikeout') {
+          // A thin band where the saved appearance draws its line.
+          const { y, width } = textLine(mark.kind, quad);
+          area = [quad[0], y - width / 2, quad[2], y + width / 2];
+        }
+        const [left, top, right, bottom] = screenRectangle(viewport, area);
+        const band = doc.createElement('div');
+        band.className = 'pfs-mark-quad';
+        Object.assign(band.style, {
+          left: `${left}px`,
+          top: `${top}px`,
+          width: `${right - left}px`,
+          height: `${Math.max(1, bottom - top)}px`,
+          backgroundColor: color,
+          // Same strength as the saved annotation (multiplied, so dark text stays dark).
+          opacity: String(mark.opacity),
+        });
+        element.append(band);
+      }
+      if (mark.comment) {
+        const [, top, right] = screenRectangle(viewport, mark.quads[0]!);
+        const badge = doc.createElement('button');
+        badge.type = 'button';
+        badge.className = 'pfs-mark-badge pfs-mark-ui';
+        badge.style.left = `${right - 6}px`;
+        badge.style.top = `${top - 10}px`;
+        setIcon(badge, 'message-square');
+        setTooltip(badge, mark.comment);
+        badge.addEventListener('click', open);
+        badge.dataset.markBadge = mark.id;
+        entry.layer.prepend(badge);
+        badges.set(mark.id, badge);
+      }
+    }
+    const popover = this.markPopover;
+    if (popover && popover.entry === entry) {
+      const mark = marks.find((item) => item.id === popover.id);
+      if (!mark) {
+        popover.element.remove();
+        this.markPopover = undefined;
+      } else {
+        this.placeMarkPopover(popover.element, entry, mark);
+        if (doc.activeElement !== popover.textarea && popover.textarea.value !== mark.comment) {
+          popover.textarea.value = mark.comment;
+        }
+      }
+    }
+  }
+
+  private placeMarkPopover(element: HTMLElement, entry: PageLayer, mark: PdfMark): void {
+    const [left, , , bottom] = screenRectangle(entry.page.viewport, mark.rect);
+    element.style.left = `${Math.max(0, Math.min(left, entry.page.viewport.width - 260))}px`;
+    element.style.top = `${bottom + 6}px`;
+  }
+
+  private openMarkPopover(entry: PageLayer, id: string, created: boolean): void {
+    this.closeMarkPopover();
+    const mark = this.session?.snapshot.marks?.find((item) => item.id === id);
+    if (!mark) {
+      return;
+    }
+    const doc = entry.layer.ownerDocument;
+    const element = doc.createElement('div');
+    element.className = 'pfs-mark-popover pfs-mark-ui';
+    element.setAttribute('role', 'dialog');
+    element.setAttribute('aria-label', mark.kind === 'note' ? 'Note' : 'Comment');
+    // Who and when: other apps' author, and the last change for every mark.
+    const changed = /^D:(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})/.exec(mark.modified);
+    const when =
+      changed && changed[1] !== '1970'
+        ? new Date(
+            Number(changed[1]),
+            Number(changed[2]) - 1,
+            Number(changed[3]),
+            Number(changed[4]),
+            Number(changed[5]),
+          ).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+        : '';
+    const who = mark.foreign ? mark.author || 'Made in another app' : '';
+    if (who || when) {
+      const meta = doc.createElement('div');
+      meta.className = 'pfs-mark-meta';
+      meta.textContent = [who && mark.author ? `By ${who}` : who, when].filter(Boolean).join(' · ');
+      element.append(meta);
+    }
+    const textarea = doc.createElement('textarea');
+    textarea.className = 'pfs-mark-text';
+    textarea.placeholder = 'Add a comment…';
+    textarea.value = mark.comment;
+    textarea.spellcheck = true;
+    textarea.addEventListener('input', () => {
+      try {
+        this.session!.updateMark(id, { comment: textarea.value });
+        this.scheduleSave();
+      } catch (error) {
+        this.showError(error);
+      }
+    });
+    const row = doc.createElement('div');
+    row.className = 'pfs-mark-row';
+    for (const { name, color } of colorsFor(mark.kind)) {
+      const swatch = doc.createElement('button');
+      swatch.type = 'button';
+      swatch.className = 'pfs-mark-swatch';
+      swatch.style.backgroundColor = cssColor(color);
+      setTooltip(swatch, name);
+      swatch.addEventListener('click', () => {
+        try {
+          this.session!.updateMark(id, { color });
+          if (mark.kind === 'highlight') {
+            this.markColor = color;
+          } else if (mark.kind !== 'note') {
+            this.lineColor = color;
+          }
+          this.scheduleSave();
+        } catch (error) {
+          this.showError(error);
+        }
+      });
+      row.append(swatch);
+    }
+    const spacer = doc.createElement('span');
+    spacer.className = 'pfs-mark-spacer';
+    row.append(spacer);
+    const remove = doc.createElement('button');
+    remove.type = 'button';
+    remove.className = 'clickable-icon pfs-mark-delete mod-warning';
+    setIcon(remove, 'trash-2');
+    setTooltip(
+      remove,
+      {
+        note: 'Delete note',
+        highlight: 'Delete highlight',
+        underline: 'Delete underline',
+        strikeout: 'Delete strikethrough',
+      }[mark.kind],
+    );
+    remove.addEventListener('click', () => {
+      try {
+        this.session!.deleteMark(id);
+        this.scheduleSave();
+      } catch (error) {
+        this.showError(error);
+      }
+      this.closeMarkPopover();
+    });
+    const done = doc.createElement('button');
+    done.type = 'button';
+    done.className = 'clickable-icon pfs-mark-done';
+    setIcon(done, 'check');
+    setTooltip(done, withKeys('Done', 'Mod+Enter'));
+    done.addEventListener('click', () => this.closeMarkPopover());
+    row.append(remove, done);
+    element.append(textarea, row);
+    element.addEventListener('keydown', (event) => {
+      event.stopPropagation();
+      if (event.key === 'Escape' || (event.key === 'Enter' && (event.metaKey || event.ctrlKey))) {
+        event.preventDefault();
+        this.closeMarkPopover();
+      }
+    });
+    for (const type of ['pointerdown', 'mousedown', 'click', 'dblclick'] as const) {
+      element.addEventListener(type, (event) => event.stopPropagation());
+    }
+    this.placeMarkPopover(element, entry, mark);
+    entry.layer.append(element);
+    this.markPopover = { id, element, entry, textarea, created };
+    textarea.focus({ preventScroll: true });
+  }
+
+  private closeMarkPopover(): void {
+    const popover = this.markPopover;
+    if (!popover) {
+      return;
+    }
+    this.markPopover = undefined;
+    popover.element.remove();
+    const mark = this.session?.snapshot.marks?.find((item) => item.id === popover.id);
+    // A new note closed without text is discarded instead of leaving an empty comment.
+    if (popover.created && mark?.kind === 'note' && !mark.comment.trim()) {
+      try {
+        this.session!.deleteMark(mark.id);
+      } catch {
+        /* The document is being replaced. */
+      }
+    }
+    if (this.session?.dirty) {
+      this.scheduleSave();
+    }
+  }
+
+  /** Paint checkboxes, radio buttons, dropdowns and list boxes for one page. */
+  private refreshChoices(entry: PageLayer): void {
+    const session = this.session;
+    const controls = (entry.choices ??= new Map());
+    const widgets = (session?.snapshot.choices ?? [])
+      .filter((field) => !field.readOnly)
+      .flatMap((field) =>
+        field.widgets.flatMap((widget, index) =>
+          widget.page === entry.page.number
+            ? [{ field, widget, key: `${field.name}:${index}` }]
+            : [],
+        ),
+      );
+    const keys = new Set(widgets.map(({ key }) => key));
+    for (const [key, control] of controls) {
+      if (!keys.has(key)) {
+        control.frame.remove();
+        controls.delete(key);
+      }
+    }
+    const locked = !session || session.status === 'conflict' || session.replacing;
+    const drawing = this.tool === 'marker' || this.tool === 'scribble' || this.tool === 'eraser';
+    for (const { field, widget, key } of widgets) {
+      let control = controls.get(key);
+      if (!control) {
+        control = this.mountChoice(entry, field.name, key);
+        controls.set(key, control);
+      }
+      this.positionChoice(entry, control, field, widget, locked, drawing);
+    }
+  }
+
+  private mountChoice(entry: PageLayer, name: string, key: string): ChoiceControl {
+    const doc = entry.layer.ownerDocument;
+    const field = () => this.session?.snapshot.choices?.find((item) => item.name === name);
+    const index = Number(key.slice(key.lastIndexOf(':') + 1));
+    const apply = (value: string) => {
+      try {
+        this.session!.setChoice(name, value);
+        this.updateStatus();
+        this.refresh();
+        this.scheduleSave();
+      } catch (error) {
+        this.showError(error);
+      }
+    };
+    const stop = (event: Event) => event.stopPropagation();
+    const kind = field()?.kind;
+    let control: ChoiceControl;
+    if (kind === 'checkbox' || kind === 'radio') {
+      const button = doc.createElement('button');
+      button.type = 'button';
+      button.className = `pfs-choice pfs-choice-${kind}`;
+      button.setAttribute('role', kind);
+      button.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const current = field();
+        const onValue = current?.widgets[index]?.onValue;
+        if (!current || onValue === undefined) {
+          return;
+        }
+        // Checkboxes toggle; radio buttons switch the group to this option.
+        apply(kind === 'checkbox' && current.value === onValue ? '' : onValue);
+      });
+      control = { frame: button };
+    } else {
+      const frame = doc.createElement('div');
+      frame.className = `pfs-choice pfs-choice-${kind ?? 'dropdown'}`;
+      const select = doc.createElement('select');
+      select.className = 'pfs-choice-select';
+      select.addEventListener('change', () => apply(select.value));
+      frame.append(select);
+      control = { frame, select };
+    }
+    for (const type of ['pointerdown', 'mousedown', 'dblclick', 'keydown'] as const) {
+      control.frame.addEventListener(type, stop);
+    }
+    labelOverlay(control.frame, name);
+    entry.layer.append(control.frame);
+    return control;
+  }
+
+  private positionChoice(
+    entry: PageLayer,
+    control: ChoiceControl,
+    field: ChoiceField,
+    widget: ChoiceWidget,
+    locked: boolean,
+    drawing: boolean,
+  ): void {
+    const { viewport } = entry.page;
+    const layout = JSON.stringify([
+      widget,
+      field.value,
+      field.options,
+      locked,
+      drawing,
+      viewport.width,
+      viewport.height,
+      viewport.scale,
+      viewport.rotation,
+    ]);
+    if (control.layout === layout) {
+      return;
+    }
+    control.layout = layout;
+    const { frame, select } = control;
+    const scale = entry.page.viewport.scale;
+    const [left, top, right, bottom] = screenRectangle(entry.page.viewport, widget.rect);
+    const angle = (((entry.page.viewport.rotation - widget.rotation) % 360) + 360) % 360;
+    const width = angle === 90 || angle === 270 ? bottom - top : right - left;
+    const height = angle === 90 || angle === 270 ? right - left : bottom - top;
+    frame.style.left = `${angle === 90 || angle === 180 ? right : left}px`;
+    frame.style.top = `${angle === 180 || angle === 270 ? bottom : top}px`;
+    frame.style.width = `${width}px`;
+    frame.style.height = `${height}px`;
+    frame.style.transform = `rotate(${angle}deg)`;
+    frame.style.backgroundColor = widget.backgroundColor ? cssColor(widget.backgroundColor) : '';
+    frame.style.borderColor = widget.borderColor ? cssColor(widget.borderColor) : '';
+    frame.style.borderWidth = widget.borderColor
+      ? `${Math.max(1, (widget.borderWidth ?? 1) * scale)}px`
+      : '';
+    frame.tabIndex = drawing ? -1 : 0;
+    frame.classList.toggle('is-locked', locked);
+    if (!select) {
+      const on = !!field.value && field.value === widget.onValue;
+      const button = frame as HTMLButtonElement;
+      button.disabled = locked;
+      button.textContent = on ? (widget.mark ?? '✔') : '';
+      button.setAttribute('aria-checked', String(on));
+      button.style.fontSize = `${Math.min(width, height) * 0.8}px`;
+      button.classList.toggle('is-round', field.kind === 'radio' && widget.mark === '●');
+      setTooltip(
+        button,
+        widget.label && field.kind === 'radio' ? `${field.name}: ${widget.label}` : field.name,
+      );
+      return;
+    }
+    const options = [{ value: '', label: '—' }, ...field.options];
+    if (field.value && !field.options.some((option) => option.value === field.value)) {
+      options.push({ value: field.value, label: field.value });
+    }
+    const signature = JSON.stringify(options);
+    if (select.dataset.options !== signature) {
+      select.replaceChildren(
+        ...options.map(({ value, label }) => {
+          const option = select.ownerDocument.createElement('option');
+          option.value = value;
+          option.textContent = label;
+          return option;
+        }),
+      );
+      select.dataset.options = signature;
+    }
+    if (select.value !== field.value) {
+      select.value = field.value;
+    }
+    select.disabled = locked;
+    select.tabIndex = drawing ? -1 : 0;
+    const size = widget.fontSize ?? Math.min(12, (widget.rect[3] - widget.rect[1]) * 0.6);
+    select.style.fontSize = `${Math.max(6, size) * scale}px`;
+  }
+
   private positionField(
     entry: PageLayer,
     control: FieldControl,
@@ -2324,6 +5155,29 @@ export class TextEditor extends Component {
     if (this.formatPreview?.name === field.name) {
       field = { ...field, ...this.formatPreview };
     }
+    // Refresh runs on every keystroke; rewriting identical styles for every box is wasted work.
+    const { viewport } = entry.page;
+    const layout = JSON.stringify([
+      rect,
+      rotation,
+      viewport.width,
+      viewport.height,
+      viewport.scale,
+      viewport.rotation,
+      field.fontFamily,
+      widget?.color ?? field.color,
+      widget?.fontSize ?? field.fontSize,
+      field.fontSize,
+      field.alignment,
+      widget?.appearance,
+      field.ruled,
+      field.letterSpacing,
+      field.lineSpacing,
+    ]);
+    if (control.layout === layout) {
+      return;
+    }
+    control.layout = layout;
     const { frame, input } = control;
     const [left, top, right, bottom] = screenRectangle(entry.page.viewport, rect);
     // PDF widget appearance rotation is counterclockwise; viewport/CSS is clockwise.
@@ -2337,7 +5191,16 @@ export class TextEditor extends Component {
     const color = widget?.color ?? field.color;
     const size = widget?.fontSize ?? field.fontSize;
     input.style.color = cssColor(color);
-    input.style.caretColor = cssColor(color);
+    // The caret follows the text colour unless that would be hard to see (white or pale
+    // text on the page or the field's own background), then it is dark or light instead.
+    const behind = widget?.appearance?.backgroundColor ?? [1, 1, 1];
+    const luminance = (c: PdfColor) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    input.style.caretColor =
+      Math.abs(luminance(color) - luminance(behind)) >= 0.35
+        ? cssColor(color)
+        : luminance(behind) > 0.5
+          ? '#161616'
+          : '#ffffff';
     input.style.fontSize = `${size * entry.page.viewport.scale}px`;
     input.style.textAlign = field.alignment ?? 'left';
     const appearance = widget?.appearance;
@@ -2404,8 +5267,15 @@ export class TextEditor extends Component {
       if ((event as InputEvent).isComposing) {
         return;
       }
+      // Bullets pasted from Word/PDFs arrive as special-font symbols; replace them in place.
+      const normalized = normalizeSymbols(input.value);
+      if (normalized !== input.value) {
+        const { selectionStart, selectionEnd } = input;
+        input.value = normalized;
+        input.setSelectionRange(selectionStart, selectionEnd);
+      }
       try {
-        this.session!.setValue(field.name, input.value);
+        this.session!.setValue(field.name, input.value, this.listEditing);
         this.growField(entry, control);
         this.scheduleSave();
       } catch (error) {
@@ -2439,6 +5309,17 @@ export class TextEditor extends Component {
         this.scheduleSave();
       }
     });
+    if (input instanceof doc.defaultView!.HTMLTextAreaElement) {
+      input.addEventListener('keydown', (event) => this.listKey(event, input, field.name));
+      input.addEventListener('focus', () => {
+        this.listInput = { input, name: field.name };
+        this.updateStatus();
+      });
+      // Focus leaves after the editor's pointerdown handling; recheck the list buttons then.
+      input.addEventListener('blur', () =>
+        doc.defaultView!.setTimeout(() => this.updateStatus(), 0),
+      );
+    }
     input.addEventListener('keydown', (event) => {
       const key = event as KeyboardEvent;
       // Keep Obsidian's note editor from handling typing inside the PDF.
@@ -2462,6 +5343,33 @@ export class TextEditor extends Component {
   }
 
   /** Measure editor wrapping with PDF glyph advances, previewing spacing without committing geometry. */
+  private measureArea(doc: Document): HTMLTextAreaElement {
+    if (this.measure?.ownerDocument === doc && this.measure.isConnected) {
+      return this.measure;
+    }
+    this.measure?.parentElement?.remove();
+    const host = doc.createElement('div');
+    host.setAttribute('aria-hidden', 'true');
+    Object.assign(host.style, {
+      position: 'fixed',
+      left: '-10000px',
+      top: '0',
+      width: '4000px',
+      height: '4000px',
+      overflow: 'hidden',
+      visibility: 'hidden',
+      pointerEvents: 'none',
+      contain: 'strict',
+    });
+    const measure = doc.createElement('textarea');
+    measure.tabIndex = -1;
+    Object.assign(measure.style, { position: 'absolute', left: '0', top: '0' });
+    host.append(measure);
+    doc.body.append(host);
+    this.register(() => host.remove());
+    return (this.measure = measure);
+  }
+
   private growField(entry: PageLayer, control: FieldControl, preview = false): void {
     let field = this.session?.snapshot.fields.find(
       (field) => field.name === control.input.dataset.pdfField,
@@ -2483,15 +5391,12 @@ export class TextEditor extends Component {
     const doc = control.input.ownerDocument;
     const style = doc.defaultView!.getComputedStyle(control.input);
     // Measure a separate textarea so fitting never disturbs the real caret,
-    // scroll position, composition or native text undo history.
-    const measure = doc.createElement('textarea');
+    // scroll position, composition or native text undo history. It is kept in an
+    // isolated (contained) host: adding a fresh element to the document on every
+    // keystroke forced Obsidian to lay out the whole window.
+    const measure = this.measureArea(doc);
     measure.value = control.input.value;
     Object.assign(measure.style, {
-      position: 'fixed',
-      left: '-10000px',
-      top: '0',
-      visibility: 'hidden',
-      pointerEvents: 'none',
       width: style.width,
       height: '0',
       minHeight: '0',
@@ -2512,15 +5417,12 @@ export class TextEditor extends Component {
       overflow: 'hidden',
       margin: '0',
     });
-    measure.tabIndex = -1;
-    measure.setAttribute('aria-hidden', 'true');
-    doc.body.append(measure);
     const height = Math.max(
       measure.scrollHeight + 1,
       (field.fontSize * (field.lineSpacing ?? 1.2) + 2) * entry.page.viewport.scale,
     );
     const widthOverflow = measure.scrollWidth > measure.clientWidth + 1;
-    measure.remove();
+    measure.value = '';
     const viewport = entry.page.viewport;
     const angle = (((viewport.rotation - widget.rotation) % 360) + 360) % 360;
     // scrollHeight is rounded to screen pixels; count whole rows before
@@ -3076,13 +5978,20 @@ export class TextEditor extends Component {
         .then(() => this.session?.saveWhenIdle())
         .catch(() => {});
     }
+    for (const url of this.imageUrls.values()) {
+      this.native.element.ownerDocument.defaultView?.URL.revokeObjectURL(url);
+    }
+    this.imageUrls.clear();
     for (const entry of this.layers.values()) {
       entry.cancelPlacement?.();
+      entry.shapes?.dispose();
+      entry.images?.dispose();
       this.removeChild(entry.ink);
       for (const control of entry.controls.values()) {
         control.dispose?.();
       }
       entry.layer.remove();
+      entry.highlights?.remove();
     }
     this.layers.clear();
     this.toolbar.remove();

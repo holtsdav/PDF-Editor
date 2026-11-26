@@ -60,6 +60,7 @@ const built = await build({
     class ValueComponent {
       setValue(value) { this.value = value; return this; }
       setLimits(min, max, step) { this.limits = [min, max, step]; return this; }
+      setDynamicTooltip() { return this; }
       onChange(fn) { this.change = fn; return this; }
     }
     export class Setting {
@@ -165,13 +166,13 @@ test('rendered settings read current preferences and save through the shared sto
   const f = fixture();
   try {
     f.tab.update();
-    const offset = f.row('PDF toolbar top offset').slider!;
+    const offset = f.row('Toolbar top offset').slider!;
     const pages = f.row('Automatic detection page limit').slider!;
     assert.deepEqual(offset.limits, [0, 160, 1]);
     assert.equal(offset.value, 48);
     assert.deepEqual(pages.limits, [1, 300, 1]);
     assert.equal(pages.value, 30);
-    assert.equal(f.row('Floating PDF toolbar').toggle!.value, true);
+    assert.equal(f.row('Floating toolbar').toggle!.value, true);
     await offset.change(96);
     await pages.change(42);
     await f.row('Detect answer lines on PDF open').toggle!.change(true);
@@ -181,7 +182,7 @@ test('rendered settings read current preferences and save through the shared sto
     assert.equal(f.sessions.preferences.autoDetectLines, true);
     assert.equal(f.sessions.preferences.penWidth, 6);
     f.tab.update();
-    assert.equal(f.row('PDF toolbar top offset').slider!.value, 96);
+    assert.equal(f.row('Toolbar top offset').slider!.value, 96);
     await flush();
     assert.match(f.row('Backup folder').descEl.textContent!, /2.0 KiB used · 2 PDFs backed up/);
   } finally {
@@ -399,4 +400,10 @@ test('persisted colors require three finite numeric components and are copied', 
   const loaded = loadToolPreferences({ textColor: color });
   color[0] = 1;
   assert.deepEqual(loaded.textColor, [0, 0.5, 1]);
+});
+
+test('PDFs keep the native viewer by default and the editor default persists when switched on', () => {
+  assert.equal(loadToolPreferences(null).openInEditor, false);
+  assert.equal(loadToolPreferences({ openInEditor: true }).openInEditor, true);
+  assert.equal(loadToolPreferences({ openInEditor: 'yes' }).openInEditor, false);
 });

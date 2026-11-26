@@ -11,6 +11,7 @@ import type { NativePage, NativePdf, EditorSurface } from '../compat/native-pdf'
 import type { TextSession } from '../pdf/text-session';
 import type { VaultSessions } from '../pdf/vault-sessions';
 import { TextEditor } from './text-editor';
+import type { EditorAction } from './text-editor';
 import { measureTextWords } from './text-geometry';
 import type { TextWord } from '../pdf/marker-text';
 import { renamedPdfPath } from '../pdf/file-name';
@@ -50,6 +51,11 @@ const FLOAT_EXIT_MS = 110;
 const FLOAT_SCROLL_BUFFER = 6;
 
 /** Owns the visible page lifecycle. Native reloads never replace this surface. */
+/** Stack width that allows anchored zooming beyond page edges, or undefined to centre pages. */
+export function zoomPanWidth(contentWidth: number, viewWidth: number): number | undefined {
+  return contentWidth > viewWidth ? contentWidth + 2 * viewWidth : undefined;
+}
+
 export class PdfSurface extends Component {
   private native: NativePdf;
   private sessions: VaultSessions;
@@ -104,6 +110,8 @@ export class PdfSurface extends Component {
   private floatingFrame?: number;
   private toolbarSpacer: HTMLElement;
   private floatingHost?: HTMLElement;
+  /** The last pointer press was inside this viewer (keyboard page navigation target). */
+  private pointerInside = false;
   private floatingExitTimer?: number;
 
   constructor(
@@ -334,6 +342,21 @@ export class PdfSurface extends Component {
       },
       true,
     );
+    // Left/Right turn whole pages. Bubble phase: object nudging and typing handle the key first.
+    this.registerDomEvent(
+      doc,
+      'pointerdown',
+      (event) => {
+        const target = event.target;
+        this.pointerInside =
+          target instanceof doc.defaultView!.Node &&
+          (this.root.contains(target) || !!this.floatingHost?.contains(target));
+      },
+      true,
+    );
+    this.registerDomEvent(doc, 'keydown', (event) => {
+      this.pageKey(event);
+    });
     const resize = new doc.defaultView!.ResizeObserver(() => {
       this.layout();
       this.queueFloatingToolbar();
@@ -344,6 +367,19 @@ export class PdfSurface extends Component {
     this.queueFloatingToolbar();
     void this.open().catch((error) => this.fail(error));
   }
+  /** Whether this surface sits inside the given element (the active leaf). */
+  isWithin(element: Element): boolean {
+    return element.contains(this.root);
+  }
+
+  hasFocus(): boolean {
+    return this.root.contains(this.root.ownerDocument.activeElement);
+  }
+
+  runAction(action: EditorAction, checking: boolean): boolean {
+    return this.editor?.runAction(action, checking) ?? false;
+  }
+
   get file(): TFile {
     return this.native.file;
   }
@@ -470,7 +506,7 @@ export class PdfSurface extends Component {
     if (this.autoDetectOnOpen && this.sessions.preferences.autoDetectLines) {
       const limit = this.sessions.preferences.autoDetectPageLimit;
       if (this.entries.length > limit) {
-        this.message.textContent = `Automatic answer-line detection skipped: ${this.entries.length} pages exceeds the ${limit}-page limit. Use the scan button beside Add text box to scan up to ${MAX_AUTO_DETECT_PAGES} pages at a time.`;
+        this.message.textContent = `Automatic answer-line detection skipped: ${this.entries.length} pages exceeds the ${limit}-page limit. Use the scan button beside the Text box tool to scan up to ${MAX_AUTO_DETECT_PAGES} pages at a time.`;
       } else {
         await this.detectLines();
       }
@@ -624,13 +660,24 @@ export class PdfSurface extends Component {
     if (this.scale === 'width') {
       this.panSpace = false;
     }
+    // Sideways room for anchored zooming only while pages are wider than the view;
+    // narrower pages stay centred instead of drifting into one side of the margin.
+    const panWidth = this.panSpace
+      ? zoomPanWidth(
+          Math.max(...this.entries.map((entry) => entry.native.viewport.width + 32)),
+          this.scroller.clientWidth,
+        )
+      : undefined;
+    if (panWidth) {
+      this.stack.style.minWidth = `${panWidth}px`;
+    } else {
+      this.stack.style.removeProperty('min-width');
+    }
     if (this.panSpace) {
-      // Room around the canvas lets a smaller-than-viewport page retain the pointer anchor.
-      this.stack.style.minWidth = `${Math.max(this.scroller.clientWidth, ...this.entries.map((entry) => entry.native.viewport.width + 32)) + 2 * this.scroller.clientWidth}px`;
+      // Room above and below lets a page shorter than the view keep the pointer anchor.
       this.stack.style.paddingTop =
         this.stack.style.paddingBottom = `${16 + this.scroller.clientHeight}px`;
     } else {
-      this.stack.style.removeProperty('min-width');
       this.stack.style.removeProperty('padding-top');
       this.stack.style.removeProperty('padding-bottom');
     }
@@ -782,17 +829,20 @@ export class PdfSurface extends Component {
     }
     this.floatingHost.classList.add('is-visible');
   }
+  /** Zoom buttons: zoom about the centre of the view, so what is in the middle stays there. */
   private zoom(delta: number): void {
-    this.scale = Math.max(
-      0.35,
-      Math.min(
-        3,
-        (typeof this.scale === 'number'
-          ? this.scale
-          : (this.entries[this.currentPage - 1]?.native.viewport.scale ?? 1)) + delta,
-      ),
-    );
-    this.layout();
+    const current =
+      typeof this.scale === 'number'
+        ? this.scale
+        : (this.entries[this.currentPage - 1]?.native.viewport.scale ?? 1);
+    const next = Math.max(0.35, Math.min(3, current + delta));
+    const box = this.scroller.getBoundingClientRect();
+    if (!box.width || !box.height || !current) {
+      this.scale = next;
+      this.layout();
+      return;
+    }
+    this.zoomAt(next / current, box.left + box.width / 2, box.top + box.height / 2);
   }
   /** Zoom within the existing bounds and keep the pointer's PDF point fixed using scrollable margins. */
   private zoomAt(factor: number, x: number, y: number): void {
@@ -1469,6 +1519,51 @@ export class PdfSurface extends Component {
         : await this.pdf!.getPageIndex(ref as { num: number; gen: number });
     this.go(number + 1);
   }
+  /**
+   * Left/Right arrow keys move one whole page. Keys used for typing, for menus and sliders,
+   * or already handled (moving a selected box or drawing) are left alone, as are modified
+   * keys such as Alt+Left (back). An embedded PDF reacts only after a click inside it.
+   */
+  pageKey(event: KeyboardEvent): boolean {
+    if (
+      event.defaultPrevented ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.shiftKey ||
+      (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') ||
+      !this.entries.length
+    ) {
+      return false;
+    }
+    const doc = this.root.ownerDocument;
+    const target = event.target;
+    const element = target instanceof doc.defaultView!.Element ? target : undefined;
+    const inside =
+      !!element && (this.root.contains(element) || !!this.floatingHost?.contains(element));
+    const unfocused = target === doc.body || target === doc.documentElement;
+    const embedded = !!this.native.element.closest('.pdf-embed');
+    const activeLeaf = !embedded && !!this.root.closest('.workspace-leaf.mod-active');
+    if (!inside && !(unfocused && (this.pointerInside || activeLeaf))) {
+      return false;
+    }
+    if (
+      element?.closest(
+        'input, textarea, select, [contenteditable="true"], [contenteditable=""], [role="slider"], [role="menu"], [role="dialog"]',
+      )
+    ) {
+      return false;
+    }
+    event.preventDefault();
+    this.go(this.currentPage + (event.key === 'ArrowRight' ? 1 : -1));
+    return true;
+  }
+
+  /** Scroll to a page (used by the highlights sidebar). */
+  goToPage(number: number): void {
+    this.go(number);
+  }
+
   private go(number: number): void {
     const index = Math.max(1, Math.min(this.entries.length, Math.round(number) || 1));
     const entry = this.entries[index - 1];

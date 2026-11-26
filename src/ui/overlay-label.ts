@@ -1,9 +1,15 @@
 import { setTooltip } from 'obsidian';
 
 const labels = new WeakMap<HTMLElement, HTMLSpanElement>();
+const texts = new WeakMap<HTMLElement, string>();
 
 /** Keep PDF overlay controls named for assistive technology without Obsidian's aria-label hover tooltip. */
 export function labelOverlay(element: HTMLElement, text: string): void {
+  // Refreshes relabel every control; rewriting an unchanged label makes Chrome repaint.
+  if (texts.get(element) === text && labels.get(element)?.isConnected) {
+    return;
+  }
+  texts.set(element, text);
   let label = labels.get(element);
   if (!label) {
     label = element.ownerDocument.createElement('span');

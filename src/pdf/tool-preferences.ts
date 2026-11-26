@@ -24,6 +24,12 @@ export interface ToolPreferences {
   snapToText: boolean;
   autoDetectLines: boolean;
   flowAnswerLines: boolean;
+  /** Replace the native viewer for every PDF. Off keeps Obsidian's viewer (and plugins such as PDF++) until editing is switched on. */
+  openInEditor: boolean;
+  /** New highlights' strength in percent (saved as the annotation's opacity). */
+  highlightOpacity: number;
+  /** Pause after the last edit before saving automatically, in milliseconds. */
+  autosaveDelay: number;
 }
 /** Normalize persisted tool defaults, replacing malformed or out-of-range values with supported defaults. */
 export function loadToolPreferences(value: unknown): ToolPreferences {
@@ -49,6 +55,9 @@ export function loadToolPreferences(value: unknown): ToolPreferences {
     snapToText: false,
     autoDetectLines: false,
     flowAnswerLines: true,
+    openInEditor: false,
+    highlightOpacity: 45,
+    autosaveDelay: 900,
   };
   if (!value || typeof value !== 'object') {
     return result;
@@ -122,6 +131,15 @@ export function loadToolPreferences(value: unknown): ToolPreferences {
   ) {
     result.autoDetectPageLimit = pageLimit;
   }
+  for (const [key, min, max] of [
+    ['highlightOpacity', 20, 80],
+    ['autosaveDelay', 300, 5000],
+  ] as const) {
+    const number = saved[key];
+    if (typeof number === 'number' && Number.isInteger(number) && number >= min && number <= max) {
+      result[key] = number;
+    }
+  }
   if (saved.textFamily === 'sans' || saved.textFamily === 'serif' || saved.textFamily === 'mono') {
     result.textFamily = saved.textFamily;
   }
@@ -135,6 +153,7 @@ export function loadToolPreferences(value: unknown): ToolPreferences {
     'snapToText',
     'autoDetectLines',
     'flowAnswerLines',
+    'openInEditor',
   ] as const) {
     if (typeof saved[key] === 'boolean') {
       result[key] = saved[key];

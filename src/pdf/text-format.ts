@@ -74,3 +74,32 @@ export function defaultColor(appearance: string): PdfColor {
           : ([0.05, 0.05, 0.05] as PdfColor);
   return validColor(color) ? color : [0.05, 0.05, 0.05];
 }
+
+/**
+ * Word and many PDFs draw list bullets and dashes with Symbol/Wingdings fonts, whose
+ * characters arrive as Private Use code points (U+F0xx) when text is copied. Map the common
+ * ones to characters every bundled font can draw; one code unit each, so carets stay put.
+ */
+const SYMBOL_FONT_CHARACTERS: Record<string, string> = {
+  '': ' ', // space
+  '': '–', // Symbol minus, used as a dash bullet
+  '': '•', // Symbol bullet
+  '': '•', // Wingdings small square
+  '': '•', // Wingdings square
+  '': '•', // Wingdings filled circle
+  '': '•', // Wingdings black square
+  '': '•', // Wingdings shadowed square
+  '': '•', // Wingdings diamond cross
+  '': '‣', // Wingdings arrowhead
+  '': '‣', // Wingdings arrow
+  '': '‣', // Wingdings arrow
+};
+const SYMBOL_PATTERN = new RegExp(`[${Object.keys(SYMBOL_FONT_CHARACTERS).join('')}]`, 'g');
+
+export function normalizeSymbols(text: string): string {
+  return text.replace(SYMBOL_PATTERN, (character) => SYMBOL_FONT_CHARACTERS[character]!);
+}
+
+export function isPrivateUse(code: number): boolean {
+  return code >= 0xe000 && code <= 0xf8ff;
+}
