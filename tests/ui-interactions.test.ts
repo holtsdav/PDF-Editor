@@ -2206,6 +2206,10 @@ test('selected PDF text is highlighted, commented and saved; notes are placed wi
     const popover = f.doc.querySelector<HTMLElement>('.pfs-mark-popover')!;
     assert.ok(popover, 'comment box opens');
     const textarea = popover.querySelector<HTMLTextAreaElement>('textarea')!;
+    // After focus leaves (e.g. another window), clicking back into the comment must work.
+    textarea.blur();
+    assert.equal(f.pointer(textarea, 'pointerdown', 100, 130).defaultPrevented, false);
+    assert.ok(f.doc.querySelector('.pfs-mark-popover'), 'comment box stays open');
     textarea.value = 'Prüfungsrelevant';
     textarea.dispatchEvent(new f.doc.defaultView!.Event('input', { bubbles: true }));
     popover.querySelector<HTMLButtonElement>('.pfs-mark-done')!.click();
